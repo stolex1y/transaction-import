@@ -17,7 +17,8 @@ serialization without receiving a provider API key.
 
 ## Requirements
 
-- JDK 17 or newer;
+- JDK 17 or 21; JVM bytecode target is 17;
+- JDK 25 is not supported by the configured Kotlin/Gradle toolchain.
 - access to Maven Central for the first dependency download.
 
 ## Build and test
