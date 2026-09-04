@@ -60,6 +60,8 @@ fun main(args: Array<String>) {
         error.println("Request failed: ${message.replace(apiKey, "[REDACTED]")}")
         1
     } finally {
+        output.flush()
+        error.flush()
         httpClient.close()
     }
 

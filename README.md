@@ -38,7 +38,9 @@ read -r -s -p 'Provider API key: ' DEEPSEEK_API_KEY
 printf '\n'
 export DEEPSEEK_API_KEY
 
-./gradlew :cli:run --args=parse < examples/statement.txt
+./gradlew :cli:installDist
+./cli/build/install/transaction-import/bin/transaction-import parse \
+  < examples/statement.txt
 
 unset DEEPSEEK_API_KEY
 ```

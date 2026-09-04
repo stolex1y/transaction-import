@@ -1,5 +1,6 @@
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.gradle.api.tasks.JavaExec
 import org.gradle.api.tasks.compile.JavaCompile
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     kotlin("jvm")
@@ -12,8 +13,8 @@ kotlin {
         jvmTarget.set(JvmTarget.JVM_17)
     }
 }
-
 application {
+    applicationName = "transaction-import"
     mainClass.set("io.github.stolex1y.transactionimport.cli.MainKt")
 }
 
@@ -25,6 +26,7 @@ dependencies {
     implementation(libs.ktor.client.cio)
     implementation(libs.ktor.client.content.negotiation)
     implementation(libs.ktor.serialization.kotlinx.json)
+    runtimeOnly(libs.slf4j.nop)
 
     testImplementation(kotlin("test"))
     testImplementation(libs.ktor.client.mock)
@@ -36,4 +38,8 @@ tasks.test {
 
 tasks.withType<JavaCompile>().configureEach {
     options.release.set(17)
+}
+
+tasks.named<JavaExec>("run") {
+    standardInput = System.`in`
 }
