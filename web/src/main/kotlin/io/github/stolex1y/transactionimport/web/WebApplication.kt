@@ -40,6 +40,7 @@ data class ExtractResponse(
     val usage: Usage?,
     val model: String,
     val reasoning: String,
+    @SerialName("processing_time_ms") val processingTimeMs: Long,
 )
 
 @Serializable
@@ -99,10 +100,12 @@ fun Application.module(service: TransactionImportService) {
                 "Модель не разрешена: $model"
             }
             val reasoning = parseReasoning(request.reasoning)
+            val startedAt = System.nanoTime()
             val result = service.extract(
                 statement = request.statement,
                 options = ExtractionOptions(model = model, reasoning = reasoning),
             )
+            val processingTimeMs = (System.nanoTime() - startedAt) / 1_000_000
             call.respond(
                 ExtractResponse(
                     text = result.text,
@@ -110,6 +113,7 @@ fun Application.module(service: TransactionImportService) {
                     usage = result.usage,
                     model = model,
                     reasoning = request.reasoning.trim().lowercase(),
+                    processingTimeMs = processingTimeMs,
                 ),
             )
         }

@@ -8,7 +8,7 @@
 +85 000,00 RUB
 
 2026-02-05T16:20Z  ONLINE SERVICE TEST
-Card purchase — USD 14.99
+Card purchase — RUB 1 499.00
 
 06.02.2026 18:30  Перевод между своими счетами TEST
 Счёт-источник: накопления DEMO

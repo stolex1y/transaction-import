@@ -45,7 +45,9 @@ class WebApplicationTest {
         }
 
         assertEquals(HttpStatusCode.OK, response.status)
-        assertTrue(response.bodyAsText().contains("parsed transaction"))
+        val responseBody = response.bodyAsText()
+        assertTrue(responseBody.contains("parsed transaction"))
+        assertTrue(responseBody.contains("\"processing_time_ms\":"))
         assertEquals("deepseek-v4-pro", gateway.request?.model)
         assertEquals("enabled", gateway.request?.thinking?.type)
         assertEquals("high", gateway.request?.reasoningEffort)

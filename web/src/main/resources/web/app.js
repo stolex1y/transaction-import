@@ -6,6 +6,7 @@ const submitButton = document.querySelector("#submit-button");
 const status = document.querySelector("#status");
 const currentResult = document.querySelector("#current-result");
 const currentSettings = document.querySelector("#current-settings");
+const currentStats = document.querySelector("#current-stats");
 const answer = document.querySelector("#answer");
 const metadata = document.querySelector("#metadata");
 const historyElement = document.querySelector("#history");
@@ -40,6 +41,7 @@ form.addEventListener("submit", async (event) => {
 
         const run = {
             ...payload,
+            statement: text,
             createdAt: new Date().toLocaleTimeString("ru-RU"),
         };
         history.unshift(run);
@@ -57,12 +59,14 @@ form.addEventListener("submit", async (event) => {
 function renderCurrent(run) {
     currentResult.hidden = false;
     currentSettings.textContent = `${run.model} · ${reasoningLabel(run.reasoning)}`;
+    renderRunStats(currentStats, run);
     answer.textContent = run.text;
     metadata.textContent = JSON.stringify({
         model: run.model,
         reasoning: run.reasoning,
         finish_reason: run.finish_reason,
         usage: run.usage,
+        processing_time_ms: run.processing_time_ms,
     }, null, 2);
 }
 
@@ -77,8 +81,11 @@ function renderHistory() {
     }
 
     history.forEach((run, index) => {
-        const item = document.createElement("article");
+        const item = document.createElement("button");
+        item.type = "button";
         item.className = "history-item";
+        item.setAttribute("aria-label", `Открыть обработку ${history.length - index} от ${run.createdAt}`);
+        item.addEventListener("click", () => restoreRun(run));
 
         const heading = document.createElement("div");
         heading.className = "history-heading";
@@ -89,13 +96,57 @@ function renderHistory() {
         settings.textContent = `${run.model} · ${reasoningLabel(run.reasoning)}`;
         heading.append(settings);
 
+        const stats = document.createElement("div");
+        stats.className = "history-stats";
+        renderRunStats(stats, run);
+
         const result = document.createElement("pre");
         result.className = "history-answer";
         result.textContent = run.text;
 
-        item.append(heading, result);
+        item.append(heading, stats, result);
         historyElement.append(item);
     });
+}
+function renderRunStats(container, run) {
+    container.replaceChildren(
+        createStat(`Токены: ${formatUsage(run.usage)}`),
+        createStat(`Время: ${formatDuration(run.processing_time_ms)}`),
+    );
+}
+
+function createStat(text) {
+    const stat = document.createElement("span");
+    stat.className = "stat";
+    stat.textContent = text;
+    return stat;
+}
+
+function formatUsage(usage) {
+    if (!usage) {
+        return "нет данных";
+    }
+    return `${usage.total_tokens ?? "—"} всего · ${usage.prompt_tokens ?? "—"} вход · ${usage.completion_tokens ?? "—"} выход`;
+}
+
+function formatDuration(milliseconds) {
+    if (!Number.isFinite(milliseconds)) {
+        return "нет данных";
+    }
+    if (milliseconds < 1000) {
+        return `${milliseconds} мс`;
+    }
+    return `${(milliseconds / 1000).toFixed(1).replace(".", ",")} с`;
+}
+
+function restoreRun(run) {
+    statement.value = run.statement;
+    model.value = run.model;
+    reasoning.value = run.reasoning;
+    renderCurrent(run);
+    status.className = "status";
+    status.textContent = "Предыдущая обработка восстановлена.";
+    window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 function reasoningLabel(value) {
