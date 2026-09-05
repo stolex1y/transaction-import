@@ -108,6 +108,8 @@ unset DEEPSEEK_API_KEY
 - CLI по умолчанию использует `deepseek-v4-flash`;
 - web UI предлагает `deepseek-v4-flash` и `deepseek-v4-pro`;
 - reasoning: `disabled`, `low`, `high` или `max`;
+- при включённом reasoning `reasoning_effort` отправляется отдельным
+  top-level полем, а не внутри `thinking`;
 - streaming: отключён.
 
 ## Границы безопасности

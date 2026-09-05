@@ -17,6 +17,8 @@ import io.ktor.http.headersOf
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -68,7 +70,8 @@ class DeepSeekGatewayTest {
                 ChatCompletionRequest(
                     model = "deepseek-v4-pro",
                     messages = listOf(RequestMessage("user", "statement")),
-                    thinking = ThinkingOptions("enabled", "high"),
+                    thinking = ThinkingOptions("enabled"),
+                    reasoningEffort = "high",
                     stream = false,
                 ),
             )
@@ -80,8 +83,10 @@ class DeepSeekGatewayTest {
             assertEquals("Bearer test-key", request.headers[HttpHeaders.Authorization])
             assertTrue(body.contains("\"deepseek-v4-pro\""))
             assertTrue(body.contains("\"stream\":false"))
-            assertTrue(body.contains("\"reasoning_effort\":\"high\""))
-            assertTrue(body.contains("\"enabled\""))
+            val bodyJson = Json.parseToJsonElement(body).jsonObject
+            assertEquals("enabled", bodyJson.getValue("thinking").jsonObject.getValue("type").jsonPrimitive.content)
+            assertEquals("high", bodyJson.getValue("reasoning_effort").jsonPrimitive.content)
+            assertTrue(!bodyJson.getValue("thinking").jsonObject.containsKey("reasoning_effort"))
             assertTrue(!body.contains("test-key"))
             assertEquals("parsed", response.choices.single().message.content)
             assertEquals("stop", response.choices.single().finishReason)

@@ -48,7 +48,7 @@ class WebApplicationTest {
         assertTrue(response.bodyAsText().contains("parsed transaction"))
         assertEquals("deepseek-v4-pro", gateway.request?.model)
         assertEquals("enabled", gateway.request?.thinking?.type)
-        assertEquals("high", gateway.request?.thinking?.reasoningEffort)
+        assertEquals("high", gateway.request?.reasoningEffort)
     }
 
     @Test

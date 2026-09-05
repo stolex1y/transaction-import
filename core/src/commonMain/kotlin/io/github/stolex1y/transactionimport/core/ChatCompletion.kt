@@ -12,6 +12,7 @@ data class ChatCompletionRequest(
     val model: String,
     val messages: List<RequestMessage>,
     val thinking: ThinkingOptions,
+    @SerialName("reasoning_effort") val reasoningEffort: String? = null,
     val stream: Boolean = false,
 )
 
@@ -24,7 +25,6 @@ data class RequestMessage(
 @Serializable
 data class ThinkingOptions(
     val type: String,
-    @SerialName("reasoning_effort") val reasoningEffort: String? = null,
 )
 
 enum class ReasoningLevel(
@@ -42,7 +42,7 @@ data class ExtractionOptions(
     val reasoning: ReasoningLevel = ReasoningLevel.DISABLED,
 ) {
     fun thinkingOptions(): ThinkingOptions =
-        ThinkingOptions(type = reasoning.thinkingType, reasoningEffort = reasoning.effort)
+        ThinkingOptions(type = reasoning.thinkingType)
 }
 
 @Serializable

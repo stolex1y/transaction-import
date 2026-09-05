@@ -31,6 +31,7 @@ class TransactionImportService(
                     ),
                 ),
                 thinking = options.thinkingOptions(),
+                reasoningEffort = options.reasoning.effort,
                 stream = false,
             ),
         )

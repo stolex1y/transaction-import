@@ -29,7 +29,7 @@ class TransactionImportServiceTest {
         assertEquals("deepseek-v4-flash", gateway.request?.model)
         assertEquals(false, gateway.request?.stream)
         assertEquals("disabled", gateway.request?.thinking?.type)
-        assertEquals(null, gateway.request?.thinking?.reasoningEffort)
+        assertEquals(null, gateway.request?.reasoningEffort)
         assertEquals(listOf("system", "user"), gateway.request?.messages?.map { it.role })
         assertTrue(gateway.request?.messages?.last()?.content?.contains("synthetic statement") == true)
     }
@@ -54,7 +54,7 @@ class TransactionImportServiceTest {
 
         assertEquals("deepseek-v4-pro", gateway.request?.model)
         assertEquals("enabled", gateway.request?.thinking?.type)
-        assertEquals("high", gateway.request?.thinking?.reasoningEffort)
+        assertEquals("high", gateway.request?.reasoningEffort)
     }
 
     @Test
