@@ -29,8 +29,32 @@ class TransactionImportServiceTest {
         assertEquals("deepseek-v4-flash", gateway.request?.model)
         assertEquals(false, gateway.request?.stream)
         assertEquals("disabled", gateway.request?.thinking?.type)
+        assertEquals(null, gateway.request?.thinking?.reasoningEffort)
         assertEquals(listOf("system", "user"), gateway.request?.messages?.map { it.role })
         assertTrue(gateway.request?.messages?.last()?.content?.contains("synthetic statement") == true)
+    }
+
+    @Test
+    fun sendsSelectedModelAndReasoningEffort() = runBlocking {
+        val gateway = RecordingGateway(
+            ChatCompletionResponse(
+                choices = listOf(
+                    ChatChoice(message = ResponseMessage(content = "result")),
+                ),
+            ),
+        )
+
+        TransactionImportService(gateway).extract(
+            statement = "statement",
+            options = ExtractionOptions(
+                model = "deepseek-v4-pro",
+                reasoning = ReasoningLevel.HIGH,
+            ),
+        )
+
+        assertEquals("deepseek-v4-pro", gateway.request?.model)
+        assertEquals("enabled", gateway.request?.thinking?.type)
+        assertEquals("high", gateway.request?.thinking?.reasoningEffort)
     }
 
     @Test

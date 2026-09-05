@@ -24,7 +24,26 @@ data class RequestMessage(
 @Serializable
 data class ThinkingOptions(
     val type: String,
+    @SerialName("reasoning_effort") val reasoningEffort: String? = null,
 )
+
+enum class ReasoningLevel(
+    val thinkingType: String,
+    val effort: String?,
+) {
+    DISABLED(thinkingType = "disabled", effort = null),
+    LOW(thinkingType = "enabled", effort = "low"),
+    HIGH(thinkingType = "enabled", effort = "high"),
+    MAX(thinkingType = "enabled", effort = "max"),
+}
+
+data class ExtractionOptions(
+    val model: String = DEFAULT_MODEL,
+    val reasoning: ReasoningLevel = ReasoningLevel.DISABLED,
+) {
+    fun thinkingOptions(): ThinkingOptions =
+        ThinkingOptions(type = reasoning.thinkingType, reasoningEffort = reasoning.effort)
+}
 
 @Serializable
 data class ChatCompletionResponse(

@@ -1,6 +1,7 @@
 package io.github.stolex1y.transactionimport.cli
 
 import io.github.stolex1y.transactionimport.core.TransactionImportService
+import io.github.stolex1y.transactionimport.transport.DeepSeekGateway
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
@@ -40,6 +41,7 @@ fun main(args: Array<String>) {
                 Json {
                     ignoreUnknownKeys = true
                     encodeDefaults = true
+                    explicitNulls = false
                 },
             )
         }
@@ -48,7 +50,7 @@ fun main(args: Array<String>) {
     val exitCode = try {
         val service = TransactionImportService(DeepSeekGateway(httpClient, apiKey))
         runBlocking {
-            CliRunner(service::extract).run(
+            CliRunner { statement -> service.extract(statement) }.run(
                 args = args.toList(),
                 input = System.`in`.bufferedReader(),
                 output = output,

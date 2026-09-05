@@ -1,4 +1,4 @@
-package io.github.stolex1y.transactionimport.cli
+package io.github.stolex1y.transactionimport.transport
 
 import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.RequestMessage
@@ -19,7 +19,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DeepSeekGatewayTest {
@@ -54,6 +53,7 @@ class DeepSeekGatewayTest {
                     Json {
                         ignoreUnknownKeys = true
                         encodeDefaults = true
+                        explicitNulls = false
                     },
                 )
             }
@@ -66,9 +66,9 @@ class DeepSeekGatewayTest {
                 baseUrl = "https://api.deepseek.com/",
             ).complete(
                 ChatCompletionRequest(
-                    model = "deepseek-v4-flash",
+                    model = "deepseek-v4-pro",
                     messages = listOf(RequestMessage("user", "statement")),
-                    thinking = ThinkingOptions("disabled"),
+                    thinking = ThinkingOptions("enabled", "high"),
                     stream = false,
                 ),
             )
@@ -78,10 +78,11 @@ class DeepSeekGatewayTest {
             assertEquals(HttpMethod.Post, request.method)
             assertEquals("https://api.deepseek.com/chat/completions", request.url.toString())
             assertEquals("Bearer test-key", request.headers[HttpHeaders.Authorization])
-            assertTrue(body.contains("\"deepseek-v4-flash\""))
+            assertTrue(body.contains("\"deepseek-v4-pro\""))
             assertTrue(body.contains("\"stream\":false"))
-            assertTrue(body.contains("\"disabled\""))
-            assertFalse(body.contains("test-key"))
+            assertTrue(body.contains("\"reasoning_effort\":\"high\""))
+            assertTrue(body.contains("\"enabled\""))
+            assertTrue(!body.contains("test-key"))
             assertEquals("parsed", response.choices.single().message.content)
             assertEquals("stop", response.choices.single().finishReason)
             assertEquals(5, response.usage?.totalTokens)

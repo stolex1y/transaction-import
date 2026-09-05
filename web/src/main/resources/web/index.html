@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Transaction Import — демонстрация</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+<main class="page-shell">
+    <header class="hero">
+        <p class="eyebrow">Локальная демонстрация</p>
+        <h1>Импорт операций</h1>
+        <p class="subtitle">
+            Вставьте синтетическую банковскую выписку, выберите модель и режим
+            reasoning, затем сравните результаты запусков в истории страницы.
+        </p>
+    </header>
+
+    <section class="panel">
+        <form id="extract-form">
+            <label for="statement">Текст выписки</label>
+            <textarea id="statement" name="statement" rows="16" required
+                      placeholder="Вставьте содержимое demo-statement-hard.txt или свой обезличенный текст"></textarea>
+
+            <div class="controls">
+                <div class="control">
+                    <label for="model">Модель</label>
+                    <select id="model" name="model">
+                        <option value="deepseek-v4-flash">deepseek-v4-flash</option>
+                        <option value="deepseek-v4-pro">deepseek-v4-pro</option>
+                    </select>
+                </div>
+                <div class="control">
+                    <label for="reasoning">Reasoning</label>
+                    <select id="reasoning" name="reasoning">
+                        <option value="disabled">Выключено</option>
+                        <option value="low">Низкое</option>
+                        <option value="high" selected>Высокое</option>
+                        <option value="max">Максимальное</option>
+                    </select>
+                </div>
+            </div>
+
+            <button id="submit-button" type="submit">Извлечь операции</button>
+            <p id="status" class="status" role="status" aria-live="polite"></p>
+        </form>
+    </section>
+
+    <section id="current-result" class="panel result-panel" hidden>
+        <div class="section-heading">
+            <h2>Последний результат</h2>
+            <span id="current-settings" class="badge"></span>
+        </div>
+        <pre id="answer" class="answer"></pre>
+        <pre id="metadata" class="metadata"></pre>
+    </section>
+
+    <section class="panel">
+        <div class="section-heading">
+            <h2>История запусков</h2>
+            <span class="muted">только до перезагрузки страницы</span>
+        </div>
+        <div id="history" class="history">
+            <p class="muted">Запусков пока нет.</p>
+        </div>
+    </section>
+</main>
+<script src="/assets/app.js" defer></script>
+</body>
+</html>

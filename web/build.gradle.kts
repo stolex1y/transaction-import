@@ -13,9 +13,10 @@ kotlin {
         jvmTarget.set(JvmTarget.JVM_17)
     }
 }
+
 application {
-    applicationName = "transaction-import"
-    mainClass.set("io.github.stolex1y.transactionimport.cli.MainKt")
+    applicationName = "transaction-import-web"
+    mainClass.set("io.github.stolex1y.transactionimport.web.MainKt")
 }
 
 dependencies {
@@ -27,9 +28,14 @@ dependencies {
     implementation(libs.ktor.client.cio)
     implementation(libs.ktor.client.content.negotiation)
     implementation(libs.ktor.serialization.kotlinx.json)
+    implementation(libs.ktor.server.core)
+    implementation(libs.ktor.server.netty)
+    implementation(libs.ktor.server.content.negotiation)
+    implementation(libs.ktor.server.status.pages)
     runtimeOnly(libs.slf4j.nop)
 
     testImplementation(kotlin("test"))
+    testImplementation(libs.ktor.server.test.host)
 }
 
 tasks.test {

@@ -1,14 +1,17 @@
 # Transaction Import
 
-Ядро Kotlin Multiplatform и консольный клиент JVM для извлечения финансовых
-операций из текстовых банковских выписок через совместимый с OpenAI провайдер.
+Ядро Kotlin Multiplatform, консольный клиент JVM и локальный web-клиент для
+извлечения финансовых операций из текстовых банковских выписок через
+совместимый с OpenAI провайдер.
 
 ## Модули
 
 - `core` — платформонезависимые модели, JSON-сериализация, контракт провайдера
   и сервис извлечения текста;
+- `transport` — общий JVM Ktor Client-адаптер DeepSeek для CLI и web-сервера;
 - `cli` — приложение JVM, которое читает одну выписку из `stdin`, вызывает
   провайдера и записывает ответ в `stdout`;
+- `web` — локальный Ktor-сервер и статический русскоязычный интерфейс браузера;
 - `examples` — только синтетические входные данные:
   - `demo-statement.txt` — простой сценарий;
   - `demo-statement-medium-formats.txt` — средний уровень: таблица,
@@ -71,11 +74,40 @@ unset DEEPSEEK_API_KEY
 использованным токенам записываются в `stderr`. CLI не сохраняет вход или
 выходные данные.
 
+## Использование web demo
+
+Собери и запусти локальный сервер:
+
+```bash
+./gradlew :web:installDist
+
+read -r -s -p 'API-ключ провайдера: ' DEEPSEEK_API_KEY
+printf '\n'
+export DEEPSEEK_API_KEY
+
+./web/build/install/transaction-import-web/bin/transaction-import-web
+```
+
+Открой в браузере `http://127.0.0.1:8080`. Вставь содержимое одного из
+файлов `examples/demo-statement*.txt` в `textarea`, выбери модель и уровень
+reasoning, затем нажми «Извлечь операции».
+
+Web-сервер поддерживает `deepseek-v4-flash` и `deepseek-v4-pro`. История
+запусков хранится только в памяти страницы и исчезает после перезагрузки.
+API-ключ остаётся в server-side процессе и не передаётся браузеру.
+
+После демонстрации останови сервер и выполни:
+
+```bash
+unset DEEPSEEK_API_KEY
+```
+
 Текущая конфигурация провайдера:
 
 - base URL: `https://api.deepseek.com`;
-- модель: `deepseek-v4-flash`;
-- thinking mode: отключён;
+- CLI по умолчанию использует `deepseek-v4-flash`;
+- web UI предлагает `deepseek-v4-flash` и `deepseek-v4-pro`;
+- reasoning: `disabled`, `low`, `high` или `max`;
 - streaming: отключён.
 
 ## Границы безопасности

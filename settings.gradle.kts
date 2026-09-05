@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "transaction-import"
-include(":core", ":cli")
+include(":core", ":transport", ":cli", ":web")

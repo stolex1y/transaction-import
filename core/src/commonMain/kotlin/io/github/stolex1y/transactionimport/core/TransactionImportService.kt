@@ -1,7 +1,6 @@
 package io.github.stolex1y.transactionimport.core
 
 const val DEFAULT_MODEL = "deepseek-v4-flash"
-const val THINKING_DISABLED = "disabled"
 
 private const val SYSTEM_PROMPT = """
     Extract financial transactions from a bank statement.
@@ -13,15 +12,17 @@ private const val SYSTEM_PROMPT = """
 
 class TransactionImportService(
     private val gateway: ChatCompletionGateway,
-    private val model: String = DEFAULT_MODEL,
 ) {
-    suspend fun extract(statement: String): ExtractionResult {
+    suspend fun extract(
+        statement: String,
+        options: ExtractionOptions = ExtractionOptions(),
+    ): ExtractionResult {
         val normalizedStatement = statement.trim()
         require(normalizedStatement.isNotEmpty()) { "Statement must not be blank." }
 
         val response = gateway.complete(
             ChatCompletionRequest(
-                model = model,
+                model = options.model,
                 messages = listOf(
                     RequestMessage(role = "system", content = SYSTEM_PROMPT.trimIndent()),
                     RequestMessage(
@@ -29,7 +30,7 @@ class TransactionImportService(
                         content = "Extract transactions only from this statement.\n\n$normalizedStatement",
                     ),
                 ),
-                thinking = ThinkingOptions(type = THINKING_DISABLED),
+                thinking = options.thinkingOptions(),
                 stream = false,
             ),
         )

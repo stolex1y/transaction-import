@@ -1,4 +1,4 @@
-package io.github.stolex1y.transactionimport.cli
+package io.github.stolex1y.transactionimport.transport
 
 import io.github.stolex1y.transactionimport.core.ChatCompletionGateway
 import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
