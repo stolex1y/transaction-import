@@ -15,13 +15,13 @@ form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const text = statement.value.trim();
     if (!text) {
-        showError("Вставьте текст выписки.");
+        showError("Введите текст банковской выписки.");
         return;
     }
 
     setBusy(true);
     status.className = "status";
-    status.textContent = "Выполняется запрос...";
+    status.textContent = "Обрабатываем выписку...";
 
     try {
         const response = await fetch("/api/extract", {
@@ -46,7 +46,7 @@ form.addEventListener("submit", async (event) => {
         renderCurrent(run);
         renderHistory();
         status.className = "status success";
-        status.textContent = "Готово.";
+        status.textContent = "Выписка обработана.";
     } catch (error) {
         showError(error.message);
     } finally {
@@ -71,7 +71,7 @@ function renderHistory() {
     if (history.length === 0) {
         const empty = document.createElement("p");
         empty.className = "muted";
-        empty.textContent = "Запусков пока нет.";
+        empty.textContent = "Обработок пока нет.";
         historyElement.append(empty);
         return;
     }
@@ -82,7 +82,7 @@ function renderHistory() {
 
         const heading = document.createElement("div");
         heading.className = "history-heading";
-        heading.textContent = `Запуск ${history.length - index} · ${run.createdAt}`;
+        heading.textContent = `Обработка ${history.length - index} · ${run.createdAt}`;
 
         const settings = document.createElement("span");
         settings.className = "muted";
@@ -100,16 +100,16 @@ function renderHistory() {
 
 function reasoningLabel(value) {
     return {
-        disabled: "reasoning выключен",
-        low: "reasoning: низкий",
-        high: "reasoning: высокий",
-        max: "reasoning: максимальный",
+        disabled: "анализ: стандартный",
+        low: "анализ: базовый",
+        high: "анализ: подробный",
+        max: "анализ: максимальный",
     }[value] || value;
 }
 
 function setBusy(value) {
     submitButton.disabled = value;
-    submitButton.textContent = value ? "Ожидание ответа..." : "Извлечь операции";
+    submitButton.textContent = value ? "Обрабатываем..." : "Обработать выписку";
 }
 
 function showError(message) {
