@@ -9,9 +9,14 @@
   и сервис извлечения текста;
 - `cli` — приложение JVM, которое читает одну выписку из `stdin`, вызывает
   провайдера и записывает ответ в `stdout`;
-- `examples` — только синтетические входные данные.
-- `examples/demo-statement.txt` — синтетическая выписка для ручной
-  демонстрации CLI.
+- `examples` — только синтетические входные данные:
+  - `demo-statement.txt` — простой сценарий;
+  - `demo-statement-medium-formats.txt` — средний уровень: таблица,
+    перенос строки, комиссия и частичный возврат;
+  - `demo-statement-medium-mixed.txt` — средний уровень: разные форматы дат,
+    две валюты, зарплата и перевод между своими счетами;
+  - `demo-statement-hard.txt` — сложный уровень: шум, сторно, комиссия,
+    переносы, разные валюты и недоверенная строка описания.
 
 `core` не зависит от UI или серверного фреймворка. Kotlin/JVM backend может
 использовать его напрямую, а Android-, iOS- и Desktop-клиенты могут повторно
@@ -46,6 +51,20 @@ export DEEPSEEK_API_KEY
   < examples/demo-statement.txt
 
 unset DEEPSEEK_API_KEY
+```
+
+Для демонстрации средней и высокой сложности укажи другой fixture в той же
+команде:
+
+```bash
+./cli/build/install/transaction-import/bin/transaction-import parse \
+  < examples/demo-statement-medium-formats.txt
+
+./cli/build/install/transaction-import/bin/transaction-import parse \
+  < examples/demo-statement-medium-mixed.txt
+
+./cli/build/install/transaction-import/bin/transaction-import parse \
+  < examples/demo-statement-hard.txt
 ```
 
 Ответ модели записывается в `stdout`. Поля `finish_reason` и сводка по
