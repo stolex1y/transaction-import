@@ -10,6 +10,8 @@
 - `cli` — приложение JVM, которое читает одну выписку из `stdin`, вызывает
   провайдера и записывает ответ в `stdout`;
 - `examples` — только синтетические входные данные.
+- `examples/demo-statement.txt` — синтетическая выписка для ручной
+  демонстрации CLI.
 
 `core` не зависит от UI или серверного фреймворка. Kotlin/JVM backend может
 использовать его напрямую, а Android-, iOS- и Desktop-клиенты могут повторно
@@ -41,7 +43,7 @@ export DEEPSEEK_API_KEY
 
 ./gradlew :cli:installDist
 ./cli/build/install/transaction-import/bin/transaction-import parse \
-  < examples/statement.txt
+  < examples/demo-statement.txt
 
 unset DEEPSEEK_API_KEY
 ```
