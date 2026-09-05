@@ -4,6 +4,7 @@ import io.github.stolex1y.transactionimport.core.TransactionImportService
 import io.github.stolex1y.transactionimport.transport.DeepSeekGateway
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.engine.embeddedServer
@@ -26,6 +27,11 @@ fun main() {
         ?.takeIf { it in 1..65_535 }
         ?: DEFAULT_PORT
     val httpClient = HttpClient(CIO) {
+        install(HttpTimeout) {
+            requestTimeoutMillis = 300_000
+            connectTimeoutMillis = 30_000
+            socketTimeoutMillis = 300_000
+        }
         install(ContentNegotiation) {
             json(
                 Json {

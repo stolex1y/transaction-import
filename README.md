@@ -109,7 +109,8 @@ unset DEEPSEEK_API_KEY
 - reasoning: `disabled`, `low`, `high` или `max`;
 - при включённом reasoning `reasoning_effort` отправляется отдельным
   top-level полем, а не внутри `thinking`;
-- streaming: отключён.
+- streaming: отключён;
+- timeout web-запроса: до 300 секунд; соединение устанавливается до 30 секунд.
 
 ## Границы безопасности
 
