@@ -206,6 +206,13 @@ metadata; compatibility error останавливает серию конкре
 трактуется как отсутствие квоты: отчёт отдельно сохраняет provider metadata и
 compatibility/rate-limit errors.
 
+Фактический запуск на hard fixture подтвердил OpenRouter model metadata, но
+дал HTTP 429 upstream rate limit после первого completion запроса. Оба
+DeepSeek-провайдера выполнили по пять запросов, однако при reasoning
+`max_tokens=4096` каждый завершился `finish_reason=length` без финального JSON:
+reasoning израсходовал весь бюджет. Полный JSON evidence сохранён в parent
+репозитории дневника D05; provider не заменялся молча.
+
 
 ## Границы безопасности
 
