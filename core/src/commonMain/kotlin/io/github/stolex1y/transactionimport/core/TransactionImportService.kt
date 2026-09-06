@@ -99,7 +99,7 @@ class TransactionImportService(
             thinking = options.thinkingOptions(),
             reasoningEffort = options.reasoning.effort,
             responseFormat = ResponseFormat(type = "json_object").takeIf { controlled },
-            maxTokens = CONTROLLED_MAX_TOKENS.takeIf { controlled },
+            maxTokens = (options.maxTokens ?: CONTROLLED_MAX_TOKENS).takeIf { controlled },
             temperature = options.temperature,
             stream = false,
         )
@@ -107,6 +107,7 @@ class TransactionImportService(
         val choice = response.choices.firstOrNull()
             ?: error("Response contains no choices.")
         val message = choice.message
+        val reasoningText = message.reasoningContent ?: message.reasoning
         val text = message.content?.trim().orEmpty()
         if (!controlled) {
             require(text.isNotEmpty()) { "Response contains empty message content." }
@@ -116,17 +117,16 @@ class TransactionImportService(
             validateStructuredResponse(
                 text = text,
                 finishReason = choice.finishReason,
-                reasoningContentLength = message.reasoningContent?.length,
+                reasoningContentLength = reasoningText?.length,
             )
         } else {
             null
         }
-
         return ExtractionResult(
             text = text,
             finishReason = choice.finishReason,
             usage = response.usage,
-            reasoningContentLength = message.reasoningContent?.length,
+            reasoningContentLength = reasoningText?.length,
             responseMode = options.responseMode,
             controls = AppliedResponseControls(
                 responseFormat = request.responseFormat,
@@ -136,6 +136,7 @@ class TransactionImportService(
             ),
             structured = validationOutcome?.document,
             validation = validationOutcome?.summary,
+            rawUsage = response.rawUsage,
         )
     }
 }

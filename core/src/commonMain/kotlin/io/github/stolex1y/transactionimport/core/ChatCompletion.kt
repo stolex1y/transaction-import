@@ -2,6 +2,7 @@ package io.github.stolex1y.transactionimport.core
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 
 interface ChatCompletionGateway {
     suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse
@@ -55,6 +56,7 @@ data class ExtractionOptions(
     val reasoning: ReasoningLevel = ReasoningLevel.DISABLED,
     val responseMode: ResponseMode = ResponseMode.UNRESTRICTED,
     val temperature: Double? = null,
+    val maxTokens: Int? = null,
 ) {
     fun thinkingOptions(): ThinkingOptions =
         ThinkingOptions(type = reasoning.thinkingType)
@@ -64,6 +66,7 @@ data class ExtractionOptions(
 data class ChatCompletionResponse(
     val choices: List<ChatChoice> = emptyList(),
     val usage: Usage? = null,
+    val rawUsage: JsonObject? = null,
 )
 
 @Serializable
@@ -77,6 +80,7 @@ data class ResponseMessage(
     val role: String? = null,
     val content: String? = null,
     @SerialName("reasoning_content") val reasoningContent: String? = null,
+    val reasoning: String? = null,
 )
 
 @Serializable
@@ -103,4 +107,5 @@ data class ExtractionResult(
     val controls: AppliedResponseControls,
     val structured: StructuredImport?,
     val validation: StructuredValidation?,
+    val rawUsage: JsonObject? = null,
 )

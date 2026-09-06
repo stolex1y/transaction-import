@@ -17,6 +17,10 @@
 - `d04` — JVM-исполнитель controlled JSON temperature-серии для
   синтетического hard fixture; сохраняет конфигурацию, reference, raw ответы,
   validation, field-level accuracy, fingerprint и latency;
+- `d05` — JVM-исполнитель сравнения `deepseek-v4-flash`,
+  `z-ai/glm-5.2:free` через OpenRouter и `deepseek-v4-pro`; фиксирует
+  reasoning controls, provider-specific usage, validation, latency, cost/quota
+  и compatibility failures;
 - `examples` — только синтетические входные данные:
   - `demo-statement.txt` — простой сценарий;
   - `demo-statement-medium-formats.txt` — средний уровень: таблица,
@@ -177,6 +181,30 @@ field-level accuracy, лишние операции, canonical response fingerpr
 Команда требует `DEEPSEEK_API_KEY` в окружении. Файл отчёта может содержать
 полные ответы модели, поэтому его нельзя отправлять в логи или публиковать
 вместе с чувствительными выписками.
+
+## Model comparison experiment
+
+Модуль `d05` использует один hard fixture и controlled JSON contract:
+`temperature=0`, reasoning `high`, `response_format=json_object`,
+`max_tokens=4096`, `stream=false`, по пять последовательных запусков на модель.
+DeepSeek вызывается напрямую через `DEEPSEEK_API_KEY`; GLM-5.2 free — через
+OpenRouter и `OPENROUTER_API_KEY`. До серии OpenRouter проверяет точный model ID
+через `/models`. Provider-specific usage сохраняется вместе с raw response
+metadata; compatibility error останавливает серию конкретной модели, без
+тихой замены провайдера.
+
+```bash
+./gradlew :d05:installDist
+./d05/build/install/transaction-import-d05/bin/transaction-import-d05 \
+  examples/demo-statement-hard.txt \
+  > d05-report.json
+```
+
+Команда требует обе переменные окружения. В DeepSeek cost estimate использует
+официальные V4 rates и помечает peak/off-peak UTC window; если cache fields не
+пришли, input считается cache miss. Для OpenRouter `:free` стоимость не
+трактуется как отсутствие квоты: отчёт отдельно сохраняет provider metadata и
+compatibility/rate-limit errors.
 
 
 ## Границы безопасности
