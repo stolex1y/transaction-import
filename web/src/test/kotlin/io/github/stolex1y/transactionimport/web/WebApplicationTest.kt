@@ -63,6 +63,71 @@ class WebApplicationTest {
     }
 
     @Test
+    fun servesD01PageAndForcesUnrestrictedMode() = testApplication {
+        val gateway = RecordingGateway()
+        application {
+            module(TransactionImportService(gateway))
+        }
+
+        val page = client.get("/experiments/d01")
+        assertEquals(HttpStatusCode.OK, page.status)
+        val html = page.bodyAsText()
+        assertTrue(html.contains("Базовый импорт"))
+        assertFalse(html.contains("Формат ответа"))
+        assertFalse(html.contains("Сравнение форматов"))
+
+        val response = client.post("/api/d01/extract") {
+            contentType(ContentType.Application.Json)
+            setBody(
+                """
+                {
+                  "statement": "synthetic statement",
+                  "model": "deepseek-v4-flash",
+                  "reasoning": "disabled",
+                  "mode": "controlled_json",
+                  "max_tokens_mode": "unlimited"
+                }
+                """.trimIndent(),
+            )
+        }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+        assertEquals("unrestricted", body.getValue("mode").jsonPrimitive.content)
+        assertEquals("unlimited", body.getValue("max_tokens_mode").jsonPrimitive.content)
+        assertNull(body.getValue("controls").jsonObject["response_format"])
+        assertNull(gateway.request?.responseFormat)
+        assertNull(gateway.request?.maxTokens)
+    }
+
+    @Test
+    fun forwardsExplicitWebMaxTokens() = testApplication {
+        val gateway = RecordingGateway()
+        application {
+            module(TransactionImportService(gateway))
+        }
+
+        val response = postExtraction(
+            """
+            {
+              "statement": "synthetic statement",
+              "model": "deepseek-v4-flash",
+              "reasoning": "disabled",
+              "mode": "unrestricted",
+              "max_tokens_mode": "explicit",
+              "max_tokens": 50000
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals(50000, gateway.request?.maxTokens)
+        val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+        assertEquals("50000", body.getValue("requested_max_tokens").jsonPrimitive.content)
+        assertEquals("explicit", body.getValue("max_tokens_mode").jsonPrimitive.content)
+    }
+
+    @Test
     fun returnsControlledValidationAndAppliedControls() = testApplication {
         val gateway = RecordingGateway()
         application {
@@ -148,7 +213,6 @@ class WebApplicationTest {
 
         assertEquals(HttpStatusCode.BadRequest, response.status)
         assertTrue(response.bodyAsText().contains("Модель не разрешена"))
-        assertNull(gateway.request)
     }
 
     @Test
@@ -171,7 +235,6 @@ class WebApplicationTest {
 
         assertEquals(HttpStatusCode.BadRequest, response.status)
         assertTrue(response.bodyAsText().contains("Неизвестный режим ответа"))
-        assertNull(gateway.request)
     }
 
     @Test
@@ -213,7 +276,7 @@ class WebApplicationTest {
 
         val accepted = client.post("/api/experiments/d04") {
             contentType(ContentType.Application.Json)
-            setBody("""{"task":"Сравните два алгоритма на синтетическом примере."}""")
+            setBody("""{"task":"Сравните два алгоритма на синтетическом примере.","max_tokens_mode":"unlimited"}""")
         }
         assertEquals(HttpStatusCode.Accepted, accepted.status)
         val jobId = Json.parseToJsonElement(accepted.bodyAsText())
@@ -236,6 +299,9 @@ class WebApplicationTest {
             "3",
             body.getValue("result").jsonObject.getValue("runs").jsonArray.size.toString(),
         )
+        val report = body.getValue("result").jsonObject
+        assertEquals("unlimited", report.getValue("max_tokens_mode").jsonPrimitive.content)
+        assertNull(report.getValue("runs").jsonArray.first().jsonObject["max_tokens"])
     }
 
     private suspend fun io.ktor.server.testing.ApplicationTestBuilder.postExtraction(

@@ -84,6 +84,20 @@ class TransactionImportService(
         require(normalizedStatement.isNotEmpty()) { "Statement must not be blank." }
 
         val controlled = options.responseMode == ResponseMode.CONTROLLED_JSON
+        require(options.maxTokens == null || options.maxTokens > 0) {
+            "max_tokens must be a positive integer."
+        }
+        require(
+            options.tokenBudgetMode != TokenBudgetMode.UNLIMITED || options.maxTokens == null,
+        ) {
+            "max_tokens must be empty when token budget mode is unlimited."
+        }
+        val maxTokens = when {
+            options.tokenBudgetMode == TokenBudgetMode.UNLIMITED -> null
+            options.maxTokens != null -> options.maxTokens
+            controlled -> CONTROLLED_MAX_TOKENS
+            else -> null
+        }
         val request = ChatCompletionRequest(
             model = options.model,
             messages = listOf(
@@ -99,7 +113,7 @@ class TransactionImportService(
             thinking = options.thinkingOptions(),
             reasoningEffort = options.reasoning.effort,
             responseFormat = ResponseFormat(type = "json_object").takeIf { controlled },
-            maxTokens = (options.maxTokens ?: CONTROLLED_MAX_TOKENS).takeIf { controlled },
+            maxTokens = maxTokens,
             temperature = options.temperature,
             stream = false,
         )
@@ -122,6 +136,11 @@ class TransactionImportService(
         } else {
             null
         }
+        val tokenBudgetWarning = response.usage?.completionTokens
+            ?.takeIf { request.maxTokens != null && it > request.maxTokens }
+            ?.let {
+                "Provider reports completion_tokens=$it above max_tokens=${request.maxTokens}."
+            }
         return ExtractionResult(
             text = text,
             finishReason = choice.finishReason,
@@ -136,6 +155,7 @@ class TransactionImportService(
             ),
             structured = validationOutcome?.document,
             validation = validationOutcome?.summary,
+            tokenBudgetWarning = tokenBudgetWarning,
             rawUsage = response.rawUsage,
         )
     }

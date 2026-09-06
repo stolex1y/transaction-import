@@ -64,6 +64,50 @@ class TransactionImportServiceTest {
     }
 
     @Test
+    fun forwardsExplicitMaxTokensForUnrestrictedRequest() = runBlocking {
+        val gateway = RecordingGateway(response(content = "plain text"))
+
+        TransactionImportService(gateway).extract(
+            statement = "statement",
+            options = ExtractionOptions(maxTokens = 50_000),
+        )
+
+        assertEquals(50_000, gateway.request?.maxTokens)
+    }
+
+    @Test
+    fun omitsMaxTokensForExplicitUnlimitedControlledRequest() = runBlocking {
+        val gateway = RecordingGateway(response(content = readyJson))
+
+        val result = TransactionImportService(gateway).extract(
+            statement = "statement",
+            options = ExtractionOptions(
+                responseMode = ResponseMode.CONTROLLED_JSON,
+                tokenBudgetMode = TokenBudgetMode.UNLIMITED,
+            ),
+        )
+
+        assertNull(gateway.request?.maxTokens)
+        assertNull(result.controls.maxTokens)
+        assertTrue(assertNotNull(result.validation).valid)
+    }
+
+    @Test
+    fun reportsProviderUsageAboveExplicitBudget() = runBlocking {
+        val result = TransactionImportService(
+            RecordingGateway(response(content = "plain text")),
+        ).extract(
+            statement = "statement",
+            options = ExtractionOptions(maxTokens = 4),
+        )
+
+        assertContains(
+            assertNotNull(result.tokenBudgetWarning),
+            "completion_tokens=8",
+        )
+    }
+
+    @Test
     fun rejectsUnknownFieldsInControlledResponse() = runBlocking {
         val invalidJson = readyJson.replace(
             oldValue = "\n  \"unparsed_fragments\": []",

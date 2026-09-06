@@ -6,6 +6,7 @@ import io.github.stolex1y.transactionimport.core.RequestMessage
 import io.github.stolex1y.transactionimport.core.ResponseMessage
 import io.github.stolex1y.transactionimport.core.ReasoningLevel
 import io.github.stolex1y.transactionimport.core.ThinkingOptions
+import io.github.stolex1y.transactionimport.core.TokenBudgetMode
 import io.github.stolex1y.transactionimport.core.Usage
 import io.github.stolex1y.transactionimport.d05.OpenRouterGateway
 import kotlinx.coroutines.CoroutineDispatcher
@@ -33,6 +34,8 @@ private const val MAX_CUSTOM_CONFIGURATIONS = 4
 data class ExperimentRequest(
     val task: String,
     @SerialName("reference_or_rubric") val referenceOrRubric: String? = null,
+    @SerialName("max_tokens_mode") val maxTokensMode: String = "auto",
+    @SerialName("max_tokens") val maxTokens: Int? = null,
     @SerialName("custom_configurations") val customConfigurations: List<CustomExperimentConfiguration> = emptyList(),
 )
 
@@ -79,6 +82,8 @@ data class ExperimentReport(
     val task: String,
     @SerialName("reference_or_rubric") val referenceOrRubric: String? = null,
     @SerialName("generated_at") val generatedAt: String,
+    @SerialName("max_tokens_mode") val maxTokensMode: String,
+    @SerialName("requested_max_tokens") val requestedMaxTokens: Int? = null,
     val preflight: List<ExperimentPreflight> = emptyList(),
     val runs: List<ExperimentRun>,
     val notes: List<String> = emptyList(),
@@ -101,6 +106,7 @@ data class ExperimentRun(
     val usage: Usage? = null,
     @SerialName("raw_usage") val rawUsage: JsonObject? = null,
     @SerialName("reasoning_content_length") val reasoningContentLength: Int? = null,
+    @SerialName("token_budget_warning") val tokenBudgetWarning: String? = null,
     @SerialName("processing_time_ms") val processingTimeMs: Long? = null,
     @SerialName("response_fingerprint") val responseFingerprint: String? = null,
     val error: String? = null,
@@ -111,8 +117,9 @@ private data class ExperimentConfiguration(
     val model: String,
     val reasoning: String,
     val temperature: Double?,
-    val maxTokens: Int,
+    val maxTokens: Int?,
     val systemPrompt: String,
+    val pageOverridable: Boolean = true,
 )
 
 private data class CallOutcome(
@@ -138,9 +145,15 @@ class ExperimentService(
         onProgress: suspend (completed: Int, total: Int) -> Unit,
     ): ExperimentReport {
         val task = request.task.trim()
+        val tokenBudgetMode = parseTokenBudgetMode(request.maxTokensMode)
+        validateTokenBudget(tokenBudgetMode, request.maxTokens)
         validateRequest(kind, task, request.referenceOrRubric, request.customConfigurations)
-        val configurations = presetConfigurations(kind) + request.customConfigurations.map {
-            customConfiguration(kind, it)
+        val configurations = (
+            presetConfigurations(kind) + request.customConfigurations.map {
+                customConfiguration(kind, it)
+            }
+        ).map { configuration ->
+            applyPageTokenBudget(configuration, tokenBudgetMode, request.maxTokens)
         }
         val preflight = if (kind == "d05") preflightOpenRouter() else emptyList()
         val runs = mutableListOf<ExperimentRun>()
@@ -158,9 +171,11 @@ class ExperimentService(
             task = task,
             referenceOrRubric = request.referenceOrRubric?.trim()?.takeIf { it.isNotEmpty() },
             generatedAt = Instant.now().toString(),
+            maxTokensMode = tokenBudgetApiValue(tokenBudgetMode, request.maxTokens),
+            requestedMaxTokens = request.maxTokens,
             preflight = preflight,
             runs = runs,
-            notes = notesFor(kind),
+            notes = notesFor(kind, tokenBudgetMode, request.maxTokens),
         )
     }
 
@@ -244,17 +259,16 @@ class ExperimentService(
     ): ExperimentConfiguration {
         val model = custom.model.trim()
         val reasoning = parseReasoning(custom.reasoning.trim().lowercase())
-        val maxTokens = custom.maxTokens ?: when (kind) {
-            "d03" -> D03_MAX_TOKENS
-            "d05" -> D05_MAX_TOKENS
-            else -> DEFAULT_EXPERIMENT_MAX_TOKENS
-        }
+        val defaultMaxTokens = defaultMaxTokens(kind)
+        val maxTokens = custom.maxTokens ?: defaultMaxTokens
         require(custom.label.trim().isNotEmpty()) { "Название custom configuration не может быть пустым." }
         require(model in supportedExperimentModels) { "Модель не разрешена: $model" }
         require(custom.temperature == null || custom.temperature in 0.0..2.0) {
             "Temperature должна быть в диапазоне от 0 до 2."
         }
-        require(maxTokens in 1..16_384) { "max_tokens должен быть в диапазоне от 1 до 16384." }
+        require(custom.maxTokens == null || custom.maxTokens > 0) {
+            "max_tokens должен быть положительным целым числом."
+        }
         return ExperimentConfiguration(
             label = custom.label.trim(),
             model = model,
@@ -263,7 +277,34 @@ class ExperimentService(
             maxTokens = maxTokens,
             systemPrompt = custom.systemPrompt?.trim()?.takeIf { it.isNotEmpty() }
                 ?: "Solve the user's task and return a concise final answer.",
+            pageOverridable = custom.maxTokens == null,
         )
+    }
+
+    private fun applyPageTokenBudget(
+        configuration: ExperimentConfiguration,
+        mode: TokenBudgetMode,
+        maxTokens: Int?,
+    ): ExperimentConfiguration {
+        if (!configuration.pageOverridable) {
+            return configuration
+        }
+        return when (mode) {
+            TokenBudgetMode.DEFAULT -> configuration
+            TokenBudgetMode.UNLIMITED -> configuration.copy(maxTokens = null)
+        }.let { applied ->
+            if (mode == TokenBudgetMode.DEFAULT && maxTokens != null) {
+                applied.copy(maxTokens = maxTokens)
+            } else {
+                applied
+            }
+        }
+    }
+
+    private fun defaultMaxTokens(kind: String): Int = when (kind) {
+        "d03" -> D03_MAX_TOKENS
+        "d05" -> D05_MAX_TOKENS
+        else -> DEFAULT_EXPERIMENT_MAX_TOKENS
     }
 
     private suspend fun runConfiguration(
@@ -403,6 +444,22 @@ class ExperimentService(
     private fun providerFor(model: String): String =
         if (model.startsWith("z-ai/")) "openrouter" else "deepseek"
 
+    private fun validateTokenBudget(mode: TokenBudgetMode, maxTokens: Int?) {
+        require(maxTokens == null || maxTokens > 0) {
+            "max_tokens должен быть положительным целым числом."
+        }
+        require(mode != TokenBudgetMode.UNLIMITED || maxTokens == null) {
+            "При режиме «Без ограничения» max_tokens должен быть пустым."
+        }
+    }
+
+    private fun tokenBudgetApiValue(mode: TokenBudgetMode, maxTokens: Int?): String =
+        when {
+            mode == TokenBudgetMode.UNLIMITED -> "unlimited"
+            maxTokens == null -> "auto"
+            else -> "explicit"
+        }
+
     private fun validateRequest(
         kind: String,
         task: String,
@@ -422,11 +479,26 @@ class ExperimentService(
         }
     }
 
-    private fun notesFor(kind: String): List<String> = when (kind) {
-        "d03" -> listOf("Metaprompt выполняется двумя последовательными вызовами.")
-        "d04" -> listOf("Preset меняет только temperature; custom configurations помечаются exploratory.")
-        "d05" -> listOf("Preset сравнивает модели последовательно; provider errors не заменяются fallback-моделью.")
-        else -> emptyList()
+    private fun notesFor(
+        kind: String,
+        mode: TokenBudgetMode,
+        maxTokens: Int?,
+    ): List<String> {
+        val presetNotes = when (kind) {
+            "d03" -> listOf("Metaprompt выполняется двумя последовательными вызовами.")
+            "d04" -> listOf("Preset меняет только temperature; custom configurations помечаются exploratory.")
+            "d05" -> listOf("Preset сравнивает модели последовательно; provider errors не заменяются fallback-моделью.")
+            else -> emptyList()
+        }
+        val budgetNote = when {
+            mode == TokenBudgetMode.UNLIMITED ->
+                "Token budget override (exploratory): max_tokens не отправляется; provider применяет свой default/maximum."
+            maxTokens != null ->
+                "Token budget override (exploratory): все preset configurations используют max_tokens=$maxTokens."
+            else ->
+                "Token budget: preset defaults сохранены."
+        }
+        return presetNotes + budgetNote
     }
 
     private fun CallOutcome.toRun(
@@ -436,6 +508,11 @@ class ExperimentService(
         processingTimeOffset: Long = 0,
     ): ExperimentRun {
         val text = response?.content?.trim()
+        val tokenBudgetWarning = usage?.completionTokens
+            ?.takeIf { configuration.maxTokens != null && it > configuration.maxTokens }
+            ?.let {
+                "Provider reports completion_tokens=$it above max_tokens=${configuration.maxTokens}."
+            }
         return ExperimentRun(
             label = configuration.label,
             stage = stage,
@@ -452,6 +529,7 @@ class ExperimentService(
             usage = usage,
             rawUsage = rawUsage,
             reasoningContentLength = reasoningContentLength,
+            tokenBudgetWarning = tokenBudgetWarning,
             processingTimeMs = processingTimeMs + processingTimeOffset,
             responseFingerprint = text?.let(::fingerprint),
             error = error,

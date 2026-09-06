@@ -8,13 +8,24 @@
 </head>
 <body>
 <main class="experiment-shell">
-    <nav class="top-nav" aria-label="Навигация"><a href="/">Основная страница</a><a href="/experiments">Эксперименты D02–D05</a></nav>
+    <nav class="top-nav" aria-label="Навигация"><a href="/">Основная страница</a><a href="/experiments">Эксперименты D01–D05</a></nav>
     <header class="hero"><p class="eyebrow">D04 · Temperature</p><h1>Влияние temperature</h1><p class="subtitle">Введите одну задачу. Preset изменяет только temperature: 0, 0.7 и 1.2. Остальные параметры фиксированы; custom-варианты считаются exploratory.</p></header>
     <section class="panel experiment-form-panel">
         <label for="task">Задача</label>
         <textarea id="task" rows="10" placeholder="Введите синтетическую или обезличенную задачу"></textarea>
         <label for="rubric">Reference или rubric (необязательно)</label>
         <textarea id="rubric" class="compact-textarea" rows="3" placeholder="Без rubric будут показаны только наблюдаемые метрики"></textarea>
+        <div class="token-budget-field">
+            <label for="max-tokens-mode">Лимит completion tokens</label>
+            <select id="max-tokens-mode" name="max_tokens_mode">
+                <option value="auto" selected>Авто</option>
+                <option value="unlimited">Без ограничения</option>
+                <option value="explicit">Явное значение</option>
+            </select>
+            <input id="max-tokens" name="max_tokens" type="number" min="1" step="1"
+                   inputmode="numeric" placeholder="Например, 1200" disabled>
+            <p class="field-note">Пустое значение сохраняет preset default D04.</p>
+        </div>
         <div id="custom-configurations" class="custom-configurations"></div>
         <div class="button-row"><button id="add-custom" type="button" class="secondary-button">Добавить custom</button><button id="run-experiment" type="button">Запустить сравнение</button></div>
         <p id="experiment-status" class="status" role="status" aria-live="polite"></p>

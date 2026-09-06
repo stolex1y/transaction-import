@@ -49,10 +49,25 @@
                         <option value="controlled_json">Контролируемый JSON</option>
                     </select>
                 </div>
+                <div class="control token-budget-control">
+                    <label for="max-tokens-mode">Лимит completion tokens</label>
+                    <select id="max-tokens-mode" name="max_tokens_mode">
+                        <option value="auto" selected>Авто</option>
+                        <option value="unlimited">Без ограничения</option>
+                        <option value="explicit">Явное значение</option>
+                    </select>
+                    <input id="max-tokens" name="max_tokens" type="number" min="1" step="1"
+                           inputmode="numeric" placeholder="Например, 1200" disabled>
+                    <p class="field-note">Пустое значение возвращает режим «Авто».</p>
+                </div>
             </div>
             <p class="control-note">
                 Для сравнения вручную запустите оба формата, не меняя выписку,
                 модель и глубину анализа.
+            </p>
+            <p class="control-note">
+                `max_tokens` ограничивает completion budget; prompt tokens и total tokens
+                считаются отдельно. При reasoning budget также расходуется на reasoning_content.
             </p>
             <p class="control-note">
                 При включённом reasoning часть бюджета расходуется на

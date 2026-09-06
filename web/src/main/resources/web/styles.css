@@ -29,6 +29,13 @@ body {
     margin-bottom: 24px;
 }
 
+.top-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-bottom: 28px;
+}
+
 .eyebrow {
     margin: 0 0 8px;
     color: #93c5fd;
@@ -80,6 +87,7 @@ label {
 }
 
 textarea,
+input,
 select {
     width: 100%;
     border: 1px solid #4b5563;
@@ -97,6 +105,7 @@ textarea {
 }
 
 textarea:focus,
+input:focus,
 select:focus,
 button:focus-visible {
     outline: 3px solid rgba(96, 165, 250, 0.45);
@@ -115,10 +124,24 @@ select {
     background-repeat: no-repeat;
     background-size: 6px 6px, 6px 6px;
 }
+input {
+    padding: 11px 12px;
+}
+
+.token-budget-control input {
+    margin-top: 8px;
+}
+
+.field-note {
+    margin: 8px 0 0;
+    color: #94a3b8;
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
 
 .controls {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 16px;
     margin-top: 18px;
 }
@@ -153,6 +176,7 @@ button:disabled {
 }
 
 textarea:disabled,
+input:disabled,
 select:disabled {
     opacity: 0.72;
 }
@@ -367,6 +391,10 @@ select:disabled {
     .comparison-grid {
         grid-template-columns: 1fr;
     }
+
+    .controls {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
 }
 
 @media (max-width: 680px) {
@@ -393,4 +421,31 @@ select:disabled {
         align-items: flex-start;
         flex-direction: column;
     }
+}
+
+/* Keep the form rhythm explicit instead of relying on browser default margins. */
+p {
+    margin-bottom: 0;
+}
+
+#extract-form > .controls {
+    margin-top: 24px;
+}
+
+
+@media (min-width: 901px) {
+    .d01-page .controls {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+#extract-form > .control-note {
+    margin-top: 16px;
+}
+
+#extract-form > button {
+    margin-top: 24px;
+}
+
+.status:empty {
+    display: none;
 }

@@ -66,3 +66,31 @@ details { margin-top: 14px; }
 summary { cursor: pointer; color: #bfdbfe; }
 @media (max-width: 900px) { .experiment-results-grid, .experiment-links { grid-template-columns: 1fr; } .custom-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 600px) { .experiment-shell { width: min(100% - 20px, 1280px); } .panel { padding: 18px; } .custom-grid, .preflight-grid { grid-template-columns: 1fr; } .section-heading { align-items: flex-start; flex-direction: column; } }
+
+/* Keep the form rhythm explicit instead of relying on browser default margins. */
+p { margin-bottom: 0; }
+.experiment-form-panel > label { margin-top: 22px; }
+.experiment-form-panel > label:first-child { margin-top: 0; }
+.experiment-form-panel > .custom-configurations,
+.experiment-form-panel > .button-row { margin-top: 24px; }
+.experiment-form-panel > .status { margin-top: 16px; }
+.custom-config { min-inline-size: 0; }
+.custom-grid { row-gap: 16px; }
+.custom-configurations:empty,
+.status:empty {
+    display: none;
+}
+
+.token-budget-field {
+    max-width: 520px;
+    margin-top: 22px;
+}
+.token-budget-field input {
+    margin-top: 8px;
+}
+.field-note {
+    margin: 8px 0 0;
+    color: #94a3b8;
+    font-size: .78rem;
+    line-height: 1.4;
+}

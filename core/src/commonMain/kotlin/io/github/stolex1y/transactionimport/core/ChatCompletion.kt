@@ -51,12 +51,18 @@ enum class ResponseMode {
     CONTROLLED_JSON,
 }
 
+enum class TokenBudgetMode {
+    DEFAULT,
+    UNLIMITED,
+}
+
 data class ExtractionOptions(
     val model: String = DEFAULT_MODEL,
     val reasoning: ReasoningLevel = ReasoningLevel.DISABLED,
     val responseMode: ResponseMode = ResponseMode.UNRESTRICTED,
     val temperature: Double? = null,
     val maxTokens: Int? = null,
+    val tokenBudgetMode: TokenBudgetMode = TokenBudgetMode.DEFAULT,
 ) {
     fun thinkingOptions(): ThinkingOptions =
         ThinkingOptions(type = reasoning.thinkingType)
@@ -107,5 +113,6 @@ data class ExtractionResult(
     val controls: AppliedResponseControls,
     val structured: StructuredImport?,
     val validation: StructuredValidation?,
+    @SerialName("token_budget_warning") val tokenBudgetWarning: String? = null,
     val rawUsage: JsonObject? = null,
 )

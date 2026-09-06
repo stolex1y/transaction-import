@@ -3,6 +3,9 @@ const statement = document.querySelector("#statement");
 const model = document.querySelector("#model");
 const reasoning = document.querySelector("#reasoning");
 const responseMode = document.querySelector("#mode");
+const fixedResponseMode = document.documentElement.dataset.responseMode || null;
+const maxTokensMode = document.querySelector("#max-tokens-mode");
+const maxTokensInput = document.querySelector("#max-tokens");
 const submitButton = document.querySelector("#submit-button");
 const status = document.querySelector("#status");
 const currentResult = document.querySelector("#current-result");
@@ -17,6 +20,8 @@ const comparisonGrid = document.querySelector("#comparison-grid");
 const historyElement = document.querySelector("#history");
 const history = [];
 let nextSequence = 1;
+maxTokensMode?.addEventListener("change", syncTokenBudgetInput);
+syncTokenBudgetInput();
 
 form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -26,11 +31,19 @@ form.addEventListener("submit", async (event) => {
         return;
     }
 
+    let tokenBudget;
+    try {
+        tokenBudget = readTokenBudget();
+    } catch (error) {
+        showError(error.message);
+        return;
+    }
     const request = {
         statement: text,
         model: model.value,
         reasoning: reasoning.value,
-        mode: responseMode.value,
+        mode: fixedResponseMode || responseMode?.value || "unrestricted",
+        ...tokenBudget,
     };
     setBusy(true);
     status.className = "status";
@@ -39,7 +52,8 @@ form.addEventListener("submit", async (event) => {
         : "Запрашиваем ответ без ограничений...";
 
     try {
-        const response = await fetch("/api/extract", {
+        const endpoint = fixedResponseMode ? "/api/d01/extract" : "/api/extract";
+        const response = await fetch(endpoint, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(request),
@@ -70,7 +84,7 @@ form.addEventListener("submit", async (event) => {
 function renderCurrent(run) {
     currentResult.hidden = false;
     currentSettings.textContent =
-        `${modeLabel(run.mode)} · ${run.model} · ${reasoningLabel(run.reasoning)}`;
+        `${modeLabel(run.mode)} · ${run.model} · ${reasoningLabel(run.reasoning)} · ${tokenBudgetLabel(run)}`;
     renderRunStats(currentStats, run);
     renderValidation(run.validation);
     answer.textContent = run.text;
@@ -125,12 +139,17 @@ function renderValidation(validation) {
 }
 
 function renderComparison(currentRun) {
+    if (!comparison || !comparisonGrid || !comparisonSettings) {
+        return false;
+    }
     const counterpart = history.find((candidate) =>
         candidate !== currentRun
         && candidate.mode !== currentRun.mode
         && candidate.statement === currentRun.statement
         && candidate.model === currentRun.model
         && candidate.reasoning === currentRun.reasoning
+        && candidate.max_tokens_mode === currentRun.max_tokens_mode
+        && candidate.requested_max_tokens === currentRun.requested_max_tokens
     );
 
     if (!counterpart) {
@@ -142,7 +161,7 @@ function renderComparison(currentRun) {
     const unrestricted = currentRun.mode === "unrestricted" ? currentRun : counterpart;
     const controlled = currentRun.mode === "controlled_json" ? currentRun : counterpart;
     comparisonSettings.textContent =
-        `${currentRun.model} · ${reasoningLabel(currentRun.reasoning)}`;
+        `${currentRun.model} · ${reasoningLabel(currentRun.reasoning)} · ${tokenBudgetLabel(currentRun)}`;
     comparisonGrid.replaceChildren(
         createComparisonCard(unrestricted),
         createComparisonCard(controlled),
@@ -204,7 +223,7 @@ function renderHistory() {
         const settings = document.createElement("span");
         settings.className = "muted";
         settings.textContent =
-            `${modeLabel(run.mode)} · ${run.model} · ${reasoningLabel(run.reasoning)}`;
+            `${modeLabel(run.mode)} · ${run.model} · ${reasoningLabel(run.reasoning)} · ${tokenBudgetLabel(run)}`;
         heading.append(settings);
 
         const stats = document.createElement("div");
@@ -221,12 +240,16 @@ function renderHistory() {
 }
 
 function renderRunStats(container, run) {
-    container.replaceChildren(
-        createStat(`Токены: ${formatUsage(run.usage)}`),
-        createStat(`Время: ${formatDuration(run.processing_time_ms)}`),
-        createStat(`Длина: ${run.text_length ?? run.text.length} симв.`),
-        createStat(`Завершение: ${run.finish_reason ?? "нет данных"}`),
-    );
+    const stats = [
+        `Токены: ${formatUsage(run.usage)}`,
+        `Время: ${formatDuration(run.processing_time_ms)}`,
+        `Длина: ${run.text_length ?? run.text.length} симв.`,
+        `Завершение: ${run.finish_reason ?? "нет данных"}`,
+    ];
+    if (run.token_budget_warning) {
+        stats.push(`Token budget: ${run.token_budget_warning}`);
+    }
+    container.replaceChildren(...stats.map(createStat));
 }
 
 function createStat(text) {
@@ -241,6 +264,9 @@ function metadataFor(run) {
         mode: run.mode,
         model: run.model,
         reasoning: run.reasoning,
+        max_tokens_mode: run.max_tokens_mode,
+        requested_max_tokens: run.requested_max_tokens,
+        token_budget_warning: run.token_budget_warning,
         controls: run.controls,
         finish_reason: run.finish_reason,
         usage: run.usage,
@@ -284,12 +310,13 @@ function showRunStatus(run, paired) {
     } else {
         status.textContent = "Выписка обработана.";
     }
-    if (!paired) {
-        const counterpart = run.mode === "unrestricted"
-            ? "контролируемый JSON"
-            : "ответ без ограничений";
-        status.textContent += ` Для сравнения запустите ${counterpart} с теми же входными данными.`;
+    if (!comparison || paired) {
+        return;
     }
+    const counterpart = run.mode === "unrestricted"
+        ? "контролируемый JSON"
+        : "ответ без ограничений";
+    status.textContent += ` Для сравнения запустите ${counterpart} с теми же входными данными.`;
 }
 
 function formatUsage(usage) {
@@ -313,7 +340,10 @@ function restoreRun(run) {
     statement.value = run.statement;
     model.value = run.model;
     reasoning.value = run.reasoning;
-    responseMode.value = run.mode;
+    if (responseMode) {
+        responseMode.value = run.mode;
+    }
+    restoreTokenBudget(run);
     renderCurrent(run);
     renderComparison(run);
     status.className = "status";
@@ -326,6 +356,18 @@ function modeLabel(value) {
         unrestricted: "Без ограничений",
         controlled_json: "Контролируемый JSON",
     }[value] || value;
+}
+
+function tokenBudgetLabel(run) {
+    if (run.max_tokens_mode === "unlimited") {
+        return "tokens: без ограничения";
+    }
+    if (run.requested_max_tokens != null) {
+        return `tokens: ${run.requested_max_tokens}`;
+    }
+    return run.controls?.max_tokens == null
+        ? "tokens: авто"
+        : `tokens: авто → ${run.controls.max_tokens}`;
 }
 
 function reasoningLabel(value) {
@@ -341,10 +383,53 @@ function setBusy(value) {
     statement.disabled = value;
     model.disabled = value;
     reasoning.disabled = value;
-    responseMode.disabled = value;
+    if (responseMode) {
+        responseMode.disabled = value;
+    }
+    if (maxTokensMode) {
+        maxTokensMode.disabled = value;
+    }
+    if (maxTokensInput) {
+        maxTokensInput.disabled = value || maxTokensMode?.value !== "explicit";
+    }
     submitButton.disabled = value;
     submitButton.textContent = value ? "Обрабатываем..." : "Обработать выписку";
 }
+function syncTokenBudgetInput() {
+    if (!maxTokensInput) {
+        return;
+    }
+    const explicit = maxTokensMode?.value === "explicit";
+    maxTokensInput.disabled = !explicit || submitButton.disabled;
+}
+
+function readTokenBudget() {
+    const selectedMode = maxTokensMode?.value || "auto";
+    const rawValue = maxTokensInput?.value.trim() || "";
+    if (selectedMode === "unlimited") {
+        return { max_tokens_mode: "unlimited", max_tokens: null };
+    }
+    if (selectedMode === "explicit" && rawValue) {
+        const value = Number(rawValue);
+        if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+            throw new Error("Лимит completion tokens должен быть положительным целым числом.");
+        }
+        return { max_tokens_mode: "explicit", max_tokens: value };
+    }
+    return { max_tokens_mode: "auto", max_tokens: null };
+}
+
+function restoreTokenBudget(run) {
+    if (!maxTokensMode || !maxTokensInput) {
+        return;
+    }
+    maxTokensMode.value = run.max_tokens_mode === "unlimited"
+        ? "unlimited"
+        : run.requested_max_tokens == null ? "auto" : "explicit";
+    maxTokensInput.value = run.requested_max_tokens ?? "";
+    syncTokenBudgetInput();
+}
+
 
 function showError(message) {
     status.className = "status error";

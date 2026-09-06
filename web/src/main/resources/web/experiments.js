@@ -3,6 +3,8 @@ const kind = page.dataset.experiment;
 const taskInput = document.querySelector("#task");
 const rubricInput = document.querySelector("#rubric");
 const customContainer = document.querySelector("#custom-configurations");
+const maxTokensMode = document.querySelector("#max-tokens-mode");
+const maxTokensInput = document.querySelector("#max-tokens");
 const addCustomButton = document.querySelector("#add-custom");
 const runButton = document.querySelector("#run-experiment");
 const status = document.querySelector("#experiment-status");
@@ -19,6 +21,8 @@ const downloadButton = document.querySelector("#download-report");
 let currentReport = null;
 let customSequence = 1;
 
+maxTokensMode?.addEventListener("change", syncTokenBudgetInput);
+syncTokenBudgetInput();
 addCustomButton.addEventListener("click", () => addCustomConfiguration());
 runButton.addEventListener("click", () => startExperiment());
 downloadButton.addEventListener("click", () => downloadReport());
@@ -31,6 +35,14 @@ async function startExperiment() {
         return;
     }
 
+    let tokenBudget;
+    try {
+        tokenBudget = readTokenBudget();
+    } catch (error) {
+        showError(error.message);
+        return;
+    }
+
     setBusy(true);
     hideResults();
     status.className = "status";
@@ -38,6 +50,7 @@ async function startExperiment() {
     const request = {
         task,
         reference_or_rubric: rubricInput.value.trim() || null,
+        ...tokenBudget,
         custom_configurations: readCustomConfigurations(),
     };
 
@@ -112,7 +125,7 @@ function addCustomConfiguration() {
                 <option value="max">max</option>
             </select></label>
             <label>Temperature<input data-field="temperature" type="number" min="0" max="2" step="0.1" placeholder="preset"></label>
-            <label>Max tokens<input data-field="max_tokens" type="number" min="1" max="16384" placeholder="preset"></label>
+            <label>Max tokens<input data-field="max_tokens" type="number" min="1" placeholder="preset"></label>
         </div>
         <label>System prompt<textarea data-field="system_prompt" rows="3" placeholder="Необязательно: свой system prompt"></textarea></label>
         <button type="button" class="remove-custom secondary-button">Удалить custom</button>
@@ -183,14 +196,18 @@ function createRunCard(run) {
 
     const stats = document.createElement("div");
     stats.className = "result-stats";
-    [
+    const statValues = [
         `${run.provider} · ${run.model}`,
         `temperature: ${run.temperature ?? "—"}`,
         `reasoning: ${run.reasoning}`,
         `tokens: ${formatUsage(run.usage)}`,
         `время: ${formatDuration(run.processing_time_ms)}`,
         `длина: ${run.text_length ?? "—"}`,
-    ].forEach((value) => stats.append(createStat(value)));
+    ];
+    if (run.token_budget_warning) {
+        statValues.push(`token budget: ${run.token_budget_warning}`);
+    }
+    statValues.forEach((value) => stats.append(createStat(value)));
 
     const details = document.createElement("details");
     const summary = document.createElement("summary");
@@ -201,6 +218,7 @@ function createRunCard(run) {
         system_prompt: run.system_prompt,
         generated_prompt: run.generated_prompt,
         max_tokens: run.max_tokens,
+        token_budget_warning: run.token_budget_warning,
         reasoning_content_length: run.reasoning_content_length,
         raw_usage: run.raw_usage,
         response_fingerprint: run.response_fingerprint,
@@ -233,6 +251,30 @@ function formatDuration(milliseconds) {
         ? `${milliseconds} мс`
         : `${(milliseconds / 1000).toFixed(1).replace(".", ",")} с`;
 }
+function syncTokenBudgetInput() {
+    if (!maxTokensInput) {
+        return;
+    }
+    const explicit = maxTokensMode?.value === "explicit";
+    maxTokensInput.disabled = !explicit || runButton.disabled;
+}
+
+function readTokenBudget() {
+    const selectedMode = maxTokensMode?.value || "auto";
+    const rawValue = maxTokensInput?.value.trim() || "";
+    if (selectedMode === "unlimited") {
+        return { max_tokens_mode: "unlimited", max_tokens: null };
+    }
+    if (selectedMode === "explicit" && rawValue) {
+        const value = Number(rawValue);
+        if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+            throw new Error("Лимит completion tokens должен быть положительным целым числом.");
+        }
+        return { max_tokens_mode: "explicit", max_tokens: value };
+    }
+    return { max_tokens_mode: "auto", max_tokens: null };
+}
+
 
 function downloadReport() {
     if (!currentReport) return;
@@ -250,10 +292,15 @@ function hideResults() {
     jobPanel.hidden = true;
     currentReport = null;
 }
-
 function setBusy(value) {
     taskInput.disabled = value;
     rubricInput.disabled = value;
+    if (maxTokensMode) {
+        maxTokensMode.disabled = value;
+    }
+    if (maxTokensInput) {
+        maxTokensInput.disabled = value || maxTokensMode?.value !== "explicit";
+    }
     addCustomButton.disabled = value;
     runButton.disabled = value;
     runButton.textContent = value ? "Выполняем..." : "Запустить сравнение";

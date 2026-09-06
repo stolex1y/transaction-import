@@ -6,9 +6,11 @@ import io.github.stolex1y.transactionimport.core.ExtractionOptions
 import io.github.stolex1y.transactionimport.core.ReasoningLevel
 import io.github.stolex1y.transactionimport.core.ResponseMode
 import io.github.stolex1y.transactionimport.core.StructuredValidation
+import io.github.stolex1y.transactionimport.core.TokenBudgetMode
 import io.github.stolex1y.transactionimport.core.TransactionImportService
 import io.github.stolex1y.transactionimport.core.Usage
 import io.ktor.serialization.kotlinx.json.json
+import io.ktor.server.application.ApplicationCall
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.Application
@@ -36,6 +38,8 @@ data class ExtractRequest(
     val model: String,
     val reasoning: String,
     val mode: String,
+    @SerialName("max_tokens") val maxTokens: Int? = null,
+    @SerialName("max_tokens_mode") val maxTokensMode: String = "auto",
 )
 
 @Serializable
@@ -48,8 +52,11 @@ data class ExtractResponse(
     val model: String,
     val reasoning: String,
     val mode: String,
+    @SerialName("requested_max_tokens") val requestedMaxTokens: Int?,
+    @SerialName("max_tokens_mode") val maxTokensMode: String,
     val controls: AppliedResponseControls,
     val validation: StructuredValidation?,
+    @SerialName("token_budget_warning") val tokenBudgetWarning: String? = null,
     @SerialName("processing_time_ms") val processingTimeMs: Long,
 )
 
@@ -127,40 +134,11 @@ fun Application.module(
             )
         }
         staticResources("/assets", "web")
-
         post("/api/extract") {
-            val request = call.receive<ExtractRequest>()
-            val model = request.model.trim()
-            require(model in supportedModels) {
-                "Модель не разрешена: $model"
-            }
-            val reasoning = parseReasoning(request.reasoning)
-            val responseMode = parseResponseMode(request.mode)
-            val startedAt = System.nanoTime()
-            val result = service.extract(
-                statement = request.statement,
-                options = ExtractionOptions(
-                    model = model,
-                    reasoning = reasoning,
-                    responseMode = responseMode,
-                ),
-            )
-            val processingTimeMs = (System.nanoTime() - startedAt) / 1_000_000
-            call.respond(
-                ExtractResponse(
-                    text = result.text,
-                    textLength = result.text.length,
-                    finishReason = result.finishReason,
-                    usage = result.usage,
-                    reasoningContentLength = result.reasoningContentLength,
-                    model = model,
-                    reasoning = request.reasoning.trim().lowercase(),
-                    mode = responseMode.apiValue(),
-                    controls = result.controls,
-                    validation = result.validation,
-                    processingTimeMs = processingTimeMs,
-                ),
-            )
+            call.respondExtraction(service)
+        }
+        post("/api/d01/extract") {
+            call.respondExtraction(service, forcedResponseMode = ResponseMode.UNRESTRICTED)
         }
 
         post("/api/experiments/{kind}") {
@@ -195,8 +173,72 @@ fun Application.module(
     }
 }
 
-private val experimentPages = setOf("d02", "d03", "d04", "d05")
+private val experimentPages = setOf("d01", "d02", "d03", "d04", "d05")
 private val experimentKinds = setOf("d03", "d04", "d05")
+
+private suspend fun ApplicationCall.respondExtraction(
+    service: TransactionImportService,
+    forcedResponseMode: ResponseMode? = null,
+) {
+    val request = receive<ExtractRequest>()
+    val model = request.model.trim()
+    require(model in supportedModels) {
+        "Модель не разрешена: $model"
+    }
+    val reasoning = parseReasoning(request.reasoning)
+    val responseMode = forcedResponseMode ?: parseResponseMode(request.mode)
+    val tokenBudgetMode = parseTokenBudgetMode(request.maxTokensMode)
+    require(request.maxTokens == null || request.maxTokens > 0) {
+        "max_tokens должен быть положительным целым числом."
+    }
+    require(tokenBudgetMode != TokenBudgetMode.UNLIMITED || request.maxTokens == null) {
+        "При режиме «Без ограничения» max_tokens должен быть пустым."
+    }
+    val startedAt = System.nanoTime()
+    val result = service.extract(
+        statement = request.statement,
+        options = ExtractionOptions(
+            model = model,
+            reasoning = reasoning,
+            responseMode = responseMode,
+            maxTokens = request.maxTokens,
+            tokenBudgetMode = tokenBudgetMode,
+        ),
+    )
+    val processingTimeMs = (System.nanoTime() - startedAt) / 1_000_000
+    respond(
+        ExtractResponse(
+            text = result.text,
+            textLength = result.text.length,
+            finishReason = result.finishReason,
+            usage = result.usage,
+            reasoningContentLength = result.reasoningContentLength,
+            model = model,
+            reasoning = request.reasoning.trim().lowercase(),
+            mode = responseMode.apiValue(),
+            requestedMaxTokens = request.maxTokens,
+            maxTokensMode = tokenBudgetApiValue(tokenBudgetMode, request.maxTokens),
+            controls = result.controls,
+            validation = result.validation,
+            tokenBudgetWarning = result.tokenBudgetWarning,
+            processingTimeMs = processingTimeMs,
+        ),
+    )
+}
+
+internal fun parseTokenBudgetMode(value: String): TokenBudgetMode =
+    when (value.trim().lowercase()) {
+        "", "auto", "explicit" -> TokenBudgetMode.DEFAULT
+        "unlimited" -> TokenBudgetMode.UNLIMITED
+        else -> throw IllegalArgumentException("Неизвестный режим token budget: $value")
+    }
+
+private fun tokenBudgetApiValue(mode: TokenBudgetMode, maxTokens: Int?): String =
+    when {
+        mode == TokenBudgetMode.UNLIMITED -> "unlimited"
+        maxTokens == null -> "auto"
+        else -> "explicit"
+    }
 
 internal fun parseReasoning(value: String): ReasoningLevel =
     when (value.trim().lowercase()) {
