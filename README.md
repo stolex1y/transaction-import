@@ -14,6 +14,9 @@
   свободный режим провайдера и записывает ответ в `stdout`;
 - `web` — локальный Ktor-сервер и статический русскоязычный интерфейс с ручным
   сравнением свободного и контролируемого режимов;
+- `d04` — JVM-исполнитель controlled JSON temperature-серии для
+  синтетического hard fixture; сохраняет конфигурацию, reference, raw ответы,
+  validation, field-level accuracy, fingerprint и latency;
 - `examples` — только синтетические входные данные:
   - `demo-statement.txt` — простой сценарий;
   - `demo-statement-medium-formats.txt` — средний уровень: таблица,
@@ -154,6 +157,27 @@ unset DEEPSEEK_API_KEY
   после корневого объекта;
 - локальная схема: `transaction-import.v1`;
 - timeout web-запроса: до 300 секунд; соединение устанавливается до 30 секунд.
+
+## Temperature experiment
+
+Модуль `d04` выполняет 15 последовательных controlled JSON вызовов:
+`temperature=0`, `0.7` и `1.2`, по пять повторов на значение. Модель,
+fixture и остальные request controls не меняются. Reference содержит шесть
+операций hard fixture; отчёт отдельно хранит schema validation, importability,
+field-level accuracy, лишние операции, canonical response fingerprint,
+`finish_reason`, usage и latency.
+
+```bash
+./gradlew :d04:installDist
+./d04/build/install/transaction-import-d04/bin/transaction-import-d04 \
+  examples/demo-statement-hard.txt \
+  > d04-report.json
+```
+
+Команда требует `DEEPSEEK_API_KEY` в окружении. Файл отчёта может содержать
+полные ответы модели, поэтому его нельзя отправлять в логи или публиковать
+вместе с чувствительными выписками.
+
 
 ## Границы безопасности
 

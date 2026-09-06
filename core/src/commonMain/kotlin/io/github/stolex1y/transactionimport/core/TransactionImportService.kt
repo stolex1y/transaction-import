@@ -100,6 +100,7 @@ class TransactionImportService(
             reasoningEffort = options.reasoning.effort,
             responseFormat = ResponseFormat(type = "json_object").takeIf { controlled },
             maxTokens = CONTROLLED_MAX_TOKENS.takeIf { controlled },
+            temperature = options.temperature,
             stream = false,
         )
         val response = gateway.complete(request)

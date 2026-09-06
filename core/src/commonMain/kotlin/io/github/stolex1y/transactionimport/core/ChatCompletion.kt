@@ -15,6 +15,7 @@ data class ChatCompletionRequest(
     @SerialName("reasoning_effort") val reasoningEffort: String? = null,
     @SerialName("response_format") val responseFormat: ResponseFormat? = null,
     @SerialName("max_tokens") val maxTokens: Int? = null,
+    val temperature: Double? = null,
     val stream: Boolean = false,
 )
 
@@ -53,6 +54,7 @@ data class ExtractionOptions(
     val model: String = DEFAULT_MODEL,
     val reasoning: ReasoningLevel = ReasoningLevel.DISABLED,
     val responseMode: ResponseMode = ResponseMode.UNRESTRICTED,
+    val temperature: Double? = null,
 ) {
     fun thinkingOptions(): ThinkingOptions =
         ThinkingOptions(type = reasoning.thinkingType)

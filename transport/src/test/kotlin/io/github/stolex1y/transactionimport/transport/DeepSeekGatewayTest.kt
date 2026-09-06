@@ -81,6 +81,7 @@ class DeepSeekGatewayTest {
                     reasoningEffort = "high",
                     responseFormat = ResponseFormat(type = "json_object"),
                     maxTokens = 1200,
+                    temperature = 0.7,
                     stream = false,
                 ),
             )
@@ -101,6 +102,7 @@ class DeepSeekGatewayTest {
                 bodyJson.getValue("response_format").jsonObject.getValue("type").jsonPrimitive.content,
             )
             assertEquals("1200", bodyJson.getValue("max_tokens").jsonPrimitive.content)
+            assertEquals("0.7", bodyJson.getValue("temperature").jsonPrimitive.content)
             assertTrue(!body.contains("test-key"))
             assertEquals("parsed", response.choices.single().message.content)
             assertEquals("internal reasoning", response.choices.single().message.reasoningContent)
