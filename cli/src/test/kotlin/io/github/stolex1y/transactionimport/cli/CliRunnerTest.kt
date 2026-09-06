@@ -1,6 +1,8 @@
 package io.github.stolex1y.transactionimport.cli
 
+import io.github.stolex1y.transactionimport.core.AppliedResponseControls
 import io.github.stolex1y.transactionimport.core.ExtractionResult
+import io.github.stolex1y.transactionimport.core.ResponseMode
 import io.github.stolex1y.transactionimport.core.Usage
 import kotlinx.coroutines.runBlocking
 import java.io.StringReader
@@ -17,6 +19,15 @@ class CliRunnerTest {
             text = "parsed transaction",
             finishReason = "stop",
             usage = Usage(promptTokens = 10, completionTokens = 5, totalTokens = 15),
+            responseMode = ResponseMode.UNRESTRICTED,
+            controls = AppliedResponseControls(
+                responseFormat = null,
+                maxTokens = null,
+                completionCondition = null,
+                categoryIds = emptyList(),
+            ),
+            structured = null,
+            validation = null,
         )
         val runner = CliRunner { statement ->
             receivedStatement = statement

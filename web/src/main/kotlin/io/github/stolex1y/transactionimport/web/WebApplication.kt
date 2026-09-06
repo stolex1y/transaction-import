@@ -1,8 +1,11 @@
 package io.github.stolex1y.transactionimport.web
 
+import io.github.stolex1y.transactionimport.core.AppliedResponseControls
 import io.github.stolex1y.transactionimport.core.DEFAULT_MODEL
 import io.github.stolex1y.transactionimport.core.ExtractionOptions
 import io.github.stolex1y.transactionimport.core.ReasoningLevel
+import io.github.stolex1y.transactionimport.core.ResponseMode
+import io.github.stolex1y.transactionimport.core.StructuredValidation
 import io.github.stolex1y.transactionimport.core.TransactionImportService
 import io.github.stolex1y.transactionimport.core.Usage
 import io.ktor.http.ContentType
@@ -31,15 +34,21 @@ data class ExtractRequest(
     val statement: String,
     val model: String,
     val reasoning: String,
+    val mode: String,
 )
 
 @Serializable
 data class ExtractResponse(
     val text: String,
+    @SerialName("text_length") val textLength: Int,
     @SerialName("finish_reason") val finishReason: String?,
     val usage: Usage?,
+    @SerialName("reasoning_content_length") val reasoningContentLength: Int?,
     val model: String,
     val reasoning: String,
+    val mode: String,
+    val controls: AppliedResponseControls,
+    val validation: StructuredValidation?,
     @SerialName("processing_time_ms") val processingTimeMs: Long,
 )
 
@@ -100,19 +109,29 @@ fun Application.module(service: TransactionImportService) {
                 "Модель не разрешена: $model"
             }
             val reasoning = parseReasoning(request.reasoning)
+            val responseMode = parseResponseMode(request.mode)
             val startedAt = System.nanoTime()
             val result = service.extract(
                 statement = request.statement,
-                options = ExtractionOptions(model = model, reasoning = reasoning),
+                options = ExtractionOptions(
+                    model = model,
+                    reasoning = reasoning,
+                    responseMode = responseMode,
+                ),
             )
             val processingTimeMs = (System.nanoTime() - startedAt) / 1_000_000
             call.respond(
                 ExtractResponse(
                     text = result.text,
+                    textLength = result.text.length,
                     finishReason = result.finishReason,
                     usage = result.usage,
+                    reasoningContentLength = result.reasoningContentLength,
                     model = model,
                     reasoning = request.reasoning.trim().lowercase(),
+                    mode = responseMode.apiValue(),
+                    controls = result.controls,
+                    validation = result.validation,
                     processingTimeMs = processingTimeMs,
                 ),
             )
@@ -126,7 +145,20 @@ internal fun parseReasoning(value: String): ReasoningLevel =
         "low" -> ReasoningLevel.LOW
         "high" -> ReasoningLevel.HIGH
         "max" -> ReasoningLevel.MAX
-        else -> error("Неизвестный уровень reasoning: $value")
+        else -> throw IllegalArgumentException("Неизвестный уровень reasoning: $value")
+    }
+
+internal fun parseResponseMode(value: String): ResponseMode =
+    when (value.trim().lowercase()) {
+        "unrestricted" -> ResponseMode.UNRESTRICTED
+        "controlled_json" -> ResponseMode.CONTROLLED_JSON
+        else -> throw IllegalArgumentException("Неизвестный режим ответа: $value")
+    }
+
+private fun ResponseMode.apiValue(): String =
+    when (this) {
+        ResponseMode.UNRESTRICTED -> "unrestricted"
+        ResponseMode.CONTROLLED_JSON -> "controlled_json"
     }
 
 private fun loadResource(path: String): String {

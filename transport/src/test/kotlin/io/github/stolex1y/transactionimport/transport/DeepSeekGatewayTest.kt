@@ -2,6 +2,7 @@ package io.github.stolex1y.transactionimport.transport
 
 import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.RequestMessage
+import io.github.stolex1y.transactionimport.core.ResponseFormat
 import io.github.stolex1y.transactionimport.core.ThinkingOptions
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
@@ -21,20 +22,25 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DeepSeekGatewayTest {
     @Test
-    fun postsRequestAndDecodesCompletionWithoutNetwork() = runBlocking {
-        var capturedRequest: HttpRequestData? = null
+    fun postsControlledRequestAndOmitsControlsFromUnrestrictedRequest() = runBlocking {
+        val capturedRequests = mutableListOf<HttpRequestData>()
         val engine = MockEngine { request ->
-            capturedRequest = request
+            capturedRequests += request
             respond(
                 content = """
                     {
                       "choices": [
                         {
-                          "message": {"role": "assistant", "content": "parsed"},
+                          "message": {
+                            "role": "assistant",
+                            "content": "parsed",
+                            "reasoning_content": "internal reasoning"
+                          },
                           "finish_reason": "stop"
                         }
                       ],
@@ -62,21 +68,24 @@ class DeepSeekGatewayTest {
         }
 
         try {
-            val response = DeepSeekGateway(
+            val gateway = DeepSeekGateway(
                 httpClient = client,
                 apiKey = "test-key",
                 baseUrl = "https://api.deepseek.com/",
-            ).complete(
+            )
+            val response = gateway.complete(
                 ChatCompletionRequest(
                     model = "deepseek-v4-pro",
                     messages = listOf(RequestMessage("user", "statement")),
                     thinking = ThinkingOptions("enabled"),
                     reasoningEffort = "high",
+                    responseFormat = ResponseFormat(type = "json_object"),
+                    maxTokens = 1200,
                     stream = false,
                 ),
             )
 
-            val request = requireNotNull(capturedRequest)
+            val request = capturedRequests.single()
             val body = request.bodyAsString()
             assertEquals(HttpMethod.Post, request.method)
             assertEquals("https://api.deepseek.com/chat/completions", request.url.toString())
@@ -87,10 +96,29 @@ class DeepSeekGatewayTest {
             assertEquals("enabled", bodyJson.getValue("thinking").jsonObject.getValue("type").jsonPrimitive.content)
             assertEquals("high", bodyJson.getValue("reasoning_effort").jsonPrimitive.content)
             assertTrue(!bodyJson.getValue("thinking").jsonObject.containsKey("reasoning_effort"))
+            assertEquals(
+                "json_object",
+                bodyJson.getValue("response_format").jsonObject.getValue("type").jsonPrimitive.content,
+            )
+            assertEquals("1200", bodyJson.getValue("max_tokens").jsonPrimitive.content)
             assertTrue(!body.contains("test-key"))
             assertEquals("parsed", response.choices.single().message.content)
+            assertEquals("internal reasoning", response.choices.single().message.reasoningContent)
             assertEquals("stop", response.choices.single().finishReason)
             assertEquals(5, response.usage?.totalTokens)
+
+            gateway.complete(
+                ChatCompletionRequest(
+                    model = "deepseek-v4-flash",
+                    messages = listOf(RequestMessage("user", "statement")),
+                    thinking = ThinkingOptions("disabled"),
+                ),
+            )
+            val unrestrictedBody = Json.parseToJsonElement(
+                capturedRequests.last().bodyAsString(),
+            ).jsonObject
+            assertFalse(unrestrictedBody.containsKey("response_format"))
+            assertFalse(unrestrictedBody.containsKey("max_tokens"))
         } finally {
             client.close()
         }

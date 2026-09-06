@@ -13,6 +13,8 @@ data class ChatCompletionRequest(
     val messages: List<RequestMessage>,
     val thinking: ThinkingOptions,
     @SerialName("reasoning_effort") val reasoningEffort: String? = null,
+    @SerialName("response_format") val responseFormat: ResponseFormat? = null,
+    @SerialName("max_tokens") val maxTokens: Int? = null,
     val stream: Boolean = false,
 )
 
@@ -27,6 +29,11 @@ data class ThinkingOptions(
     val type: String,
 )
 
+@Serializable
+data class ResponseFormat(
+    val type: String,
+)
+
 enum class ReasoningLevel(
     val thinkingType: String,
     val effort: String?,
@@ -37,9 +44,15 @@ enum class ReasoningLevel(
     MAX(thinkingType = "enabled", effort = "max"),
 }
 
+enum class ResponseMode {
+    UNRESTRICTED,
+    CONTROLLED_JSON,
+}
+
 data class ExtractionOptions(
     val model: String = DEFAULT_MODEL,
     val reasoning: ReasoningLevel = ReasoningLevel.DISABLED,
+    val responseMode: ResponseMode = ResponseMode.UNRESTRICTED,
 ) {
     fun thinkingOptions(): ThinkingOptions =
         ThinkingOptions(type = reasoning.thinkingType)
@@ -61,6 +74,7 @@ data class ChatChoice(
 data class ResponseMessage(
     val role: String? = null,
     val content: String? = null,
+    @SerialName("reasoning_content") val reasoningContent: String? = null,
 )
 
 @Serializable
@@ -70,8 +84,21 @@ data class Usage(
     @SerialName("total_tokens") val totalTokens: Int? = null,
 )
 
+@Serializable
+data class AppliedResponseControls(
+    @SerialName("response_format") val responseFormat: ResponseFormat?,
+    @SerialName("max_tokens") val maxTokens: Int?,
+    @SerialName("completion_condition") val completionCondition: String?,
+    @SerialName("category_ids") val categoryIds: List<String>,
+)
+
 data class ExtractionResult(
     val text: String,
     val finishReason: String?,
     val usage: Usage?,
+    val reasoningContentLength: Int? = null,
+    val responseMode: ResponseMode,
+    val controls: AppliedResponseControls,
+    val structured: StructuredImport?,
+    val validation: StructuredValidation?,
 )

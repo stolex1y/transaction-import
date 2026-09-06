@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Импорт операций</title>
     <link rel="stylesheet" href="/assets/styles.css">
+    <link rel="icon" href="data:,">
 </head>
 <body>
 <main class="page-shell">
@@ -35,13 +36,30 @@
                 <div class="control">
                     <label for="reasoning">Глубина анализа</label>
                     <select id="reasoning" name="reasoning">
-                        <option value="disabled">Стандартный</option>
+                        <option value="disabled" selected>Стандартный</option>
                         <option value="low">Базовый</option>
-                        <option value="high" selected>Подробный</option>
+                        <option value="high">Подробный</option>
                         <option value="max">Максимальный</option>
                     </select>
                 </div>
+                <div class="control">
+                    <label for="mode">Формат ответа</label>
+                    <select id="mode" name="mode">
+                        <option value="unrestricted">Без ограничений</option>
+                        <option value="controlled_json">Контролируемый JSON</option>
+                    </select>
+                </div>
             </div>
+            <p class="control-note">
+                Для сравнения вручную запустите оба формата, не меняя выписку,
+                модель и глубину анализа.
+            </p>
+            <p class="control-note">
+                При включённом reasoning часть бюджета расходуется на
+                reasoning_content; при `max_tokens=1200` финальный JSON может
+                не успеть появиться. Для этого режима по умолчанию выбран
+                стандартный анализ.
+            </p>
 
             <button id="submit-button" type="submit">Обработать выписку</button>
             <p id="status" class="status" role="status" aria-live="polite"></p>
@@ -54,8 +72,21 @@
             <span id="current-settings" class="badge"></span>
         </div>
         <div id="current-stats" class="result-stats" aria-live="polite"></div>
+        <div id="validation" class="validation" hidden></div>
         <pre id="answer" class="answer"></pre>
         <pre id="metadata" class="metadata"></pre>
+    </section>
+
+    <section id="comparison" class="panel" hidden>
+        <div class="section-heading">
+            <h2>Сравнение форматов</h2>
+            <span id="comparison-settings" class="badge"></span>
+        </div>
+        <p class="comparison-note">
+            Пара построена только из запусков с дословно одинаковой выпиской,
+            моделью и глубиной анализа.
+        </p>
+        <div id="comparison-grid" class="comparison-grid"></div>
     </section>
 
     <section class="panel">
