@@ -9,9 +9,7 @@
 
 - `core` — платформонезависимые модели, строгий контракт JSON, локальная
   валидация, контракт провайдера и сервис извлечения;
-- `transport` — общий JVM Ktor Client-адаптер DeepSeek для CLI и web-сервера;
-- `cli` — приложение JVM, которое читает одну выписку из `stdin`, вызывает
-  свободный режим провайдера и записывает ответ в `stdout`;
+- `transport` — общий JVM Ktor Client-адаптер DeepSeek для server-side интеграции;
 - `web` — локальный Ktor-сервер и статический русскоязычный интерфейс с
   основной страницей импорта, отдельным baseline D01 `/experiments/d01` и
   web-разделами `/experiments/d02`, `/experiments/d03`,
@@ -20,19 +18,17 @@
   синтетического hard fixture; сохраняет конфигурацию, reference, raw ответы,
   validation, field-level accuracy, fingerprint и latency. Пользовательский
   web-сценарий находится на странице `/experiments/d04`;
-- `d05` — JVM-исполнитель сравнения `deepseek-v4-flash`,
-  `z-ai/glm-5.2:free` через OpenRouter и `deepseek-v4-pro`; фиксирует
-  reasoning controls, provider-specific usage, validation, latency, cost/quota
-  и compatibility failures. Пользовательский web-сценарий находится на
-  странице `/experiments/d05`.
-- `examples` — только синтетические входные данные:
-  - `demo-statement.txt` — простой сценарий;
-  - `demo-statement-medium-formats.txt` — средний уровень: таблица,
-    перенос строки, комиссия и частичный возврат;
-  - `demo-statement-medium-mixed.txt` — средний уровень: разные форматы дат,
-    суммы в RUB, зарплата и перевод между своими счетами;
-  - `demo-statement-hard.txt` — сложный уровень: шум, сторно, комиссия,
-    переносы, суммы только в RUB и недоверенная строка описания.
+- `d05` — JVM-исполнитель сравнения `deepseek-v4-flash`, OpenRouter-модели,
+  заданной через `OPENROUTER_MODEL` (по умолчанию `z-ai/glm-5.2:free`) и
+  `deepseek-v4-pro`; фиксирует reasoning controls, provider-specific usage,
+  validation, latency, cost/quota и compatibility failures. Пользовательский
+  web-сценарий находится на странице `/experiments/d05`.
+- `examples` — пять синтетических task-файлов:
+  - `demo-task-d01.txt` — hard-выписка для D01;
+  - `demo-task-d02.txt` — та же hard-выписка для controlled JSON D02;
+  - `demo-task-d03.txt` — задача о фальшивой монете;
+  - `demo-task-d04.txt` — полный prompt для эксперимента temperature;
+  - `demo-task-d05.txt` — полный prompt для стрессового сравнения моделей.
 
 `core` не зависит от UI или серверного фреймворка. Kotlin/JVM backend может
 использовать его напрямую, а Android-, iOS- и Desktop-клиенты могут повторно
@@ -53,39 +49,6 @@
 Тесты используют fake gateway и Ktor `MockEngine`. Они не обращаются к сети,
 не требуют API-ключа и не отправляют текст выписки во внешний сервис.
 
-## Использование CLI
-
-Ключ провайдера должен находиться только в окружении процесса:
-
-```bash
-read -r -s -p 'API-ключ провайдера: ' DEEPSEEK_API_KEY
-printf '\n'
-export DEEPSEEK_API_KEY
-
-./gradlew :cli:installDist
-./cli/build/install/transaction-import/bin/transaction-import parse \
-  < examples/demo-statement.txt
-
-unset DEEPSEEK_API_KEY
-```
-
-Для демонстрации средней и высокой сложности укажи другой fixture в той же
-команде:
-
-```bash
-./cli/build/install/transaction-import/bin/transaction-import parse \
-  < examples/demo-statement-medium-formats.txt
-
-./cli/build/install/transaction-import/bin/transaction-import parse \
-  < examples/demo-statement-medium-mixed.txt
-
-./cli/build/install/transaction-import/bin/transaction-import parse \
-  < examples/demo-statement-hard.txt
-```
-
-Ответ модели записывается в `stdout`. Поля `finish_reason` и сводка по
-использованным токенам записываются в `stderr`. CLI не сохраняет вход или
-выходные данные.
 
 ## Использование web-приложения
 
@@ -97,6 +60,12 @@ unset DEEPSEEK_API_KEY
 read -r -s -p 'API-ключ провайдера: ' DEEPSEEK_API_KEY
 printf '\n'
 export DEEPSEEK_API_KEY
+
+# Для страницы D05:
+read -r -s -p 'OpenRouter API-ключ: ' OPENROUTER_API_KEY
+printf '\n'
+export OPENROUTER_API_KEY
+export OPENROUTER_MODEL=minimax/minimax-m3:free
 
 ./web/build/install/transaction-import-web/bin/transaction-import-web
 ```
@@ -140,9 +109,8 @@ usage и provider-specific token warning.
 
 ## Web-страницы экспериментов D01-D05
 
-Пользовательский запуск заданий выполняется через web, CLI-модули остаются
-техническим regression/reference layer. После запуска web-сервера откройте
-`http://127.0.0.1:8080/experiments`.
+Пользовательский запуск заданий выполняется через web. После запуска
+web-сервера откройте `http://127.0.0.1:8080/experiments`.
 
 - `/experiments/d01` — baseline unrestricted без выбора формата и сравнения;
 - `/experiments/d02` — банковский statement, базовый и controlled JSON;
@@ -150,10 +118,17 @@ usage и provider-specific token warning.
 - `/experiments/d04` — свободная задача и preset temperature `0`, `0.7`, `1.2`;
 - `/experiments/d05` — свободная задача и preset DeepSeek/OpenRouter models.
 
+Входные данные страниц соответствуют task-файлам в `examples`:
+`demo-task-d01.txt` — D01, `demo-task-d02.txt` — D02,
+`demo-task-d03.txt` — D03, `demo-task-d04.txt` — D04,
+`demo-task-d05.txt` — D05. Для D03-D05 полный prompt вставляется
+в textarea страницы.
+
 Web runner выполняет preset-вызовы последовательно, показывает progress и
 provider errors, а завершённый результат можно скачать как JSON evidence.
-API-ключи остаются на сервере. Для D02-D04 нужен `DEEPSEEK_API_KEY`; для D05
-дополнительно нужен `OPENROUTER_API_KEY`.
+- `/experiments/d05` дополнительно требует `OPENROUTER_API_KEY`; его preset
+  OpenRouter использует `OPENROUTER_MODEL`, а без переменной сохраняет
+  `z-ai/glm-5.2:free`.
 
 ## Контролируемый JSON
 
@@ -183,14 +158,15 @@ API-ключи остаются на сервере. Для D02-D04 нужен `
 После демонстрации останови сервер и выполни:
 
 ```bash
-unset DEEPSEEK_API_KEY
+unset DEEPSEEK_API_KEY OPENROUTER_API_KEY OPENROUTER_MODEL
 ```
 
 Текущая конфигурация провайдера:
 
 - base URL: `https://api.deepseek.com`;
-- CLI по умолчанию использует `deepseek-v4-flash`;
 - web UI предлагает `deepseek-v4-flash` и `deepseek-v4-pro`;
+- D05 использует `OPENROUTER_MODEL` или default `z-ai/glm-5.2:free` для
+  server-side OpenRouter preset;
 - reasoning: `disabled`, `low`, `high` или `max`;
 - при включённом reasoning `reasoning_effort` отправляется отдельным
   top-level полем, а не внутри `thinking`;
@@ -209,14 +185,7 @@ fixture и остальные request controls не меняются. Reference 
 field-level accuracy, лишние операции, canonical response fingerprint,
 `finish_reason`, usage и latency.
 
-```bash
-./gradlew :d04:installDist
-./d04/build/install/transaction-import-d04/bin/transaction-import-d04 \
-  examples/demo-statement-hard.txt \
-  > d04-report.json
-```
-
-Команда требует `DEEPSEEK_API_KEY` в окружении. Файл отчёта может содержать
+Эксперимент требует `DEEPSEEK_API_KEY` в окружении. Файл отчёта может содержать
 полные ответы модели, поэтому его нельзя отправлять в логи или публиковать
 вместе с чувствительными выписками.
 
@@ -225,24 +194,29 @@ field-level accuracy, лишние операции, canonical response fingerpr
 Модуль `d05` использует один hard fixture и controlled JSON contract:
 `temperature=0`, reasoning `high`, `response_format=json_object`,
 `max_tokens=4096`, `stream=false`, по пять последовательных запусков на модель.
-DeepSeek вызывается напрямую через `DEEPSEEK_API_KEY`; GLM-5.2 free — через
-OpenRouter и `OPENROUTER_API_KEY`. До серии OpenRouter проверяет точный model ID
-через `/models`. Provider-specific usage сохраняется вместе с raw response
-metadata; compatibility error останавливает серию конкретной модели, без
-тихой замены провайдера.
+DeepSeek вызывается напрямую через `DEEPSEEK_API_KEY`; OpenRouter использует
+`OPENROUTER_API_KEY` и model ID из `OPENROUTER_MODEL`.
+
+`OPENROUTER_MODEL` — необязательная server-side переменная. Если она не задана
+или пустая, используется `z-ai/glm-5.2:free`. Например:
 
 ```bash
-./gradlew :d05:installDist
-./d05/build/install/transaction-import-d05/bin/transaction-import-d05 \
-  examples/demo-statement-hard.txt \
-  > d05-report.json
+export OPENROUTER_MODEL=minimax/minimax-m3:free
 ```
 
-Команда требует обе переменные окружения. В DeepSeek cost estimate использует
-официальные V4 rates и помечает peak/off-peak UTC window; если cache fields не
-пришли, input считается cache miss. Для OpenRouter `:free` стоимость не
-трактуется как отсутствие квоты: отчёт отдельно сохраняет provider metadata и
-compatibility/rate-limit errors.
+Перед серией D05 проверяет именно настроенный ID через OpenRouter `/models`.
+Недоступная модель или несовместимый параметр фиксируются как compatibility
+error; модель не заменяется автоматически. Provider/model сохраняются в отчёте.
+
+Для web D05 можно вставить полный prompt из
+`examples/demo-task-d05.txt` в свободное поле задачи.
+
+Запуск требует обе переменные API-ключей. `OPENROUTER_MODEL` меняет preset
+после запуска процесса без правки исходников; web-сервер также читает её при
+старте. В DeepSeek cost estimate использует официальные V4 rates и помечает
+peak/off-peak UTC window; если cache fields не пришли, input считается cache
+miss. Для OpenRouter `:free` стоимость не трактуется как отсутствие квоты:
+отчёт отдельно сохраняет provider metadata и compatibility/rate-limit errors.
 
 Фактический запуск на hard fixture подтвердил OpenRouter model metadata, но
 дал HTTP 429 upstream rate limit после первого completion запроса. Оба
