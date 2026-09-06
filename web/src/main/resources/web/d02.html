@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>D02 — Управление форматом</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <link rel="icon" href="data:,">
+</head>
+<body>
+<main class="page-shell">
+    <nav class="top-nav" aria-label="Навигация">
+        <a href="/">Основная страница</a>
+        <a href="/experiments">Эксперименты D02–D05</a>
+    </nav>
+    <header class="hero">
+        <p class="eyebrow">D02 · Smart Expense Import</p>
+        <h1>Управление форматом</h1>
+        <p class="subtitle">Один банковский statement, два режима ответа. Для сравнения меняйте только формат, сохраняя модель и reasoning.</p>
+    </header>
+
+    <section class="panel">
+        <form id="extract-form">
+            <label for="statement">Текст банковской выписки</label>
+            <textarea id="statement" name="statement" rows="16" placeholder="Вставьте синтетическую или обезличенную банковскую выписку"></textarea>
+            <div class="controls">
+                <div class="control">
+                    <label for="model">Модель</label>
+                    <select id="model" name="model">
+                        <option value="deepseek-v4-flash">deepseek-v4-flash</option>
+                        <option value="deepseek-v4-pro">deepseek-v4-pro</option>
+                    </select>
+                </div>
+                <div class="control">
+                    <label for="reasoning">Глубина анализа</label>
+                    <select id="reasoning" name="reasoning">
+                        <option value="disabled" selected>Стандартный</option>
+                        <option value="low">Базовый</option>
+                        <option value="high">Подробный</option>
+                        <option value="max">Максимальный</option>
+                    </select>
+                </div>
+                <div class="control">
+                    <label for="mode">Формат ответа</label>
+                    <select id="mode" name="mode">
+                        <option value="unrestricted">Без ограничений</option>
+                        <option value="controlled_json">Контролируемый JSON</option>
+                    </select>
+                </div>
+            </div>
+            <p class="control-note">Сначала запустите «Без ограничений», затем controlled JSON с теми же statement, моделью и reasoning.</p>
+            <button id="submit-button" type="submit">Обработать выписку</button>
+            <p id="status" class="status" role="status" aria-live="polite"></p>
+        </form>
+    </section>
+
+    <section id="current-result" class="panel result-panel" hidden>
+        <div class="section-heading"><h2>Результат обработки</h2><span id="current-settings" class="badge"></span></div>
+        <div id="current-stats" class="result-stats" aria-live="polite"></div>
+        <div id="validation" class="validation" hidden></div>
+        <pre id="answer" class="answer"></pre>
+        <pre id="metadata" class="metadata"></pre>
+    </section>
+    <section id="comparison" class="panel" hidden>
+        <div class="section-heading"><h2>Сравнение форматов</h2><span id="comparison-settings" class="badge"></span></div>
+        <p class="comparison-note">Пара построена только из запусков с дословно одинаковыми statement, моделью и reasoning.</p>
+        <div id="comparison-grid" class="comparison-grid"></div>
+    </section>
+    <section class="panel">
+        <div class="section-heading"><h2>История обработки</h2><a href="/experiments">К экспериментам</a></div>
+        <div id="history" class="history"><p class="muted">Обработок пока нет.</p></div>
+    </section>
+</main>
+<script src="/assets/app.js" defer></script>
+</body>
+</html>

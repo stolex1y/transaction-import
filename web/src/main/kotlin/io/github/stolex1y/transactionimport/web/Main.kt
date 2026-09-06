@@ -1,6 +1,7 @@
 package io.github.stolex1y.transactionimport.web
 
 import io.github.stolex1y.transactionimport.core.TransactionImportService
+import io.github.stolex1y.transactionimport.d05.OpenRouterGateway
 import io.github.stolex1y.transactionimport.transport.DeepSeekGateway
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
@@ -44,9 +45,14 @@ fun main() {
     }
 
     try {
-        val service = TransactionImportService(DeepSeekGateway(httpClient, apiKey))
+        val deepSeekGateway = DeepSeekGateway(httpClient, apiKey)
+        val service = TransactionImportService(deepSeekGateway)
+        val openRouterGateway = System.getenv("OPENROUTER_API_KEY")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { OpenRouterGateway(httpClient, it) }
+        val experimentService = ExperimentService(deepSeekGateway, openRouterGateway)
         embeddedServer(Netty, host = "127.0.0.1", port = port) {
-            module(service)
+            module(service, experimentService)
         }.start(wait = true)
     } finally {
         httpClient.close()

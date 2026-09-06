@@ -12,15 +12,18 @@
 - `transport` — общий JVM Ktor Client-адаптер DeepSeek для CLI и web-сервера;
 - `cli` — приложение JVM, которое читает одну выписку из `stdin`, вызывает
   свободный режим провайдера и записывает ответ в `stdout`;
-- `web` — локальный Ktor-сервер и статический русскоязычный интерфейс с ручным
-  сравнением свободного и контролируемого режимов;
+- `web` — локальный Ktor-сервер и статический русскоязычный интерфейс с
+  основной страницей импорта и отдельными web-разделами `/experiments/d02`,
+  `/experiments/d03`, `/experiments/d04`, `/experiments/d05`;
 - `d04` — JVM-исполнитель controlled JSON temperature-серии для
   синтетического hard fixture; сохраняет конфигурацию, reference, raw ответы,
-  validation, field-level accuracy, fingerprint и latency;
+  validation, field-level accuracy, fingerprint и latency. Пользовательский
+  web-сценарий находится на странице `/experiments/d04`;
 - `d05` — JVM-исполнитель сравнения `deepseek-v4-flash`,
   `z-ai/glm-5.2:free` через OpenRouter и `deepseek-v4-pro`; фиксирует
   reasoning controls, provider-specific usage, validation, latency, cost/quota
-  и compatibility failures;
+  и compatibility failures. Пользовательский web-сценарий находится на
+  странице `/experiments/d05`.
 - `examples` — только синтетические входные данные:
   - `demo-statement.txt` — простой сценарий;
   - `demo-statement-medium-formats.txt` — средний уровень: таблица,
@@ -118,6 +121,22 @@ Thinking mode DeepSeek может вернуть внутреннее рассу
 невалидный контролируемый результат с `finish_reason` и длиной reasoning, без
 502 и без возможности импорта; по умолчанию controlled JSON использует
 `reasoning=disabled`. Полный текст `reasoning_content` не сохраняется.
+
+## Web-страницы экспериментов D02-D05
+
+Пользовательский запуск заданий выполняется через web, CLI-модули остаются
+техническим regression/reference layer. После запуска web-сервера откройте
+`http://127.0.0.1:8080/experiments`.
+
+- `/experiments/d02` — банковский statement, базовый и controlled JSON;
+- `/experiments/d03` — свободная задача и четыре prompt strategies;
+- `/experiments/d04` — свободная задача и preset temperature `0`, `0.7`, `1.2`;
+- `/experiments/d05` — свободная задача и preset DeepSeek/OpenRouter models.
+
+Web runner выполняет preset-вызовы последовательно, показывает progress и
+provider errors, а завершённый результат можно скачать как JSON evidence.
+API-ключи остаются на сервере. Для D02-D04 нужен `DEEPSEEK_API_KEY`; для D05
+дополнительно нужен `OPENROUTER_API_KEY`.
 
 ## Контролируемый JSON
 

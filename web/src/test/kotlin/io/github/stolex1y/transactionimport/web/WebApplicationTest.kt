@@ -17,6 +17,7 @@ import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -194,6 +195,47 @@ class WebApplicationTest {
         assertEquals(HttpStatusCode.BadRequest, response.status)
         assertTrue(response.bodyAsText().contains("Statement must not be blank"))
         assertNull(gateway.request)
+    }
+
+    @Test
+    fun servesExperimentPagesAndRunsAnAsyncD04Job() = testApplication {
+        val gateway = RecordingGateway()
+        application {
+            module(
+                service = TransactionImportService(gateway),
+                experimentService = ExperimentService(gateway, openRouterGateway = null),
+            )
+        }
+
+        val page = client.get("/experiments/d04")
+        assertEquals(HttpStatusCode.OK, page.status)
+        assertTrue(page.bodyAsText().contains("Влияние temperature"))
+
+        val accepted = client.post("/api/experiments/d04") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"task":"Сравните два алгоритма на синтетическом примере."}""")
+        }
+        assertEquals(HttpStatusCode.Accepted, accepted.status)
+        val jobId = Json.parseToJsonElement(accepted.bodyAsText())
+            .jsonObject
+            .getValue("job_id")
+            .jsonPrimitive
+            .content
+
+        var job = client.get("/api/experiments/jobs/$jobId")
+        repeat(20) {
+            if (job.bodyAsText().contains("\"status\":\"completed\"")) return@repeat
+            kotlinx.coroutines.delay(10)
+            job = client.get("/api/experiments/jobs/$jobId")
+        }
+        assertEquals(HttpStatusCode.OK, job.status)
+        val body = Json.parseToJsonElement(job.bodyAsText()).jsonObject
+        assertEquals("completed", body.getValue("status").jsonPrimitive.content)
+        assertEquals("3", body.getValue("completed").jsonPrimitive.content)
+        assertEquals(
+            "3",
+            body.getValue("result").jsonObject.getValue("runs").jsonArray.size.toString(),
+        )
     }
 
     private suspend fun io.ktor.server.testing.ApplicationTestBuilder.postExtraction(

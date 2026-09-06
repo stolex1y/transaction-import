@@ -8,10 +8,11 @@ import io.github.stolex1y.transactionimport.core.ResponseMode
 import io.github.stolex1y.transactionimport.core.StructuredValidation
 import io.github.stolex1y.transactionimport.core.TransactionImportService
 import io.github.stolex1y.transactionimport.core.Usage
+import io.ktor.serialization.kotlinx.json.json
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
-import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
+import io.ktor.server.application.ApplicationStopped
 import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.http.content.staticResources
@@ -68,7 +69,17 @@ private val webJson = Json {
     explicitNulls = false
 }
 
-fun Application.module(service: TransactionImportService) {
+fun Application.module(
+    service: TransactionImportService,
+    experimentService: ExperimentService? = null,
+) {
+    val jobManager = experimentService?.let(::ExperimentJobManager)
+    jobManager?.let { manager ->
+        environment.monitor.subscribe(ApplicationStopped) {
+            manager.close()
+        }
+    }
+
     install(ContentNegotiation) {
         json(webJson)
     }
@@ -97,6 +108,21 @@ fun Application.module(service: TransactionImportService) {
         get("/") {
             call.respondText(
                 text = loadResource("web/index.html"),
+                contentType = ContentType.Text.Html,
+            )
+        }
+        get("/experiments") {
+            call.respondText(
+                text = loadResource("web/experiments.html"),
+                contentType = ContentType.Text.Html,
+            )
+        }
+        get("/experiments/{page}") {
+            val page = call.parameters["page"]
+                ?.takeIf { it in experimentPages }
+                ?: throw IllegalArgumentException("Раздел эксперимента не найден.")
+            call.respondText(
+                text = loadResource("web/$page.html"),
                 contentType = ContentType.Text.Html,
             )
         }
@@ -136,8 +162,41 @@ fun Application.module(service: TransactionImportService) {
                 ),
             )
         }
+
+        post("/api/experiments/{kind}") {
+            val manager = jobManager
+                ?: run {
+                    call.respond(
+                        HttpStatusCode.ServiceUnavailable,
+                        ErrorResponse("Экспериментальный runner не настроен."),
+                    )
+                    return@post
+                }
+            val kind = call.parameters["kind"]
+                ?.takeIf { it in experimentKinds }
+                ?: throw IllegalArgumentException("Эксперимент не разрешён.")
+            val request = call.receive<ExperimentRequest>()
+            val accepted = manager.submit(kind, request)
+            call.respond(HttpStatusCode.Accepted, ExperimentAccepted(accepted.id))
+        }
+
+        get("/api/experiments/jobs/{id}") {
+            val id = call.parameters["id"].orEmpty()
+            val response = jobManager?.get(id)
+            if (response == null) {
+                call.respond(
+                    HttpStatusCode.NotFound,
+                    ErrorResponse("Экспериментальная сессия не найдена."),
+                )
+            } else {
+                call.respond(response)
+            }
+        }
     }
 }
+
+private val experimentPages = setOf("d02", "d03", "d04", "d05")
+private val experimentKinds = setOf("d03", "d04", "d05")
 
 internal fun parseReasoning(value: String): ReasoningLevel =
     when (value.trim().lowercase()) {
