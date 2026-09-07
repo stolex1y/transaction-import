@@ -10,9 +10,13 @@ import java.nio.file.Path
 import kotlin.io.path.readText
 
 suspend fun main(args: Array<String>) {
-    val fixturePath = Path.of(args.firstOrNull() ?: "examples/demo-statement-hard.txt")
+    val fixturePath = Path.of(args.firstOrNull() ?: "examples/demo-task-d01.txt")
     val deepSeekApiKey = requireEnvironment("DEEPSEEK_API_KEY")
     val openRouterApiKey = requireEnvironment("OPENROUTER_API_KEY")
+    val openRouterModel = System.getenv("OPENROUTER_MODEL")
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: DEFAULT_OPENROUTER_MODEL
     val statement = fixturePath.readText()
     require(statement.isNotBlank()) { "Fixture must not be blank: $fixturePath" }
 
@@ -35,6 +39,7 @@ suspend fun main(args: Array<String>) {
             httpClient = httpClient,
             deepSeekApiKey = deepSeekApiKey,
             openRouterApiKey = openRouterApiKey,
+            openRouterModel = openRouterModel,
         )
         println(json.encodeToString(D05Report.serializer(), report))
     }

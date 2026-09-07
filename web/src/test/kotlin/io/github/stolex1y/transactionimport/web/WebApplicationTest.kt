@@ -304,6 +304,27 @@ class WebApplicationTest {
         assertNull(report.getValue("runs").jsonArray.first().jsonObject["max_tokens"])
     }
 
+    @Test
+    fun usesConfiguredOpenRouterModelForD05Preset() = kotlinx.coroutines.runBlocking {
+        val configuredModel = "minimax/minimax-m3:free"
+        val service = ExperimentService(
+            deepSeekGateway = RecordingGateway(),
+            openRouterGateway = null,
+            openRouterModel = configuredModel,
+        )
+
+        val report = service.run(
+            kind = "d05",
+            request = ExperimentRequest(task = "synthetic task"),
+            onProgress = { _, _ -> },
+        )
+
+        assertEquals(configuredModel, report.preflight.single().model)
+        val openRouterRun = report.runs.single { it.provider == "openrouter" }
+        assertEquals(configuredModel, openRouterRun.model)
+        assertEquals("OPENROUTER_API_KEY не задан.", openRouterRun.error)
+    }
+
     private suspend fun io.ktor.server.testing.ApplicationTestBuilder.postExtraction(
         body: String,
     ) = client.post("/api/extract") {

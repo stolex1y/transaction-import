@@ -30,7 +30,7 @@ class ExperimentTest {
             if (request.method == HttpMethod.Get) {
                 respond(
                     content = """
-                        {"data":[{"id":"z-ai/glm-5.2:free","supported_parameters":["reasoning"]}]}
+                        {"data":[{"id":"minimax/minimax-m3:free","supported_parameters":["reasoning"]}]}
                     """.trimIndent(),
                     status = HttpStatusCode.OK,
                     headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
@@ -64,10 +64,12 @@ class ExperimentTest {
                 httpClient = client,
                 deepSeekApiKey = "deepseek-test-key",
                 openRouterApiKey = "openrouter-test-key",
+                openRouterModel = "minimax/minimax-m3:free",
             )
 
             assertEquals(3, report.summaries.size)
             assertTrue(report.summaries.all { it.preflight.passed })
+            assertEquals("minimax/minimax-m3:free", report.summaries[1].spec.model)
             assertTrue(report.summaries.all { it.runs.size == 5 })
             assertTrue(report.summaries.all { it.runs.all { run -> run.error == null } })
             assertTrue(report.summaries.all { it.runs.all { run -> run.finishReason == "stop" } })
@@ -78,6 +80,7 @@ class ExperimentTest {
             assertTrue(postBodies.count { it.contains("\"thinking\":{\"type\":\"enabled\"}") } == 10)
             assertTrue(postBodies.count { it.contains("\"reasoning\":{\"effort\":\"high\"}") } == 5)
             assertTrue(postBodies.all { it.contains("\"response_format\":{\"type\":\"json_object\"}") })
+            assertTrue(postBodies.count { it.contains("\"model\":\"minimax/minimax-m3:free\"") } == 5)
             assertTrue(postBodies.all { it.contains("\"max_tokens\":4096") })
             assertTrue(postBodies.all { it.contains("\"temperature\":0.0") })
             assertNotNull(report.summaries[1].runs.first().rawUsage)

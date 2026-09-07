@@ -12,7 +12,7 @@ import java.nio.file.Path
 import kotlin.system.exitProcess
 
 private const val API_KEY_ENV = "DEEPSEEK_API_KEY"
-private const val DEFAULT_FIXTURE = "examples/demo-statement-hard.txt"
+private const val DEFAULT_FIXTURE = "examples/demo-task-d01.txt"
 
 fun main(args: Array<String>) {
     val apiKey = System.getenv(API_KEY_ENV)?.takeIf(String::isNotBlank)

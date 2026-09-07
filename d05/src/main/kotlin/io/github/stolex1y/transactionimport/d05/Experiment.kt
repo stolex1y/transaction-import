@@ -26,7 +26,7 @@ private const val MAX_TOKENS = 4096
 private const val TEMPERATURE = 0.0
 private const val DEEPSEEK_ENDPOINT = "https://api.deepseek.com/chat/completions"
 private const val OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
-private const val OPENROUTER_MODEL = "z-ai/glm-5.2:free"
+const val DEFAULT_OPENROUTER_MODEL = "z-ai/glm-5.2:free"
 
 @Serializable
 data class D05Controls(
@@ -142,7 +142,12 @@ suspend fun runD05Experiment(
     httpClient: HttpClient,
     deepSeekApiKey: String,
     openRouterApiKey: String,
+    openRouterModel: String = DEFAULT_OPENROUTER_MODEL,
 ): D05Report {
+    val configuredOpenRouterModel = openRouterModel.trim()
+    require(configuredOpenRouterModel.isNotEmpty()) {
+        "OpenRouter model must not be blank."
+    }
     val reference = hardReference()
     val controls = d05Controls()
     val openRouterGateway = OpenRouterGateway(httpClient, openRouterApiKey)
@@ -156,7 +161,7 @@ suspend fun runD05Experiment(
         ),
         D05ModelSpec(
             provider = "openrouter",
-            model = OPENROUTER_MODEL,
+            model = configuredOpenRouterModel,
             levelHypothesis = "cross-provider baseline",
             endpoint = OPENROUTER_ENDPOINT,
             apiKeyEnv = "OPENROUTER_API_KEY",

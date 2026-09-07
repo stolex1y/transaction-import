@@ -9,6 +9,7 @@ import io.github.stolex1y.transactionimport.core.ThinkingOptions
 import io.github.stolex1y.transactionimport.core.TokenBudgetMode
 import io.github.stolex1y.transactionimport.core.Usage
 import io.github.stolex1y.transactionimport.d05.OpenRouterGateway
+import io.github.stolex1y.transactionimport.d05.DEFAULT_OPENROUTER_MODEL
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,7 +26,6 @@ import kotlinx.coroutines.cancel
 private const val DEFAULT_EXPERIMENT_MAX_TOKENS = 1200
 private const val D03_MAX_TOKENS = 1600
 private const val D05_MAX_TOKENS = 4096
-private const val OPENROUTER_MODEL = "z-ai/glm-5.2:free"
 private const val DEFAULT_MODEL = "deepseek-v4-flash"
 private const val MAX_TASK_LENGTH = 20_000
 private const val MAX_CUSTOM_CONFIGURATIONS = 4
@@ -135,7 +135,11 @@ private data class CallOutcome(
 class ExperimentService(
     private val deepSeekGateway: ChatCompletionGateway,
     private val openRouterGateway: OpenRouterGateway?,
+    openRouterModel: String = DEFAULT_OPENROUTER_MODEL,
 ) {
+    private val configuredOpenRouterModel = openRouterModel.trim().also {
+        require(it.isNotEmpty()) { "OpenRouter model must not be blank." }
+    }
     fun configurationCount(kind: String, customConfigurations: List<CustomExperimentConfiguration>): Int =
         presetConfigurations(kind).size + customConfigurations.size
 
@@ -234,8 +238,8 @@ class ExperimentService(
                 systemPrompt = "Solve the user's task. Return the final answer directly and preserve important details.",
             ),
             ExperimentConfiguration(
-                label = "GLM 5.2 free",
-                model = OPENROUTER_MODEL,
+                label = "OpenRouter model",
+                model = configuredOpenRouterModel,
                 reasoning = "high",
                 temperature = 0.0,
                 maxTokens = D05_MAX_TOKENS,
@@ -262,7 +266,12 @@ class ExperimentService(
         val defaultMaxTokens = defaultMaxTokens(kind)
         val maxTokens = custom.maxTokens ?: defaultMaxTokens
         require(custom.label.trim().isNotEmpty()) { "Название custom configuration не может быть пустым." }
-        require(model in supportedExperimentModels) { "Модель не разрешена: $model" }
+        require(
+            model == "deepseek-v4-flash" ||
+                model == "deepseek-v4-pro" ||
+                model == configuredOpenRouterModel ||
+                model == DEFAULT_OPENROUTER_MODEL
+        ) { "Модель не разрешена: $model" }
         require(custom.temperature == null || custom.temperature in 0.0..2.0) {
             "Temperature должна быть в диапазоне от 0 до 2."
         }
@@ -399,7 +408,7 @@ class ExperimentService(
             return listOf(
                 ExperimentPreflight(
                     provider = "openrouter",
-                    model = OPENROUTER_MODEL,
+                    model = configuredOpenRouterModel,
                     passed = false,
                     reasoningSupport = "not verified",
                     error = "OPENROUTER_API_KEY не задан.",
@@ -407,11 +416,11 @@ class ExperimentService(
             )
         }
         return try {
-            val metadata = gateway.verifyModel(OPENROUTER_MODEL)
+            val metadata = gateway.verifyModel(configuredOpenRouterModel)
             listOf(
                 ExperimentPreflight(
                     provider = "openrouter",
-                    model = OPENROUTER_MODEL,
+                    model = configuredOpenRouterModel,
                     passed = true,
                     reasoningSupport = if (metadata["supported_parameters"].toString().contains("reasoning")) {
                         "advertised"
@@ -425,7 +434,7 @@ class ExperimentService(
             listOf(
                 ExperimentPreflight(
                     provider = "openrouter",
-                    model = OPENROUTER_MODEL,
+                    model = configuredOpenRouterModel,
                     passed = false,
                     reasoningSupport = "not verified",
                     error = safeError(error),
@@ -435,14 +444,17 @@ class ExperimentService(
     }
 
     private fun gatewayFor(model: String): ChatCompletionGateway =
-        if (model.startsWith("z-ai/")) {
+        if (isOpenRouterModel(model)) {
             openRouterGateway ?: error("OPENROUTER_API_KEY не задан.")
         } else {
             deepSeekGateway
         }
 
     private fun providerFor(model: String): String =
-        if (model.startsWith("z-ai/")) "openrouter" else "deepseek"
+        if (isOpenRouterModel(model)) "openrouter" else "deepseek"
+
+    private fun isOpenRouterModel(model: String): Boolean =
+        model == configuredOpenRouterModel || model == DEFAULT_OPENROUTER_MODEL
 
     private fun validateTokenBudget(mode: TokenBudgetMode, maxTokens: Int?) {
         require(maxTokens == null || maxTokens > 0) {
@@ -538,11 +550,6 @@ class ExperimentService(
 
     private companion object {
         val supportedKinds = setOf("d03", "d04", "d05")
-        val supportedExperimentModels = setOf(
-            "deepseek-v4-flash",
-            "deepseek-v4-pro",
-            OPENROUTER_MODEL,
-        )
 
         fun elapsedMs(startedAt: Long): Long =
             (System.nanoTime() - startedAt) / 1_000_000L

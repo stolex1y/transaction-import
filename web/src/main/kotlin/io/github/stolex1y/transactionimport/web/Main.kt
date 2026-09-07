@@ -1,6 +1,7 @@
 package io.github.stolex1y.transactionimport.web
 
 import io.github.stolex1y.transactionimport.core.TransactionImportService
+import io.github.stolex1y.transactionimport.d05.DEFAULT_OPENROUTER_MODEL
 import io.github.stolex1y.transactionimport.d05.OpenRouterGateway
 import io.github.stolex1y.transactionimport.transport.DeepSeekGateway
 import io.ktor.client.HttpClient
@@ -14,6 +15,7 @@ import kotlinx.serialization.json.Json
 import kotlin.system.exitProcess
 
 private const val API_KEY_ENV = "DEEPSEEK_API_KEY"
+private const val OPENROUTER_MODEL_ENV = "OPENROUTER_MODEL"
 private const val DEFAULT_PORT = 8080
 
 fun main() {
@@ -22,6 +24,10 @@ fun main() {
         System.err.println("Не задана обязательная переменная окружения: $API_KEY_ENV")
         exitProcess(2)
     }
+    val openRouterModel = System.getenv(OPENROUTER_MODEL_ENV)
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: DEFAULT_OPENROUTER_MODEL
 
     val port = System.getenv("PORT")
         ?.toIntOrNull()
@@ -50,7 +56,11 @@ fun main() {
         val openRouterGateway = System.getenv("OPENROUTER_API_KEY")
             ?.takeIf { it.isNotBlank() }
             ?.let { OpenRouterGateway(httpClient, it) }
-        val experimentService = ExperimentService(deepSeekGateway, openRouterGateway)
+        val experimentService = ExperimentService(
+            deepSeekGateway = deepSeekGateway,
+            openRouterGateway = openRouterGateway,
+            openRouterModel = openRouterModel,
+        )
         embeddedServer(Netty, host = "127.0.0.1", port = port) {
             module(service, experimentService)
         }.start(wait = true)
