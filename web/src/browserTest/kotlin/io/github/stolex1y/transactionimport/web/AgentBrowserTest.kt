@@ -47,6 +47,10 @@ class AgentBrowserTest {
                         page.locator("#send-message").click()
                         page.locator("#operation-table").waitFor()
                         assertEquals(
+                            "08-02-2026 12:10",
+                            page.locator("tr[data-transaction-id='1'] input[name='occurred_at']").inputValue(),
+                        )
+                        assertEquals(
                             "Ответ агента получен. Черновик обновлён.",
                             page.locator("#agent-status").textContent(),
                         )
@@ -146,6 +150,7 @@ class AgentBrowserTest {
                         assertTrue(selectStyle.startsWith("32px|ellipsis|"), selectStyle)
 
                         val firstTableRow = page.locator("tr[data-transaction-id='1']")
+                        firstTableRow.locator("input[name='occurred_at']").fill("09-02-2026 13:20")
                         firstTableRow.locator("input[name='amount']").fill("6.60.1")
                         firstTableRow.locator("button[data-action='save-operation']").click()
                         assertEquals(
@@ -199,6 +204,10 @@ class AgentBrowserTest {
                         restoredFirstRow.locator("button[data-action='save-operation']").click()
                         page.waitForFunction(
                             "() => document.querySelector('#build-batch')?.disabled === false",
+                        )
+                        assertEquals(
+                            "09-02-2026 13:20",
+                            page.locator("tr[data-transaction-id='1'] input[name='occurred_at']").inputValue(),
                         )
                         assertFalse(page.locator("#build-batch").isDisabled)
 

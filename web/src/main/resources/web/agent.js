@@ -263,9 +263,14 @@ function setActiveState(
             if (retainedFields.size === 0) continue;
             const editor = workingDraft.get(transactionId);
             const previous = previousWorking.get(transactionId);
-            for (const field of retainedFields) editor[field] = previous[field];
+            for (const field of retainedFields) {
+                editor[field] = previous[field];
+                if (field === "occurred_at" || field === "posted_at") {
+                    editor[`${field}_iso`] = previous[`${field}_iso`];
+                }
+            }
             dirtyFields.set(transactionId, retainedFields);
-        }
+    }
     }
     localStorage.setItem(ACTIVE_SESSION_KEY, state.session.id);
     const index = sessions.findIndex((session) => session.id === state.session.id);
@@ -279,8 +284,10 @@ function editorFromRow(row) {
     const transaction = row.transaction;
     return {
         included: row.included,
-        occurred_at: transaction.occurred_at,
-        posted_at: transaction.posted_at || "",
+        occurred_at: formatTransactionDate(transaction.occurred_at),
+        occurred_at_iso: transaction.occurred_at,
+        posted_at: formatTransactionDate(transaction.posted_at || ""),
+        posted_at_iso: transaction.posted_at || null,
         direction: transaction.direction,
         amount: minorToMajor(transaction.amount_minor, transaction.currency),
         currency: transaction.currency,
@@ -606,6 +613,9 @@ function updateWorkingDraft(event) {
     const value = control.type === "checkbox" ? control.checked : control.value;
     if (editor[control.name] === value) return;
     editor[control.name] = value;
+    if (control.name === "occurred_at" || control.name === "posted_at") {
+        editor[`${control.name}_iso`] = transactionDateToIso(value, control.name);
+    }
     const fields = dirtyFields.get(holder.dataset.transactionId) || new Set();
     fields.add(control.name);
     dirtyFields.set(holder.dataset.transactionId, fields);
@@ -702,8 +712,8 @@ function createOperationCard(row) {
     const grid = document.createElement("div");
     grid.className = "operation-grid";
     grid.append(
-        fieldControl("Дата и время операции", textInput("occurred_at", editor.occurred_at), row, "occurred_at", editor.included),
-        fieldControl("Дата проводки", textInput("posted_at", editor.posted_at), row, "posted_at", editor.included),
+        fieldControl("Дата и время операции", transactionDateInput("occurred_at", editor.occurred_at), row, "occurred_at", editor.included),
+        fieldControl("Дата проводки", transactionDateInput("posted_at", editor.posted_at), row, "posted_at", editor.included),
         fieldControl("Тип операции", directionSelect(editor.direction), row, "direction", editor.included),
         fieldControl("Сумма", amountInput(editor.amount), row, "amount_minor", editor.included),
         fieldControl("Валюта", readOnlyInput("currency", editor.currency), row, "currency", editor.included),
@@ -763,8 +773,8 @@ function createOperationTableRow(row) {
     id.textContent = row.id;
     tableRow.append(tableCell(id));
     tableRow.append(
-        tableFieldCell("Дата и время", textInput("occurred_at", editor.occurred_at), row, "occurred_at", editor.included),
-        tableFieldCell("Дата проводки", textInput("posted_at", editor.posted_at), row, "posted_at", editor.included),
+        tableFieldCell("Дата и время", transactionDateInput("occurred_at", editor.occurred_at), row, "occurred_at", editor.included),
+        tableFieldCell("Дата проводки", transactionDateInput("posted_at", editor.posted_at), row, "posted_at", editor.included),
         tableFieldCell("Тип", directionSelect(editor.direction), row, "direction", editor.included),
         tableFieldCell("Сумма", amountInput(editor.amount), row, "amount_minor", editor.included),
         tableFieldCell("Валюта", readOnlyInput("currency", editor.currency), row, "currency", editor.included),
@@ -937,8 +947,8 @@ async function saveOperationEditor(editorElement) {
         revision: activeState.session.revision,
         included: editor.included,
         direction: editor.direction,
-        occurred_at: editor.occurred_at,
-        posted_at: editor.posted_at || null,
+        occurred_at: editor.occurred_at_iso,
+        posted_at: editor.posted_at_iso,
         amount_minor: amountMinor,
         merchant: editor.merchant,
         description: editor.description,
@@ -1057,6 +1067,43 @@ function formatDate(epochMs) {
         hour: "2-digit",
         minute: "2-digit",
     }).format(new Date(epochMs));
+}
+
+function transactionDateInput(name, value) {
+    const input = textInput(name, value);
+    input.inputMode = "numeric";
+    input.placeholder = name === "posted_at"
+        ? "DD-MM-YYYY или DD-MM-YYYY HH:mm"
+        : "DD-MM-YYYY HH:mm";
+    return input;
+}
+
+function formatTransactionDate(value) {
+    const trimmed = value?.trim() || "";
+    if (!trimmed) return "";
+    const dateTime = trimmed.match(
+        /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?$/,
+    );
+    if (dateTime) {
+        return `${dateTime[3]}-${dateTime[2]}-${dateTime[1]} ${dateTime[4]}:${dateTime[5]}`;
+    }
+    const date = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (date) return `${date[3]}-${date[2]}-${date[1]}`;
+    return value;
+}
+
+function transactionDateToIso(value, fieldName) {
+    const trimmed = value.trim();
+    if (!trimmed) return fieldName === "posted_at" ? null : "";
+    const dateTime = trimmed.match(
+        /^(\d{2})-(\d{2})-(\d{4})[ T](\d{2}):(\d{2})$/,
+    );
+    if (dateTime) {
+        return `${dateTime[3]}-${dateTime[2]}-${dateTime[1]}T${dateTime[4]}:${dateTime[5]}:00`;
+    }
+    const date = trimmed.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+    if (date) return `${date[3]}-${date[2]}-${date[1]}`;
+    return trimmed;
 }
 
 function showToast(type, message, durationMs) {

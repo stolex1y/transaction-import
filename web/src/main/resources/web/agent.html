@@ -94,7 +94,7 @@
                 <div class="section-heading">
                     <div>
                         <h2 id="metrics-title">Токены вызовов</h2>
-                        <p class="control-note">Input — весь контекст текущего запроса. «За сессию» — сумма успешных provider-вызовов; повторно отправленная история учитывается снова.</p>
+                        <p class="control-note">Input — весь контекст текущего запроса. «За сессию» — сумма успешных provider-вызовов; повторно отправленная история учитывается снова. «Занято» — фактический total (input + ответ) относительно context window одного запроса.</p>
                     </div>
                 </div>
                 <div id="metrics-summary" class="metrics-summary"></div>
@@ -108,8 +108,8 @@
                             <th scope="col">Input</th>
                             <th scope="col">Ответ</th>
                             <th scope="col">Всего</th>
-                            <th scope="col">Лимит</th>
-                            <th scope="col">Контекст</th>
+                            <th scope="col">Лимит контекста</th>
+                            <th scope="col">Занято</th>
                         </tr>
                         </thead>
                         <tbody id="metrics-table-body"></tbody>
