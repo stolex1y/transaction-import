@@ -50,6 +50,19 @@ class AgentBrowserTest {
                             "Ответ агента получен. Черновик обновлён.",
                             page.locator("#agent-status").textContent(),
                         )
+                        assertEquals(1, page.locator("#metrics-table-body tr").count())
+                        assertTrue(page.locator("#metrics-summary").textContent().contains("За сессию всего"))
+                        page.locator("#agent-message").fill("уточнение ".repeat(700))
+                        page.locator("#send-message").click()
+                        page.waitForFunction(
+                            "() => document.querySelectorAll('#metrics-table-body tr').length === 2",
+                        )
+                        val firstPromptTokens = page.locator("#metrics-table-body tr").nth(0)
+                            .locator("td").nth(2).textContent().filter(Char::isDigit).toInt()
+                        val secondPromptTokens = page.locator("#metrics-table-body tr").nth(1)
+                            .locator("td").nth(2).textContent().filter(Char::isDigit).toInt()
+                        assertTrue(secondPromptTokens > firstPromptTokens)
+                        assertEquals(2, gateway.requests.size)
                         val initialTheme = page.evaluate(
                             "() => document.documentElement.dataset.theme",
                         ).toString()
@@ -235,8 +248,9 @@ class AgentBrowserTest {
 
                         server.stop(1_000, 5_000)
                         server = startServer()
-                        page.reload()
                         page.locator("#operation-table").waitFor()
+                        assertEquals(2, page.locator("#metrics-table-body tr").count())
+                        assertTrue(page.locator("#metrics-summary").textContent().contains("За сессию всего"))
                         assertEquals(
                             "Проверено в браузере",
                             page.locator("tr[data-transaction-id='1'] input[name='description']").inputValue(),
@@ -244,13 +258,68 @@ class AgentBrowserTest {
                         assertFalse(
                             page.locator("tr[data-transaction-id='2'] input[name='included']").isChecked,
                         )
-                        assertEquals(1, gateway.requests.size)
+                        assertEquals(2, gateway.requests.size)
 
                         page.onDialog { dialog -> dialog.accept() }
                         page.locator("#open-session-drawer").click()
                         page.locator("#delete-session").click()
                         page.locator("#empty-session:not([hidden])").waitFor()
                         assertEquals(0, page.locator("#session-list .session-item").count())
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun reportsContextOverflowWithoutChangingDraftOrConversation() {
+        val database = Files.createTempFile("agent-browser-overflow-", ".sqlite")
+        val gateway = FakeAgentGateway()
+        val port = ServerSocket(0).use { it.localPort }
+        fun startServer() = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
+        }.start(wait = false)
+
+        var server = startServer()
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(
+                    BrowserType.LaunchOptions().setHeadless(true),
+                ).use { browser ->
+                    browser.newContext(
+                        Browser.NewContextOptions().setViewportSize(1_280, 900),
+                    ).use { context ->
+                        val page = context.newPage()
+                        val baseUrl = "http://127.0.0.1:$port"
+                        page.navigate("$baseUrl/agent")
+                        page.locator("#empty-new-session").click()
+                        page.locator("#agent-message").fill("Списание 1250 ₽")
+                        page.locator("#send-message").click()
+                        page.locator("#operation-table").waitFor()
+
+                        val messagesBeforeOverflow = page.locator("#message-list .message").count()
+                        page.locator("#agent-message").fill("длинный ".repeat(5_000))
+                        page.locator("#send-message").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#agent-status')?.textContent?.includes('Диалог превысил')",
+                        )
+
+                        assertEquals(messagesBeforeOverflow, page.locator("#message-list .message").count())
+                        assertEquals(2, page.locator("#operation-table tbody tr").count())
+                        assertEquals(2, page.locator("#metrics-table-body tr").count())
+                        assertEquals(
+                            "Переполнение контекста",
+                            page.locator("#metrics-table-body tr").nth(1).locator("td").nth(1).textContent(),
+                        )
+                        assertTrue(page.locator("#agent-message").inputValue().startsWith("длинный"))
+
+                        page.reload()
+                        page.locator("#operation-table").waitFor()
+                        assertEquals(2, page.locator("#operation-table tbody tr").count())
+                        assertEquals(2, page.locator("#metrics-table-body tr").count())
                     }
                 }
             }

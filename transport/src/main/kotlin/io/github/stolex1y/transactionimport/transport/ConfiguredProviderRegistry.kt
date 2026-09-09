@@ -6,6 +6,7 @@ import io.github.stolex1y.transactionimport.core.AgentGatewayResolver
 import io.github.stolex1y.transactionimport.core.ChatCompletionGateway
 import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.ChatCompletionResponse
+import io.github.stolex1y.transactionimport.core.ContextWindowExceededException
 import io.github.stolex1y.transactionimport.core.ProviderCatalog
 import io.github.stolex1y.transactionimport.core.ProviderUnavailableException
 import io.github.stolex1y.transactionimport.core.ResolvedAgentConfig
@@ -76,6 +77,8 @@ private class ConfiguredChatCompletionGateway(
     private val apiKey: String,
     private val resolved: ResolvedAgentConfig,
 ) : ChatCompletionGateway {
+    override val contextWindowTokens: Int? = resolved.model.contextWindowTokens
+
     private val endpoint = resolved.provider.baseUrl.trimEnd('/') +
         resolved.provider.chatCompletionsPath
 
@@ -98,14 +101,32 @@ private class ConfiguredChatCompletionGateway(
             setBody(JsonObject(bodyFields))
         }
         val raw = response.body<JsonObject>()
-        require(response.status.value in 200..299) {
-            "Провайдер ${resolved.provider.id} вернул HTTP ${response.status.value}: " +
-                (raw["error"] ?: raw)
+        if (response.status.value !in 200..299) {
+            if (looksLikeContextOverflow(response.status.value, raw)) {
+                throw ContextWindowExceededException()
+            }
+            require(false) {
+                "Провайдер ${resolved.provider.id} вернул HTTP ${response.status.value}: " +
+                    (raw["error"] ?: raw)
+            }
         }
         return providerJson.decodeFromJsonElement<ChatCompletionResponse>(raw).copy(
             rawUsage = raw["usage"] as? JsonObject,
         )
     }
+}
+
+private fun looksLikeContextOverflow(status: Int, raw: JsonObject): Boolean {
+    if (status == 413) return true
+    val text = raw.toString().lowercase()
+    return listOf(
+        "context length",
+        "context window",
+        "maximum context",
+        "too many tokens",
+        "prompt is too long",
+        "token limit",
+    ).any(text::contains)
 }
 
 private val providerJson = Json {

@@ -1,6 +1,7 @@
 package io.github.stolex1y.transactionimport.transport
 
 import io.github.stolex1y.transactionimport.core.AgentConfig
+import io.github.stolex1y.transactionimport.core.ContextWindowExceededException
 import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.RequestMessage
 import io.github.stolex1y.transactionimport.core.ResponseFormat
@@ -115,6 +116,70 @@ class ConfiguredProviderRegistryTest {
             assertEquals("quality", body.getValue("provider_preference").jsonPrimitive.content)
             assertEquals("json_object", body.getValue("response_format").jsonObject.getValue("type").jsonPrimitive.content)
             assertEquals("{}", response.choices.single().message.content)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun mapsProviderContextOverflowToStableDomainError() = runBlocking {
+        val engine = MockEngine {
+            respond(
+                content = """{"error":{"message":"maximum context length exceeded"}}""",
+                status = HttpStatusCode(413, "Payload Too Large"),
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val client = HttpClient(engine) {
+            install(ContentNegotiation) {
+                json(Json { ignoreUnknownKeys = true })
+            }
+        }
+        try {
+            val catalog = decodeProviderCatalog(
+                """
+                {
+                  "providers": [
+                    {
+                      "id": "overflow-provider",
+                      "display_name": "Overflow Provider",
+                      "base_url": "https://provider.example/v1",
+                      "credential_env": "OVERFLOW_PROVIDER_KEY",
+                      "models": [
+                        {
+                          "id": "overflow-model",
+                          "context_window_tokens": 1024,
+                          "reasoning_modes": [
+                            { "id": "disabled", "request_fields": {} }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """.trimIndent(),
+            )
+            val gateway = ConfiguredProviderRegistry(client, catalog) { "test-secret" }
+                .resolve(AgentConfig("overflow-provider", "overflow-model", "disabled"))
+
+            assertEquals(1024, gateway.contextWindowTokens)
+            var overflow = false
+            try {
+                gateway.complete(
+                    ChatCompletionRequest(
+                        model = "overflow-model",
+                        messages = listOf(RequestMessage("user", "synthetic statement")),
+                        thinking = ThinkingOptions("disabled"),
+                        reasoningEffort = null,
+                        responseFormat = ResponseFormat("json_object"),
+                        maxTokens = 500,
+                        stream = false,
+                    ),
+                )
+            } catch (_: ContextWindowExceededException) {
+                overflow = true
+            }
+            assertTrue(overflow)
         } finally {
             client.close()
         }

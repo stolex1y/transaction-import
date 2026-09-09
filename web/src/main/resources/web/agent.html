@@ -90,6 +90,33 @@
                     </div>
                 </form>
             </section>
+            <section id="metrics-panel" class="panel metrics-panel" hidden aria-labelledby="metrics-title">
+                <div class="section-heading">
+                    <div>
+                        <h2 id="metrics-title">Токены вызовов</h2>
+                        <p class="control-note">Input — весь контекст текущего запроса. «За сессию» — сумма успешных provider-вызовов; повторно отправленная история учитывается снова.</p>
+                    </div>
+                </div>
+                <div id="metrics-summary" class="metrics-summary"></div>
+                <div class="metrics-table-wrap">
+                    <table id="metrics-table" class="metrics-table">
+                        <caption class="visually-hidden">Токены и контекст LLM-вызовов</caption>
+                        <thead>
+                        <tr>
+                            <th scope="col">#</th>
+                            <th scope="col">Статус</th>
+                            <th scope="col">Input</th>
+                            <th scope="col">Ответ</th>
+                            <th scope="col">Всего</th>
+                            <th scope="col">Лимит</th>
+                            <th scope="col">Контекст</th>
+                        </tr>
+                        </thead>
+                        <tbody id="metrics-table-body"></tbody>
+                    </table>
+                </div>
+            </section>
+
 
             <section id="draft-panel" class="panel draft-panel" hidden aria-labelledby="draft-title">
                 <div class="section-heading draft-heading">

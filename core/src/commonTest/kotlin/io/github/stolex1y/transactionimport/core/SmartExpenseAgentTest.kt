@@ -292,9 +292,54 @@ class SmartExpenseAgentTest {
         assertTrue(result.draft!!.transactions.isEmpty())
     }
 
+    @Test
+    fun storesNativeUsageAndAccumulatesSuccessfulSessionCalls() = runBlocking {
+        val gateway = UsageGateway(
+            responseContents = listOf(initialDraftJson, emptyAppliedPatchJson),
+            usages = listOf(
+                Usage(promptTokens = 120, completionTokens = 30, totalTokens = 150),
+                Usage(promptTokens = 260, completionTokens = 20, totalTokens = 280),
+            ),
+        )
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, gateway)
+        val created = agent.createSession("Токены", defaultConfig)
+
+        val extracted = agent.sendMessage(created.session.id, 0, "Короткая выписка")
+        val corrected = agent.sendMessage(
+            created.session.id,
+            extracted.session.revision,
+            "Проверь ещё раз",
+        )
+
+        assertEquals(listOf(150, 280), corrected.metrics.map { it.totalTokens })
+        assertEquals(260, corrected.metrics.last().promptTokens)
+        assertEquals(20, corrected.metrics.last().completionTokens)
+        assertEquals(4, corrected.messages.size)
+        assertTrue(gateway.requests[1].messages.any { it.role == "assistant" })
+    }
+
+    @Test
+    fun contextOverflowAddsFailureMetricWithoutChangingConversationState() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, OverflowGateway())
+        val created = agent.createSession("Переполнение", defaultConfig)
+
+        val result = agent.sendMessage(created.session.id, 0, "Очень длинный контекст")
+
+        assertEquals(CONTEXT_OVERFLOW_MESSAGE, result.lastError)
+        assertEquals(0, result.session.revision)
+        assertTrue(result.messages.isEmpty())
+        assertNull(result.draft)
+        assertEquals(1, result.metrics.size)
+        assertEquals(ModelCallStatus.CONTEXT_OVERFLOW, result.metrics.single().status)
+        assertNull(result.metrics.single().totalTokens)
+        assertEquals(128, result.metrics.single().contextWindowTokens)
+    }
+
     private fun testAgent(
         repository: MemoryImportSessionRepository,
-        gateway: QueuedGateway,
+        gateway: ChatCompletionGateway,
     ): SmartExpenseAgent {
         var nextId = 0
         var now = 1_000L
@@ -306,6 +351,7 @@ class SmartExpenseAgentTest {
             runtimeConfig = AgentRuntimeConfig(maxTokens = 100_000),
         )
     }
+
 
     private class QueuedGateway(vararg responseContents: String) : ChatCompletionGateway {
         private val responses = responseContents.toMutableList()
@@ -321,6 +367,36 @@ class SmartExpenseAgentTest {
                     ),
                 ),
             )
+        }
+    }
+
+    private class UsageGateway(
+        private val responseContents: List<String>,
+        private val usages: List<Usage>,
+    ) : ChatCompletionGateway {
+        val requests = mutableListOf<ChatCompletionRequest>()
+        private var index = 0
+
+        override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+            requests += request
+            val currentIndex = index++
+            return ChatCompletionResponse(
+                choices = listOf(
+                    ChatChoice(
+                        message = ResponseMessage(content = responseContents[currentIndex]),
+                        finishReason = "stop",
+                    ),
+                ),
+                usage = usages[currentIndex],
+            )
+        }
+    }
+
+    private class OverflowGateway : ChatCompletionGateway {
+        override val contextWindowTokens: Int = 128
+
+        override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+            throw ContextWindowExceededException()
         }
     }
 
@@ -341,9 +417,25 @@ class SmartExpenseAgentTest {
             userMessage: ConversationMessage,
             assistantMessage: ConversationMessage,
             draft: ImportDraft,
+            metric: ModelCallMetric,
             updatedAtEpochMs: Long,
-        ): ImportSessionState = update(sessionId, expectedRevision, updatedAtEpochMs, draft) { state ->
+        ): ImportSessionState = update(
+            sessionId,
+            expectedRevision,
+            updatedAtEpochMs,
+            draft,
+            metrics = { it.metrics + metric },
+        ) { state ->
             state.messages + userMessage + assistantMessage
+        }
+
+        override suspend fun saveCallMetric(
+            sessionId: String,
+            expectedRevision: Long,
+            metric: ModelCallMetric,
+        ): ImportSessionState {
+            val current = checkedState(sessionId, expectedRevision)
+            return current.copy(metrics = current.metrics + metric).also { states[sessionId] = it }
         }
 
         override suspend fun saveDraft(
@@ -386,6 +478,7 @@ class SmartExpenseAgentTest {
             expectedRevision: Long,
             updatedAtEpochMs: Long,
             draft: ImportDraft,
+            metrics: (ImportSessionState) -> List<ModelCallMetric> = { it.metrics },
             messages: (ImportSessionState) -> List<ConversationMessage>,
         ): ImportSessionState {
             val current = checkedState(sessionId, expectedRevision)
@@ -397,6 +490,7 @@ class SmartExpenseAgentTest {
                 ),
                 messages = messages(current),
                 draft = draft,
+                metrics = metrics(current),
             )
             states[sessionId] = updated
             return updated

@@ -14,6 +14,8 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
 
 const val NOT_APPLICABLE_MESSAGE = "Ввод не содержит данных о финансовых операциях."
+const val CONTEXT_OVERFLOW_MESSAGE =
+    "Диалог превысил контекстный лимит модели. История и черновик не изменены; сократите сообщение или выберите другую модель."
 
 @Serializable
 enum class ConversationRole {
@@ -67,7 +69,34 @@ data class ImportSessionState(
     val session: ImportSession,
     val messages: List<ConversationMessage>,
     val draft: ImportDraft? = null,
+    val metrics: List<ModelCallMetric> = emptyList(),
+    @SerialName("last_error") val lastError: String? = null,
 )
+
+@Serializable
+enum class ModelCallStatus {
+    @SerialName("succeeded")
+    SUCCEEDED,
+
+    @SerialName("context_overflow")
+    CONTEXT_OVERFLOW,
+}
+
+@Serializable
+data class ModelCallMetric(
+    val id: String,
+    @SerialName("provider_id") val providerId: String,
+    @SerialName("model_id") val modelId: String,
+    val status: ModelCallStatus,
+    @SerialName("prompt_tokens") val promptTokens: Int? = null,
+    @SerialName("completion_tokens") val completionTokens: Int? = null,
+    @SerialName("total_tokens") val totalTokens: Int? = null,
+    @SerialName("context_window_tokens") val contextWindowTokens: Int? = null,
+    @SerialName("created_at_epoch_ms") val createdAtEpochMs: Long,
+) {
+    val hasCompleteUsage: Boolean
+        get() = promptTokens != null && completionTokens != null && totalTokens != null
+}
 
 @Serializable
 data class UserPreferences(
@@ -106,7 +135,14 @@ interface ImportSessionRepository {
         userMessage: ConversationMessage,
         assistantMessage: ConversationMessage,
         draft: ImportDraft,
+        metric: ModelCallMetric,
         updatedAtEpochMs: Long,
+    ): ImportSessionState
+
+    suspend fun saveCallMetric(
+        sessionId: String,
+        expectedRevision: Long,
+        metric: ModelCallMetric,
     ): ImportSessionState
 
     suspend fun saveDraft(
@@ -222,10 +258,25 @@ class SmartExpenseAgent(
         ensureRevision(state, expectedRevision)
         val preferences = getPreferences()
         val gateway = gatewayResolver.resolve(state.session.config)
-        return if (state.draft == null) {
-            extractInitialDraft(state, safeText, preferences, gateway)
-        } else {
-            applyNaturalLanguageCorrection(state, safeText, preferences, gateway)
+        return try {
+            if (state.draft == null) {
+                extractInitialDraft(state, safeText, preferences, gateway)
+            } else {
+                applyNaturalLanguageCorrection(state, safeText, preferences, gateway)
+            }
+        } catch (_: ContextWindowExceededException) {
+            repository.saveCallMetric(
+                sessionId = state.session.id,
+                expectedRevision = state.session.revision,
+                metric = ModelCallMetric(
+                    id = idGenerator(),
+                    providerId = state.session.config.providerId,
+                    modelId = state.session.config.modelId,
+                    status = ModelCallStatus.CONTEXT_OVERFLOW,
+                    contextWindowTokens = gateway.contextWindowTokens,
+                    createdAtEpochMs = nowEpochMs(),
+                ),
+            ).copy(lastError = CONTEXT_OVERFLOW_MESSAGE)
         }
     }
 
@@ -395,6 +446,7 @@ class SmartExpenseAgent(
                 createdAtEpochMs = now,
             ),
             draft = draft,
+            metric = successfulMetric(state, gateway, response, now),
             updatedAtEpochMs = now,
         )
     }
@@ -419,9 +471,8 @@ class SmartExpenseAgent(
             }
             add(RequestMessage("user", userText))
         }
-        val completion = requireJsonCompletion(
-            gateway.complete(completionRequest(state.session.config, requestMessages)),
-        )
+        val response = gateway.complete(completionRequest(state.session.config, requestMessages))
+        val completion = requireJsonCompletion(response)
         val patch = decodePatch(completion)
         val nextRevision = state.session.revision + 1
         val updatedDraft = when (patch.status) {
@@ -460,6 +511,7 @@ class SmartExpenseAgent(
                 createdAtEpochMs = now,
             ),
             draft = updatedDraft,
+            metric = successfulMetric(state, gateway, response, now),
             updatedAtEpochMs = now,
         )
     }
@@ -644,6 +696,42 @@ class SmartExpenseAgent(
         if (state.session.revision != expectedRevision) {
             throw RevisionConflictException(expectedRevision, state.session.revision)
         }
+    }
+
+    private fun successfulMetric(
+        state: ImportSessionState,
+        gateway: ChatCompletionGateway,
+        response: ChatCompletionResponse,
+        createdAtEpochMs: Long,
+    ): ModelCallMetric {
+        val usage = response.usage
+        val tokenValues = listOf(
+            usage?.promptTokens,
+            usage?.completionTokens,
+            usage?.totalTokens,
+        )
+        if (tokenValues.any { it != null && it < 0 }) {
+            throw AgentResponseException("Провайдер вернул отрицательное число токенов.")
+        }
+        val promptTokens = usage?.promptTokens
+        val completionTokens = usage?.completionTokens
+        val totalTokens = usage?.totalTokens
+        if (promptTokens != null && completionTokens != null && totalTokens != null &&
+            totalTokens != promptTokens + completionTokens
+        ) {
+            throw AgentResponseException("Провайдер вернул несогласованные метрики токенов.")
+        }
+        return ModelCallMetric(
+            id = idGenerator(),
+            providerId = state.session.config.providerId,
+            modelId = state.session.config.modelId,
+            status = ModelCallStatus.SUCCEEDED,
+            promptTokens = promptTokens,
+            completionTokens = completionTokens,
+            totalTokens = totalTokens,
+            contextWindowTokens = gateway.contextWindowTokens,
+            createdAtEpochMs = createdAtEpochMs,
+        )
     }
 
     private fun requireJsonCompletion(response: ChatCompletionResponse): JsonCompletion {

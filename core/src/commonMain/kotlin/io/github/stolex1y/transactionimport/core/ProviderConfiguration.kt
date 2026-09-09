@@ -71,10 +71,14 @@ data class ProviderModelDefinition(
     val id: String,
     @SerialName("display_name") val displayName: String = id,
     @SerialName("reasoning_modes") val reasoningModes: List<ReasoningModeDefinition>,
+    @SerialName("context_window_tokens") val contextWindowTokens: Int? = null,
 ) {
     internal fun validate(providerId: String) {
         require(id.isNotBlank()) { "Идентификатор модели провайдера $providerId не должен быть пустым." }
         require(displayName.isNotBlank()) { "Название модели $id не должно быть пустым." }
+        require(contextWindowTokens == null || contextWindowTokens > 0) {
+            "context_window_tokens модели $providerId/$id должен быть положительным."
+        }
         require(reasoningModes.isNotEmpty()) { "Модель $id должна содержать режим reasoning." }
         require(reasoningModes.map { it.id }.distinct().size == reasoningModes.size) {
             "Идентификаторы reasoning модели $id должны быть уникальными."

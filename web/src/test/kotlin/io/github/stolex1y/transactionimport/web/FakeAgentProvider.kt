@@ -6,6 +6,7 @@ import io.github.stolex1y.transactionimport.core.ChatChoice
 import io.github.stolex1y.transactionimport.core.ChatCompletionGateway
 import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.ChatCompletionResponse
+import io.github.stolex1y.transactionimport.core.ContextWindowExceededException
 import io.github.stolex1y.transactionimport.core.ProviderCatalog
 import io.github.stolex1y.transactionimport.core.ProviderDefinition
 import io.github.stolex1y.transactionimport.core.ProviderModelDefinition
@@ -18,12 +19,19 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class FakeAgentGateway(
     private val responses: ArrayDeque<String> = ArrayDeque(listOf(READY_DRAFT_JSON)),
+    override val contextWindowTokens: Int? = DEFAULT_CONTEXT_WINDOW_TOKENS,
 ) : ChatCompletionGateway {
     val requests = mutableListOf<ChatCompletionRequest>()
 
     override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
         requests += request
-        val content = responses.removeFirstOrNull() ?: READY_DRAFT_JSON
+        val promptTokens = request.messages.sumOf { it.content.length }
+        val completionTokens = 84
+        if (contextWindowTokens != null && promptTokens + completionTokens > contextWindowTokens) {
+            throw ContextWindowExceededException()
+        }
+        val content = responses.removeFirstOrNull()
+            ?: if (request.messages.any { it.role == "assistant" }) NOOP_PATCH_JSON else READY_DRAFT_JSON
         return ChatCompletionResponse(
             choices = listOf(
                 ChatChoice(
@@ -31,7 +39,11 @@ class FakeAgentGateway(
                     finishReason = "stop",
                 ),
             ),
-            usage = Usage(promptTokens = 42, completionTokens = 84, totalTokens = 126),
+            usage = Usage(
+                promptTokens = promptTokens,
+                completionTokens = completionTokens,
+                totalTokens = promptTokens + completionTokens,
+            ),
         )
     }
 
@@ -74,6 +86,14 @@ class FakeAgentGateway(
             }
         """.trimIndent()
 
+        val NOOP_PATCH_JSON = """
+            {
+              "status": "applied",
+              "message": "Изменений не найдено.",
+              "operations": []
+            }
+        """.trimIndent()
+
         val NOT_APPLICABLE_JSON = """
             {
               "status": "not_applicable",
@@ -82,6 +102,8 @@ class FakeAgentGateway(
               "unparsed_fragments": ["Это не финансовая операция"]
             }
         """.trimIndent()
+
+        const val DEFAULT_CONTEXT_WINDOW_TOKENS = 32_000
     }
 }
 
@@ -103,6 +125,8 @@ fun fakeAgentDependencies(
                         reasoningModes = listOf(
                             ReasoningModeDefinition(id = "disabled", displayName = "Без reasoning"),
                         ),
+                        contextWindowTokens = gateway.contextWindowTokens
+                            ?: FakeAgentGateway.DEFAULT_CONTEXT_WINDOW_TOKENS,
                     ),
                 ),
             ),

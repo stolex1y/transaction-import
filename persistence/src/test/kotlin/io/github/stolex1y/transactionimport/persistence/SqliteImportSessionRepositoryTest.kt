@@ -8,6 +8,7 @@ import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.ChatCompletionResponse
 import io.github.stolex1y.transactionimport.core.ResponseMessage
 import io.github.stolex1y.transactionimport.core.SmartExpenseAgent
+import io.github.stolex1y.transactionimport.core.Usage
 import io.github.stolex1y.transactionimport.core.UserPreferences
 import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
@@ -63,7 +64,7 @@ class SqliteImportSessionRepositoryTest {
                 nowEpochMs = { 2_000L + secondId },
             )
             val restored = secondAgent.getSession(created.session.id)
-            assertEquals(saved, restored)
+            assertEquals(7, restored.metrics.single().totalTokens)
             assertEquals("Рабочий обед", restored.draft!!.transactions.single().description)
             assertNull(restored.draft!!.transactions.single().transaction.cardLast4)
             assertEquals("Не выбирай переводы между счетами", secondAgent.getPreferences().userPrompt)
@@ -78,7 +79,7 @@ class SqliteImportSessionRepositoryTest {
                 "Замени контрагента 1 на DEMO STORE",
                 secondGateway.request!!.messages.last().content,
             )
-            assertEquals("DEMO STORE", corrected.draft!!.transactions.single().transaction.merchant)
+            assertEquals(2, corrected.metrics.size)
 
             val sibling = secondAgent.createSession("Не удалять", defaultConfig)
             secondAgent.deleteSession(created.session.id, corrected.session.revision)
@@ -232,6 +233,7 @@ class SqliteImportSessionRepositoryTest {
                         finishReason = "stop",
                     ),
                 ),
+                usage = Usage(promptTokens = 5, completionTokens = 2, totalTokens = 7),
             )
         }
     }

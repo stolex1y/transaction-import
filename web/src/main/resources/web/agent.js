@@ -25,6 +25,9 @@ const elements = {
     messageForm: document.querySelector("#message-form"),
     message: document.querySelector("#agent-message"),
     sendMessage: document.querySelector("#send-message"),
+    metricsPanel: document.querySelector("#metrics-panel"),
+    metricsSummary: document.querySelector("#metrics-summary"),
+    metricsTableBody: document.querySelector("#metrics-table-body"),
     draftPanel: document.querySelector("#draft-panel"),
     draftStatus: document.querySelector("#draft-status"),
     selectAllLabel: document.querySelector("#select-all-label"),
@@ -302,6 +305,9 @@ function renderEmptyState() {
     elements.workspace.hidden = true;
     elements.deleteSession.hidden = true;
     elements.draftPanel.hidden = true;
+    elements.metricsPanel.hidden = true;
+    elements.metricsSummary.replaceChildren();
+    elements.metricsTableBody.replaceChildren();
 }
 
 function renderActiveState() {
@@ -312,6 +318,7 @@ function renderActiveState() {
     elements.toolbarTitle.textContent = activeState.session.title;
     populateConfigControls(activeState.session.config);
     renderMessages();
+    renderMetrics();
     renderDraft();
 }
 
@@ -458,6 +465,94 @@ function renderMessages() {
     elements.messageList.scrollTop = elements.messageList.scrollHeight;
 }
 
+function renderMetrics() {
+    const metrics = activeState?.metrics || [];
+    elements.metricsPanel.hidden = metrics.length === 0;
+    elements.metricsSummary.replaceChildren();
+    elements.metricsTableBody.replaceChildren();
+    if (metrics.length === 0) return;
+
+    const complete = metrics.filter(hasCompleteMetricUsage);
+    const latest = [...metrics].reverse().find((metric) => metric.status === "succeeded");
+    const totals = complete.reduce(
+        (sum, metric) => ({
+            prompt: sum.prompt + metric.prompt_tokens,
+            completion: sum.completion + metric.completion_tokens,
+            total: sum.total + metric.total_tokens,
+        }),
+        { prompt: 0, completion: 0, total: 0 },
+    );
+    const summary = [
+        ["Последний успешный input", latest?.prompt_tokens == null ? "нет usage" : formatTokens(latest.prompt_tokens)],
+        ["Последний успешный ответ", latest?.completion_tokens == null ? "нет usage" : formatTokens(latest.completion_tokens)],
+        ["Последний успешный вызов", latest?.total_tokens == null ? "нет usage" : formatTokens(latest.total_tokens)],
+        ["За сессию input", complete.length === 0 ? "нет usage" : formatTokens(totals.prompt)],
+        ["За сессию output", complete.length === 0 ? "нет usage" : formatTokens(totals.completion)],
+        ["За сессию всего", complete.length === 0 ? "нет usage" : formatTokens(totals.total)],
+    ];
+    for (const [label, value] of summary) {
+        const stat = document.createElement("div");
+        stat.className = "metric-stat";
+        const title = document.createElement("span");
+        title.textContent = label;
+        const amount = document.createElement("strong");
+        amount.textContent = value;
+        stat.append(title, amount);
+        elements.metricsSummary.append(stat);
+    }
+
+    metrics.forEach((metric, index) => {
+        const row = document.createElement("tr");
+        row.dataset.metricId = metric.id;
+        const context = metric.total_tokens != null && metric.context_window_tokens
+            ? `${formatTokens(metric.total_tokens)} / ${formatTokens(metric.context_window_tokens)} (${formatPercent(metric.total_tokens / metric.context_window_tokens)})`
+            : "—";
+        const values = [
+            String(index + 1),
+            metricStatusLabel(metric),
+            formatMetricTokens(metric.prompt_tokens),
+            formatMetricTokens(metric.completion_tokens),
+            formatMetricTokens(metric.total_tokens),
+            formatMetricTokens(metric.context_window_tokens),
+            context,
+        ];
+        for (const value of values) {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            row.append(cell);
+        }
+        if (metric.status === "context_overflow") row.classList.add("overflow");
+        elements.metricsTableBody.append(row);
+    });
+}
+
+function hasCompleteMetricUsage(metric) {
+    return metric.status === "succeeded" &&
+        metric.prompt_tokens != null &&
+        metric.completion_tokens != null &&
+        metric.total_tokens != null;
+}
+
+function metricStatusLabel(metric) {
+    if (metric.status === "context_overflow") return "Переполнение контекста";
+    return hasCompleteMetricUsage(metric) ? "Успешно" : "Успешно, usage недоступен";
+}
+
+function formatMetricTokens(value) {
+    return value == null ? "—" : formatTokens(value);
+}
+
+function formatTokens(value) {
+    return new Intl.NumberFormat("ru-RU").format(value);
+}
+
+function formatPercent(value) {
+    return new Intl.NumberFormat("ru-RU", {
+        style: "percent",
+        maximumFractionDigits: 1,
+    }).format(value);
+}
+
 async function sendMessage(event) {
     event.preventDefault();
     if (!activeState) return;
@@ -471,10 +566,14 @@ async function sendMessage(event) {
             `/api/agent/sessions/${encodeURIComponent(activeState.session.id)}/messages`,
             jsonOptions("POST", { revision: activeState.session.revision, text }),
         );
-        elements.message.value = "";
+        if (!state.last_error) elements.message.value = "";
         setActiveState(state);
         await loadSessions();
-        showSuccess("Ответ агента получен. Черновик обновлён.");
+        if (state.last_error) {
+            showError(state.last_error);
+        } else {
+            showSuccess("Ответ агента получен. Черновик обновлён.");
+        }
     }, true);
 }
 

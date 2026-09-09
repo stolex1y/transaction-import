@@ -50,6 +50,7 @@ data class AgentModelResponse(
     val id: String,
     @SerialName("display_name") val displayName: String,
     @SerialName("reasoning_modes") val reasoningModes: List<AgentReasoningResponse>,
+    @SerialName("context_window_tokens") val contextWindowTokens: Int? = null,
 )
 
 @Serializable
@@ -117,6 +118,7 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
                                 reasoningModes = model.reasoningModes.map { mode ->
                                     AgentReasoningResponse(mode.id, mode.displayName)
                                 },
+                                contextWindowTokens = model.contextWindowTokens,
                             )
                         },
                     )

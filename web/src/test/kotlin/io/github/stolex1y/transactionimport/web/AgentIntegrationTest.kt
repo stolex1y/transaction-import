@@ -47,6 +47,8 @@ class AgentIntegrationTest {
                 assertEquals(HttpStatusCode.OK, extracted.status)
                 state = extracted.jsonObject()
                 assertEquals("ready", state["draft"]!!.jsonObject["status"]!!.jsonPrimitive.content)
+                assertEquals(1, state["metrics"]!!.jsonArray.size)
+                assertEquals("succeeded", state["metrics"]!!.jsonArray.single().jsonObject["status"]!!.jsonPrimitive.content)
                 assertEquals(2, state.transactions().size)
                 assertEquals(1, gateway.requests.size)
                 assertEquals("fake-model", gateway.requests.single().model)

@@ -5,8 +5,13 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 
 interface ChatCompletionGateway {
+    val contextWindowTokens: Int?
+        get() = null
+
     suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse
 }
+
+class ContextWindowExceededException : IllegalStateException("Context window exceeded.")
 
 @Serializable
 data class ChatCompletionRequest(

@@ -9,6 +9,7 @@
       "models": [
         {
           "id": "deepseek-v4-flash",
+          "context_window_tokens": 1000000,
           "display_name": "DeepSeek V4 Flash",
           "reasoning_modes": [
             {
@@ -44,6 +45,7 @@
         },
         {
           "id": "deepseek-v4-pro",
+          "context_window_tokens": 1000000,
           "display_name": "DeepSeek V4 Pro",
           "reasoning_modes": [
             {
@@ -88,6 +90,7 @@
       "models": [
         {
           "id": "z-ai/glm-5.2:free",
+          "context_window_tokens": 1048576,
           "display_name": "GLM 5.2 Free",
           "reasoning_modes": [
             {

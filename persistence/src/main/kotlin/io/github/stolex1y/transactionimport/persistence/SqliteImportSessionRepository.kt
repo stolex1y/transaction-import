@@ -9,6 +9,8 @@ import io.github.stolex1y.transactionimport.core.ImportSession
 import io.github.stolex1y.transactionimport.core.ImportSessionRepository
 import io.github.stolex1y.transactionimport.core.ImportSessionState
 import io.github.stolex1y.transactionimport.core.ImportStatus
+import io.github.stolex1y.transactionimport.core.ModelCallMetric
+import io.github.stolex1y.transactionimport.core.ModelCallStatus
 import io.github.stolex1y.transactionimport.core.RevisionConflictException
 import io.github.stolex1y.transactionimport.core.SessionNotFoundException
 import io.github.stolex1y.transactionimport.core.StructuredTransaction
@@ -82,6 +84,7 @@ class SqliteImportSessionRepository(
         userMessage: ConversationMessage,
         assistantMessage: ConversationMessage,
         draft: ImportDraft,
+        metric: ModelCallMetric,
         updatedAtEpochMs: Long,
     ): ImportSessionState = transaction {
         checkRevision(this, sessionId, expectedRevision)
@@ -91,7 +94,18 @@ class SqliteImportSessionRepository(
         val nextSequence = nextMessageSequence(this, sessionId)
         insertMessage(this, sessionId, nextSequence, userMessage)
         insertMessage(this, sessionId, nextSequence + 1, assistantMessage)
+        insertMetric(this, sessionId, metric)
         replaceDraft(this, sessionId, expectedRevision, draft, updatedAtEpochMs)
+        requireState(this, sessionId)
+    }
+
+    override suspend fun saveCallMetric(
+        sessionId: String,
+        expectedRevision: Long,
+        metric: ModelCallMetric,
+    ): ImportSessionState = transaction {
+        checkRevision(this, sessionId, expectedRevision)
+        insertMetric(this, sessionId, metric)
         requireState(this, sessionId)
     }
 
@@ -203,6 +217,26 @@ class SqliteImportSessionRepository(
             )
             statement.execute(
                 """
+                CREATE TABLE IF NOT EXISTS model_call_metrics (
+                    session_id TEXT NOT NULL,
+                    sequence_number INTEGER NOT NULL,
+                    id TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    prompt_tokens INTEGER,
+                    completion_tokens INTEGER,
+                    total_tokens INTEGER,
+                    context_window_tokens INTEGER,
+                    created_at_epoch_ms INTEGER NOT NULL,
+                    PRIMARY KEY (session_id, sequence_number),
+                    UNIQUE (session_id, id),
+                    FOREIGN KEY (session_id) REFERENCES import_sessions(id) ON DELETE CASCADE
+                )
+                """.trimIndent(),
+            )
+            statement.execute(
+                """
                 CREATE TABLE IF NOT EXISTS draft_transactions (
                     session_id TEXT NOT NULL,
                     position INTEGER NOT NULL,
@@ -239,6 +273,127 @@ class SqliteImportSessionRepository(
             definition = "field_errors_json TEXT NOT NULL DEFAULT '{}'",
         )
         migrateTransactionIds(connection)
+    }
+
+    private fun readState(connection: Connection, id: String): ImportSessionState? {
+        val header = connection.prepareStatement(
+            """
+            SELECT id, title, config_json, revision, created_at_epoch_ms,
+                   updated_at_epoch_ms, draft_status, rejection_reason, unparsed_fragments_json
+            FROM import_sessions
+            WHERE id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, id)
+            statement.executeQuery().use { rows ->
+                if (rows.next()) SessionHeader(
+                    session = rows.toSession(),
+                    draftStatus = rows.getString("draft_status"),
+                    rejectionReason = rows.getString("rejection_reason"),
+                    unparsedFragmentsJson = rows.getString("unparsed_fragments_json"),
+                ) else null
+            }
+        } ?: return null
+
+        val messages = connection.prepareStatement(
+            """
+            SELECT id, role, content, display_text, created_at_epoch_ms
+            FROM conversation_messages
+            WHERE session_id = ?
+            ORDER BY sequence_number ASC
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, id)
+            statement.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        add(
+                            ConversationMessage(
+                                id = rows.getString("id"),
+                                role = ConversationRole.valueOf(rows.getString("role")),
+                                content = rows.getString("content"),
+                                displayText = rows.getString("display_text"),
+                                createdAtEpochMs = rows.getLong("created_at_epoch_ms"),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+        val metrics = connection.prepareStatement(
+            """
+            SELECT id, provider_id, model_id, status, prompt_tokens, completion_tokens,
+                   total_tokens, context_window_tokens, created_at_epoch_ms
+            FROM model_call_metrics
+            WHERE session_id = ?
+            ORDER BY sequence_number ASC
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, id)
+            statement.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        add(
+                            ModelCallMetric(
+                                id = rows.getString("id"),
+                                providerId = rows.getString("provider_id"),
+                                modelId = rows.getString("model_id"),
+                                status = ModelCallStatus.valueOf(rows.getString("status")),
+                                promptTokens = rows.getIntOrNull("prompt_tokens"),
+                                completionTokens = rows.getIntOrNull("completion_tokens"),
+                                totalTokens = rows.getIntOrNull("total_tokens"),
+                                contextWindowTokens = rows.getIntOrNull("context_window_tokens"),
+                                createdAtEpochMs = rows.getLong("created_at_epoch_ms"),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+        val draft = header.draftStatus?.let { status ->
+            val transactions = connection.prepareStatement(
+                """
+                SELECT transaction_id, included, description, field_errors_json, transaction_json
+                FROM draft_transactions
+                WHERE session_id = ?
+                ORDER BY position ASC
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, id)
+                statement.executeQuery().use { rows ->
+                    buildList {
+                        while (rows.next()) {
+                            val transaction = databaseJson.decodeFromString<StructuredTransaction>(
+                                rows.getString("transaction_json"),
+                            )
+                            add(
+                                DraftTransaction(
+                                    id = transaction.sourceIndex.toString(),
+                                    included = rows.getInt("included") != 0,
+                                    description = rows.getString("description"),
+                                    fieldErrors = databaseJson.decodeFromString(
+                                        rows.getString("field_errors_json"),
+                                    ),
+                                    transaction = transaction,
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+            ImportDraft(
+                status = ImportStatus.valueOf(status),
+                rejectionReason = header.rejectionReason,
+                transactions = transactions,
+                unparsedFragments = databaseJson.decodeFromString(
+                    requireNotNull(header.unparsedFragmentsJson) {
+                        "У сохранённого черновика отсутствуют unparsed_fragments."
+                    },
+                ),
+                version = header.session.revision,
+            )
+        }
+        return ImportSessionState(header.session, messages, draft, metrics)
     }
 
     private fun ensureColumn(
@@ -342,96 +497,6 @@ class SqliteImportSessionRepository(
         }
     }
 
-    private fun readState(connection: Connection, id: String): ImportSessionState? {
-        val header = connection.prepareStatement(
-            """
-            SELECT id, title, config_json, revision, created_at_epoch_ms,
-                   updated_at_epoch_ms, draft_status, rejection_reason, unparsed_fragments_json
-            FROM import_sessions
-            WHERE id = ?
-            """.trimIndent(),
-        ).use { statement ->
-            statement.setString(1, id)
-            statement.executeQuery().use { rows ->
-                if (rows.next()) SessionHeader(
-                    session = rows.toSession(),
-                    draftStatus = rows.getString("draft_status"),
-                    rejectionReason = rows.getString("rejection_reason"),
-                    unparsedFragmentsJson = rows.getString("unparsed_fragments_json"),
-                ) else null
-            }
-        } ?: return null
-
-        val messages = connection.prepareStatement(
-            """
-            SELECT id, role, content, display_text, created_at_epoch_ms
-            FROM conversation_messages
-            WHERE session_id = ?
-            ORDER BY sequence_number ASC
-            """.trimIndent(),
-        ).use { statement ->
-            statement.setString(1, id)
-            statement.executeQuery().use { rows ->
-                buildList {
-                    while (rows.next()) {
-                        add(
-                            ConversationMessage(
-                                id = rows.getString("id"),
-                                role = ConversationRole.valueOf(rows.getString("role")),
-                                content = rows.getString("content"),
-                                displayText = rows.getString("display_text"),
-                                createdAtEpochMs = rows.getLong("created_at_epoch_ms"),
-                            ),
-                        )
-                    }
-                }
-            }
-        }
-        val draft = header.draftStatus?.let { status ->
-            val transactions = connection.prepareStatement(
-                """
-                SELECT transaction_id, included, description, field_errors_json, transaction_json
-                FROM draft_transactions
-                WHERE session_id = ?
-                ORDER BY position ASC
-                """.trimIndent(),
-            ).use { statement ->
-                statement.setString(1, id)
-                statement.executeQuery().use { rows ->
-                    buildList {
-                        while (rows.next()) {
-                            val transaction = databaseJson.decodeFromString<StructuredTransaction>(
-                                rows.getString("transaction_json"),
-                            )
-                            add(
-                                DraftTransaction(
-                                    id = transaction.sourceIndex.toString(),
-                                    included = rows.getInt("included") != 0,
-                                    description = rows.getString("description"),
-                                    fieldErrors = databaseJson.decodeFromString(
-                                        rows.getString("field_errors_json"),
-                                    ),
-                                    transaction = transaction,
-                                ),
-                            )
-                        }
-                    }
-                }
-            }
-            ImportDraft(
-                status = ImportStatus.valueOf(status),
-                rejectionReason = header.rejectionReason,
-                transactions = transactions,
-                unparsedFragments = databaseJson.decodeFromString(
-                    requireNotNull(header.unparsedFragmentsJson) {
-                        "У сохранённого черновика отсутствуют unparsed_fragments."
-                    },
-                ),
-                version = header.session.revision,
-            )
-        }
-        return ImportSessionState(header.session, messages, draft)
-    }
 
     private fun ResultSet.toSession(): ImportSession = ImportSession(
         id = getString("id"),
@@ -501,6 +566,54 @@ class SqliteImportSessionRepository(
             statement.setLong(7, message.createdAtEpochMs)
             statement.executeUpdate()
         }
+    }
+
+    private fun insertMetric(
+        connection: Connection,
+        sessionId: String,
+        metric: ModelCallMetric,
+    ) {
+        val sequence = nextMetricSequence(connection, sessionId)
+        connection.prepareStatement(
+            """
+            INSERT INTO model_call_metrics (
+                session_id, sequence_number, id, provider_id, model_id, status,
+                prompt_tokens, completion_tokens, total_tokens,
+                context_window_tokens, created_at_epoch_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, sessionId)
+            statement.setInt(2, sequence)
+            statement.setString(3, metric.id)
+            statement.setString(4, metric.providerId)
+            statement.setString(5, metric.modelId)
+            statement.setString(6, metric.status.name)
+            statement.setNullableInt(7, metric.promptTokens)
+            statement.setNullableInt(8, metric.completionTokens)
+            statement.setNullableInt(9, metric.totalTokens)
+            statement.setNullableInt(10, metric.contextWindowTokens)
+            statement.setLong(11, metric.createdAtEpochMs)
+            statement.executeUpdate()
+        }
+    }
+
+    private fun nextMetricSequence(connection: Connection, sessionId: String): Int =
+        connection.prepareStatement(
+            "SELECT COALESCE(MAX(sequence_number), 0) + 1 FROM model_call_metrics WHERE session_id = ?",
+        ).use { statement ->
+            statement.setString(1, sessionId)
+            statement.executeQuery().use { rows ->
+                check(rows.next())
+                rows.getInt(1)
+            }
+        }
+
+    private fun ResultSet.getIntOrNull(column: String): Int? =
+        getObject(column)?.let { getInt(column) }
+
+    private fun java.sql.PreparedStatement.setNullableInt(index: Int, value: Int?) {
+        if (value == null) setNull(index, java.sql.Types.INTEGER) else setInt(index, value)
     }
 
     private fun replaceDraft(
