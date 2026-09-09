@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Smart Expense Agent</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <link rel="icon" href="data:,">
+</head>
+<body class="agent-body">
+<div class="agent-app">
+    <header class="agent-toolbar">
+        <button id="open-session-drawer" class="icon-button" type="button" aria-controls="session-drawer" aria-expanded="false">
+            <span>Сессии</span>
+        </button>
+        <div class="agent-brand">
+            <span class="eyebrow">Smart Expense Agent</span>
+            <strong id="toolbar-session-title">Импорт операций</strong>
+        </div>
+        <div class="toolbar-actions">
+            <button id="theme-toggle" class="secondary-button compact-button" type="button">Светлая тема</button>
+            <button id="new-session" class="compact-button" type="button">Новый импорт</button>
+        </div>
+    </header>
+
+    <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+    <aside id="session-drawer" class="session-drawer" aria-label="Сессии и общие настройки" aria-hidden="true">
+        <div class="drawer-heading">
+            <h2>Сессии</h2>
+            <button id="close-session-drawer" class="icon-only-button" type="button" aria-label="Закрыть список сессий">×</button>
+        </div>
+        <button id="drawer-new-session" type="button">Новый импорт</button>
+        <div id="session-list" class="session-list">
+            <p class="muted">Загружаем сессии…</p>
+        </div>
+        <button id="delete-session" class="danger-button" type="button" hidden>Удалить выбранную сессию</button>
+
+        <form id="preferences-form" class="preferences-form">
+            <h2>Общий профиль</h2>
+            <label for="global-user-prompt">Инструкции для всех сессий</label>
+            <textarea id="global-user-prompt" rows="6" maxlength="8000" placeholder="Например: не выбирай переводы между моими счетами"></textarea>
+            <p class="control-note">Инструкции применяются к следующим сообщениям во всех сессиях.</p>
+            <button id="save-preferences" class="secondary-button" type="submit">Сохранить профиль</button>
+        </form>
+    </aside>
+
+    <main class="agent-main">
+        <section id="empty-session" class="panel empty-state">
+            <h1>Импорт банковских операций</h1>
+            <p class="muted">Создайте сессию и вставьте выписку. Агент подготовит редактируемые операции.</p>
+            <button id="empty-new-session" type="button">Новый импорт</button>
+        </section>
+
+        <div id="agent-workspace" class="agent-workspace" hidden>
+            <section class="panel session-settings" aria-labelledby="active-session-title">
+                <div class="section-heading session-heading">
+                    <div>
+                        <p class="eyebrow">Текущая сессия</p>
+                        <h1 id="active-session-title">Импорт</h1>
+                    </div>
+                </div>
+                <div class="model-settings" aria-label="Настройки агента">
+                    <label>
+                        <span>Провайдер</span>
+                        <select id="agent-provider"></select>
+                    </label>
+                    <label>
+                        <span>Модель</span>
+                        <select id="agent-model"></select>
+                    </label>
+                    <label>
+                        <span>Режим рассуждения</span>
+                        <select id="agent-reasoning"></select>
+                    </label>
+                </div>
+                <p id="session-config-note" class="control-note">Изменения применяются к следующим сообщениям; диалог и черновик сохраняются.</p>
+            </section>
+
+            <section id="conversation-panel" class="panel conversation-panel" aria-labelledby="conversation-title">
+                <div class="section-heading">
+                    <h2 id="conversation-title">Диалог</h2>
+                </div>
+                <div id="message-list" class="message-list" aria-live="polite"></div>
+                <form id="message-form" class="message-form">
+                    <label for="agent-message">Выписка или уточнение</label>
+                    <textarea id="agent-message" rows="5" placeholder="Вставьте выписку или попросите изменить черновик"></textarea>
+                    <div class="message-actions">
+                        <p class="control-note">Явные номера телефонов маскируются до сохранения и отправки провайдеру.</p>
+                        <button id="send-message" type="submit">Отправить</button>
+                    </div>
+                </form>
+            </section>
+
+            <section id="draft-panel" class="panel draft-panel" hidden aria-labelledby="draft-title">
+                <div class="section-heading draft-heading">
+                    <div>
+                        <h2 id="draft-title">Операции</h2>
+                        <p id="draft-status" class="muted"></p>
+                    </div>
+                    <div class="draft-actions">
+                        <div id="view-switch" class="view-switch" role="group" aria-label="Представление операций" hidden>
+                            <button id="table-view" class="view-option" type="button" aria-pressed="true">Таблица</button>
+                            <button id="card-view" class="view-option" type="button" aria-pressed="false">Карточки</button>
+                        </div>
+                        <button id="build-batch" class="compact-button" type="button">Подготовить импорт</button>
+                    </div>
+                </div>
+                <label id="select-all-label" class="select-all-control" hidden>
+                    <input id="select-all" type="checkbox">
+                    <span>Выбрать все операции</span>
+                </label>
+                <div id="draft-editor" class="operation-editor"></div>
+                <section id="batch-result" class="batch-result" hidden aria-labelledby="batch-title">
+                    <div class="section-heading">
+                        <h2 id="batch-title">Подготовленные операции</h2>
+                        <button id="download-batch" class="secondary-button compact-button" type="button">Скачать JSON</button>
+                    </div>
+                    <pre id="batch-json" class="metadata"></pre>
+                </section>
+            </section>
+        </div>
+    </main>
+
+    <p id="agent-status" class="status agent-toast" role="status" aria-live="polite"></p>
+</div>
+<script src="/assets/agent.js" defer></script>
+</body>
+</html>

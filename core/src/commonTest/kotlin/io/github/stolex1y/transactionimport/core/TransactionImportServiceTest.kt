@@ -155,7 +155,7 @@ class TransactionImportServiceTest {
         assertTrue(validation.valid)
         assertFalse(validation.importable)
         assertEquals(ImportStatus.NOT_APPLICABLE, validation.status)
-        assertEquals("Input contains no financial transactions.", validation.rejectionReason)
+        assertEquals(NOT_APPLICABLE_MESSAGE, validation.rejectionReason)
         assertEquals(emptyList(), assertNotNull(result.structured).transactions)
     }
 
@@ -217,6 +217,7 @@ class TransactionImportServiceTest {
         assertFailsWith<IllegalStateException> {
             TransactionImportService(RecordingGateway(ChatCompletionResponse())).extract("statement")
         }
+        Unit
     }
 
     @Test
@@ -228,6 +229,7 @@ class TransactionImportServiceTest {
         assertFailsWith<IllegalArgumentException> {
             TransactionImportService(RecordingGateway(response)).extract("statement")
         }
+        Unit
     }
 
     @Test
@@ -303,7 +305,7 @@ class TransactionImportServiceTest {
     private val notApplicableJson = """
         {
           "status": "not_applicable",
-          "rejection_reason": "Input contains no financial transactions.",
+          "rejection_reason": "Ввод не содержит данных о финансовых операциях.",
           "transactions": [],
           "unparsed_fragments": ["Write a poem about rain."]
         }

@@ -1,0 +1,8 @@
+{
+  "default_provider_id": "deepseek",
+  "default_model_id": "deepseek-v4-flash",
+  "default_reasoning_mode_id": "low",
+  "temperature": null,
+  "max_tokens": 100000,
+  "default_user_prompt": ""
+}

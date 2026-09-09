@@ -1,12 +1,16 @@
 package io.github.stolex1y.transactionimport.web
 
+import io.github.stolex1y.transactionimport.core.AgentResponseException
 import io.github.stolex1y.transactionimport.core.AppliedResponseControls
 import io.github.stolex1y.transactionimport.core.DEFAULT_MODEL
 import io.github.stolex1y.transactionimport.core.ExtractionOptions
 import io.github.stolex1y.transactionimport.core.ReasoningLevel
 import io.github.stolex1y.transactionimport.core.ResponseMode
+import io.github.stolex1y.transactionimport.core.ProviderUnavailableException
+import io.github.stolex1y.transactionimport.core.RevisionConflictException
 import io.github.stolex1y.transactionimport.core.StructuredValidation
 import io.github.stolex1y.transactionimport.core.TokenBudgetMode
+import io.github.stolex1y.transactionimport.core.SessionNotFoundException
 import io.github.stolex1y.transactionimport.core.TransactionImportService
 import io.github.stolex1y.transactionimport.core.Usage
 import io.ktor.serialization.kotlinx.json.json
@@ -77,8 +81,9 @@ private val webJson = Json {
 }
 
 fun Application.module(
-    service: TransactionImportService,
+    service: TransactionImportService? = null,
     experimentService: ExperimentService? = null,
+    agentDependencies: AgentWebDependencies? = null,
 ) {
     val jobManager = experimentService?.let(::ExperimentJobManager)
     jobManager?.let { manager ->
@@ -95,6 +100,24 @@ fun Application.module(
             call.respond(
                 HttpStatusCode.BadRequest,
                 ErrorResponse(cause.message ?: "Некорректный запрос."),
+            )
+        }
+        exception<SessionNotFoundException> { call, cause ->
+            call.respond(HttpStatusCode.NotFound, ErrorResponse(cause.message ?: "Сессия не найдена."))
+        }
+        exception<RevisionConflictException> { call, cause ->
+            call.respond(HttpStatusCode.Conflict, ErrorResponse(cause.message ?: "Конфликт ревизий."))
+        }
+        exception<ProviderUnavailableException> { call, cause ->
+            call.respond(
+                HttpStatusCode.ServiceUnavailable,
+                ErrorResponse(cause.message ?: "Провайдер недоступен."),
+            )
+        }
+        exception<AgentResponseException> { call, cause ->
+            call.respond(
+                HttpStatusCode.BadGateway,
+                ErrorResponse(cause.message ?: "Ответ агента не прошёл локальную проверку."),
             )
         }
         exception<SerializationException> { call, _ ->
@@ -118,6 +141,12 @@ fun Application.module(
                 contentType = ContentType.Text.Html,
             )
         }
+        get("/agent") {
+            call.respondText(
+                text = loadResource("web/agent.html"),
+                contentType = ContentType.Text.Html,
+            )
+        }
         get("/experiments") {
             call.respondText(
                 text = loadResource("web/experiments.html"),
@@ -135,10 +164,26 @@ fun Application.module(
         }
         staticResources("/assets", "web")
         post("/api/extract") {
-            call.respondExtraction(service)
+            val configuredService = service
+            if (configuredService == null) {
+                call.respond(
+                    HttpStatusCode.ServiceUnavailable,
+                    ErrorResponse("DEEPSEEK_API_KEY не задан; базовый импорт недоступен."),
+                )
+                return@post
+            }
+            call.respondExtraction(configuredService)
         }
         post("/api/d01/extract") {
-            call.respondExtraction(service, forcedResponseMode = ResponseMode.UNRESTRICTED)
+            val configuredService = service
+            if (configuredService == null) {
+                call.respond(
+                    HttpStatusCode.ServiceUnavailable,
+                    ErrorResponse("DEEPSEEK_API_KEY не задан; базовый импорт недоступен."),
+                )
+                return@post
+            }
+            call.respondExtraction(configuredService, forcedResponseMode = ResponseMode.UNRESTRICTED)
         }
 
         post("/api/experiments/{kind}") {
@@ -170,6 +215,7 @@ fun Application.module(
                 call.respond(response)
             }
         }
+        agentRoutes(agentDependencies)
     }
 }
 

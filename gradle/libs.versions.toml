@@ -3,6 +3,8 @@ ktor = "3.2.3"
 serialization = "1.8.1"
 coroutines = "1.10.2"
 slf4j = "2.0.17"
+sqlite = "3.46.1.0"
+playwright = "1.62.0"
 
 [libraries]
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
@@ -17,4 +19,6 @@ ktor-server-netty = { module = "io.ktor:ktor-server-netty", version.ref = "ktor"
 ktor-server-content-negotiation = { module = "io.ktor:ktor-server-content-negotiation", version.ref = "ktor" }
 ktor-server-status-pages = { module = "io.ktor:ktor-server-status-pages", version.ref = "ktor" }
 ktor-server-test-host = { module = "io.ktor:ktor-server-test-host", version.ref = "ktor" }
+sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
+playwright = { module = "com.microsoft.playwright:playwright", version.ref = "playwright" }
 slf4j-nop = { module = "org.slf4j:slf4j-nop", version.ref = "slf4j" }

@@ -1,0 +1,113 @@
+{
+  "providers": [
+    {
+      "id": "deepseek",
+      "display_name": "DeepSeek",
+      "base_url": "https://api.deepseek.com",
+      "chat_completions_path": "/chat/completions",
+      "credential_env": "DEEPSEEK_API_KEY",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "display_name": "DeepSeek V4 Flash",
+          "reasoning_modes": [
+            {
+              "id": "disabled",
+              "display_name": "Стандартный",
+              "request_fields": { "thinking": { "type": "disabled" } }
+            },
+            {
+              "id": "low",
+              "display_name": "Базовый",
+              "request_fields": {
+                "thinking": { "type": "enabled" },
+                "reasoning_effort": "low"
+              }
+            },
+            {
+              "id": "high",
+              "display_name": "Подробный",
+              "request_fields": {
+                "thinking": { "type": "enabled" },
+                "reasoning_effort": "high"
+              }
+            },
+            {
+              "id": "max",
+              "display_name": "Максимальный",
+              "request_fields": {
+                "thinking": { "type": "enabled" },
+                "reasoning_effort": "max"
+              }
+            }
+          ]
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "display_name": "DeepSeek V4 Pro",
+          "reasoning_modes": [
+            {
+              "id": "disabled",
+              "display_name": "Стандартный",
+              "request_fields": { "thinking": { "type": "disabled" } }
+            },
+            {
+              "id": "low",
+              "display_name": "Базовый",
+              "request_fields": {
+                "thinking": { "type": "enabled" },
+                "reasoning_effort": "low"
+              }
+            },
+            {
+              "id": "high",
+              "display_name": "Подробный",
+              "request_fields": {
+                "thinking": { "type": "enabled" },
+                "reasoning_effort": "high"
+              }
+            },
+            {
+              "id": "max",
+              "display_name": "Максимальный",
+              "request_fields": {
+                "thinking": { "type": "enabled" },
+                "reasoning_effort": "max"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "openrouter",
+      "display_name": "OpenRouter",
+      "base_url": "https://openrouter.ai/api/v1",
+      "chat_completions_path": "/chat/completions",
+      "credential_env": "OPENROUTER_API_KEY",
+      "models": [
+        {
+          "id": "z-ai/glm-5.2:free",
+          "display_name": "GLM 5.2 Free",
+          "reasoning_modes": [
+            {
+              "id": "disabled",
+              "display_name": "Стандартный",
+              "request_fields": { "reasoning": { "effort": "none" } }
+            },
+            {
+              "id": "low",
+              "display_name": "Базовый",
+              "request_fields": { "reasoning": { "effort": "low" } }
+            },
+            {
+              "id": "high",
+              "display_name": "Подробный",
+              "request_fields": { "reasoning": { "effort": "high" } }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
