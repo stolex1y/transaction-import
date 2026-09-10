@@ -630,21 +630,21 @@ class SmartExpenseAgent(
         require(extracted.isNotEmpty()) {
             "Ответ append должен содержать хотя бы одну транзакцию."
         }
-        val seenKeys = draft.transactions
-            .asSequence()
-            .map { it.transaction.toAppendDuplicateKey() }
-            .toMutableSet()
+        val seenTransactions = draft.transactions
+            .map { it.transaction }
+            .toMutableList()
         var nextSourceIndex = (draft.transactions.maxOfOrNull { it.transaction.sourceIndex } ?: 0) + 1
         var duplicateCount = 0
         val appended = buildList {
             extracted.forEach { source ->
                 val candidate = source.toStructuredTransaction()
-                if (!seenKeys.add(candidate.toAppendDuplicateKey())) {
+                if (seenTransactions.any { it.matchesAppendDuplicate(candidate) }) {
                     duplicateCount += 1
                     return@forEach
                 }
                 val assigned = candidate.copy(sourceIndex = nextSourceIndex)
                 nextSourceIndex += 1
+                seenTransactions += assigned
                 add(
                     DraftTransaction(
                         id = assigned.sourceIndex.toString(),
@@ -675,6 +675,16 @@ class SmartExpenseAgent(
             currency = currency,
             merchant = normalizeMerchantLabel(merchant),
         )
+
+    private fun StructuredTransaction.matchesAppendDuplicate(
+        candidate: StructuredTransaction,
+    ): Boolean =
+        toAppendDuplicateKey() == candidate.toAppendDuplicateKey() &&
+            optionalAppendFieldMatches(postedAt, candidate.postedAt) &&
+            optionalAppendFieldMatches(cardLast4, candidate.cardLast4)
+
+    private fun optionalAppendFieldMatches(left: String?, right: String?): Boolean =
+        left.isNullOrBlank() || right.isNullOrBlank() || left == right
 
     private fun setField(
         transaction: StructuredTransaction,

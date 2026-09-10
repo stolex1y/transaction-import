@@ -142,6 +142,34 @@ class SmartExpenseAgentTest {
     }
 
     @Test
+    fun keepsRowsWhenOptionalIdentityFieldsConflict() = runBlocking {
+        val gateway = QueuedGateway(initialDraftJson, conflictingOptionalAppendStatementJson)
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Конфликт optional-полей", defaultConfig)
+
+        val extracted = agent.sendMessage(created.session.id, 0, "Первая выписка")
+        val appended = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = extracted.session.revision,
+            text = "Выписка с двумя операциями Госуслуги.",
+        )
+
+        val gosuslugi = appended.draft!!.transactions.filter {
+            it.transaction.merchant == "Госуслуги"
+        }
+        assertEquals(listOf("3", "4"), gosuslugi.map { it.id })
+        assertEquals(
+            listOf("2026-08-18T16:02:00", "2026-08-19T14:31:00"),
+            gosuslugi.map { it.transaction.postedAt },
+        )
+        assertEquals(listOf("6960", "9818"), gosuslugi.map { it.transaction.cardLast4 })
+        assertEquals(
+            "Добавлено операций: 2. Пропущено точных дубликатов: 0.",
+            appended.messages.last().displayText,
+        )
+    }
+
+    @Test
     fun appendsStructurallyValidIncompleteRowsWithFieldErrors() = runBlocking {
         val gateway = QueuedGateway(initialDraftJson, incompleteAppendStatementJson)
         val agent = testAgent(MemoryImportSessionRepository(), gateway)
@@ -720,7 +748,7 @@ class SmartExpenseAgentTest {
                   "included": true,
                   "direction": "expense",
                   "occurred_at": "2026-01-15T12:10:00",
-                  "posted_at": null,
+                  "posted_at": "2026-01-15T13:00:00",
                   "amount_minor": 125050,
                   "currency": "RUB",
                   "merchant": "DEMO MARKET-ABC123",
@@ -755,6 +783,44 @@ class SmartExpenseAgentTest {
                   "category_id": "food.cafes",
                   "card_last4": null,
                   "needs_review": false,
+                  "issues": []
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val conflictingOptionalAppendStatementJson = """
+            {
+              "intent": "append_statement",
+              "message": "Найдены две операции Госуслуги.",
+              "operations": [],
+              "transactions": [
+                {
+                  "source_index": 14,
+                  "included": true,
+                  "direction": "expense",
+                  "occurred_at": "2026-08-18T15:55:00",
+                  "posted_at": "2026-08-18T16:02:00",
+                  "amount_minor": 600000,
+                  "currency": "RUB",
+                  "merchant": "Госуслуги",
+                  "category_id": null,
+                  "card_last4": "6960",
+                  "needs_review": true,
+                  "issues": []
+                },
+                {
+                  "source_index": 15,
+                  "included": true,
+                  "direction": "expense",
+                  "occurred_at": "2026-08-18T15:55:00",
+                  "posted_at": "2026-08-19T14:31:00",
+                  "amount_minor": 600000,
+                  "currency": "RUB",
+                  "merchant": "Госуслуги",
+                  "category_id": null,
+                  "card_last4": "9818",
+                  "needs_review": true,
                   "issues": []
                 }
               ]
