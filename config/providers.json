@@ -9,7 +9,7 @@
       "models": [
         {
           "id": "deepseek-v4-flash",
-          "context_window_tokens": 1000000,
+          "context_window_tokens": 50000,
           "display_name": "DeepSeek V4 Flash",
           "reasoning_modes": [
             {
