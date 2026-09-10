@@ -115,6 +115,115 @@ class SmartExpenseAgentTest {
     }
 
     @Test
+    fun appendsStatementWithStableIdsAndExactDeduplication() = runBlocking {
+        val gateway = QueuedGateway(initialDraftJson, appendStatementJson)
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Добавление выписки", defaultConfig)
+
+        val extracted = agent.sendMessage(created.session.id, 0, "Первая выписка")
+        val appended = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = extracted.session.revision,
+            text = "Вот вторая выписка.",
+        )
+
+        assertEquals(listOf("1", "2", "3"), appended.draft!!.transactions.map { it.id })
+        assertEquals(
+            listOf("DEMO MARKET", "DEMO TAXI", "DEMO CAFE"),
+            appended.draft!!.transactions.map { it.transaction.merchant },
+        )
+        assertEquals(70_000, appended.draft!!.transactions.last().transaction.amountMinor)
+        assertEquals(
+            "Добавлено операций: 1. Пропущено точных дубликатов: 2.",
+            appended.messages.last().displayText,
+        )
+        assertEquals(extracted.session.revision + 1, appended.session.revision)
+        assertEquals(4, appended.messages.size)
+    }
+
+    @Test
+    fun appendsStructurallyValidIncompleteRowsWithFieldErrors() = runBlocking {
+        val gateway = QueuedGateway(initialDraftJson, incompleteAppendStatementJson)
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Неполная выписка", defaultConfig)
+
+        val extracted = agent.sendMessage(created.session.id, 0, "Первая выписка")
+        val appended = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = extracted.session.revision,
+            text = "Вот ещё одна выписка с неполной строкой.",
+        )
+
+        val row = appended.draft!!.transactions.last()
+        assertEquals("3", row.id)
+        assertTrue(row.fieldErrors.keys.containsAll(listOf("occurred_at", "amount_minor")))
+        assertEquals(-1, row.transaction.amountMinor)
+    }
+
+    @Test
+    fun allDuplicateAppendStillPersistsExchangeAndMetric() = runBlocking {
+        val gateway = QueuedGateway(initialDraftJson, allDuplicateAppendStatementJson)
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Только дубликаты", defaultConfig)
+
+        val extracted = agent.sendMessage(created.session.id, 0, "Первая выписка")
+        val appended = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = extracted.session.revision,
+            text = "Повторная выписка.",
+        )
+
+        assertEquals(extracted.draft!!.transactions, appended.draft!!.transactions)
+        assertEquals(2, appended.metrics.size)
+        assertEquals(4, appended.messages.size)
+        assertEquals(
+            "Добавлено операций: 0. Пропущено точных дубликатов: 1.",
+            appended.messages.last().displayText,
+        )
+    }
+
+    @Test
+    fun rejectsInvalidAppendResponseWithoutPartialMutation() = runBlocking {
+        val gateway = QueuedGateway(initialDraftJson, invalidAppendResponseJson)
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, gateway)
+        val created = agent.createSession("Атомарное добавление", defaultConfig)
+        val extracted = agent.sendMessage(created.session.id, 0, "Первая выписка")
+
+        assertFailsWith<AgentResponseException> {
+            agent.sendMessage(
+                sessionId = created.session.id,
+                expectedRevision = extracted.session.revision,
+                text = "Сломанный ответ.",
+            )
+        }
+
+        val unchanged = agent.getSession(created.session.id)
+        assertEquals(extracted.session, unchanged.session)
+        assertEquals(extracted.messages, unchanged.messages)
+        assertEquals(extracted.draft, unchanged.draft)
+        assertEquals(extracted.metrics, unchanged.metrics)
+    }
+
+    @Test
+    fun ambiguousAppendAndCorrectionDoesNotChangeTransactions() = runBlocking {
+        val gateway = QueuedGateway(initialDraftJson, needsClarificationJson)
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Неоднозначное добавление", defaultConfig)
+        val extracted = agent.sendMessage(created.session.id, 0, "Первая выписка")
+
+        val result = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = extracted.session.revision,
+            text = "Добавь выписку и исправь первую строку.",
+        )
+
+        assertEquals(extracted.draft!!.transactions, result.draft!!.transactions)
+        assertEquals("Разделите добавление и исправление на два сообщения.", result.messages.last().displayText)
+        assertEquals(extracted.session.revision + 1, result.session.revision)
+    }
+
+    @Test
     fun merchantPromptRequiresReviewingEveryKnownName() = runBlocking {
         val gateway = QueuedGateway(initialDraftJson)
         val agent = testAgent(MemoryImportSessionRepository(), gateway)
@@ -290,6 +399,24 @@ class SmartExpenseAgentTest {
         assertEquals(NOT_APPLICABLE_MESSAGE, result.draft!!.rejectionReason)
         assertEquals(NOT_APPLICABLE_MESSAGE, result.messages.last().displayText)
         assertTrue(result.draft!!.transactions.isEmpty())
+    }
+
+    @Test
+    fun appendsStatementAfterNotApplicableInput() = runBlocking {
+        val gateway = QueuedGateway(notApplicableJson, appendStatementJson)
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Сначала не выписка", defaultConfig)
+
+        val notApplicable = agent.sendMessage(created.session.id, 0, "Как приготовить суп?")
+        val result = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = notApplicable.session.revision,
+            text = "Теперь вот банковская выписка.",
+        )
+
+        assertEquals(ImportStatus.READY, result.draft!!.status)
+        assertEquals(2, result.draft!!.transactions.size)
+        assertNull(result.draft!!.rejectionReason)
     }
 
     @Test
@@ -575,9 +702,135 @@ class SmartExpenseAgentTest {
 
         val emptyAppliedPatchJson = """
             {
-              "status": "applied",
+              "intent": "correction",
               "message": "Изменений не найдено.",
-              "operations": []
+              "operations": [],
+              "transactions": []
+            }
+        """.trimIndent()
+
+        val appendStatementJson = """
+            {
+              "intent": "append_statement",
+              "message": "Найдены операции во второй выписке.",
+              "operations": [],
+              "transactions": [
+                {
+                  "source_index": 99,
+                  "included": true,
+                  "direction": "expense",
+                  "occurred_at": "2026-01-15T12:10:00",
+                  "posted_at": null,
+                  "amount_minor": 125050,
+                  "currency": "RUB",
+                  "merchant": "DEMO MARKET-ABC123",
+                  "category_id": "food.groceries",
+                  "card_last4": "1234",
+                  "needs_review": false,
+                  "issues": []
+                },
+                {
+                  "source_index": 100,
+                  "included": true,
+                  "direction": "expense",
+                  "occurred_at": "2026-01-17T09:00:00",
+                  "posted_at": null,
+                  "amount_minor": 70000,
+                  "currency": "RUB",
+                  "merchant": "DEMO CAFE",
+                  "category_id": "food.cafes",
+                  "card_last4": null,
+                  "needs_review": false,
+                  "issues": []
+                },
+                {
+                  "source_index": 101,
+                  "included": true,
+                  "direction": "expense",
+                  "occurred_at": "2026-01-17T09:00:00",
+                  "posted_at": null,
+                  "amount_minor": 70000,
+                  "currency": "RUB",
+                  "merchant": "DEMO CAFE",
+                  "category_id": "food.cafes",
+                  "card_last4": null,
+                  "needs_review": false,
+                  "issues": []
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val allDuplicateAppendStatementJson = """
+            {
+              "intent": "append_statement",
+              "message": "Повтор операции.",
+              "operations": [],
+              "transactions": [
+                {
+                  "source_index": 300,
+                  "included": true,
+                  "direction": "expense",
+                  "occurred_at": "2026-01-15T12:10:00",
+                  "posted_at": null,
+                  "amount_minor": 125050,
+                  "currency": "RUB",
+                  "merchant": "DEMO MARKET",
+                  "category_id": "food.groceries",
+                  "card_last4": "1234",
+                  "needs_review": false,
+                  "issues": []
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val incompleteAppendStatementJson = """
+            {
+              "intent": "append_statement",
+              "message": "Найдена неполная операция.",
+              "operations": [],
+              "transactions": [
+                {
+                  "source_index": 44,
+                  "included": true,
+                  "direction": "expense",
+                  "occurred_at": "",
+                  "posted_at": null,
+                  "amount_minor": -1,
+                  "currency": "RUB",
+                  "merchant": "DEMO INCOMPLETE",
+                  "category_id": null,
+                  "card_last4": null,
+                  "needs_review": true,
+                  "issues": ["occurred_at: дата не указана"]
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val invalidAppendResponseJson = """
+            {
+              "intent": "append_statement",
+              "message": "Недопустимое смешение форматов.",
+              "operations": [
+                {
+                  "transaction_id": "1",
+                  "action": "set_included",
+                  "field": null,
+                  "value": false
+                }
+              ],
+              "transactions": []
+            }
+        """.trimIndent()
+
+        val needsClarificationJson = """
+            {
+              "intent": "needs_clarification",
+              "message": "Разделите добавление и исправление на два сообщения.",
+              "operations": [],
+              "transactions": []
             }
         """.trimIndent()
 
@@ -631,7 +884,7 @@ class SmartExpenseAgentTest {
 
         val categoryPatchJson = """
             {
-              "status": "applied",
+              "intent": "correction",
               "message": "Категория исправлена.",
               "operations": [
                 {
@@ -640,13 +893,14 @@ class SmartExpenseAgentTest {
                   "field": "category_id",
                   "value": "food.groceries"
                 }
-              ]
+              ],
+              "transactions": []
             }
         """.trimIndent()
 
         val excludePatchJson = """
             {
-              "status": "applied",
+              "intent": "correction",
               "message": "Операция исключена.",
               "operations": [
                 {
@@ -655,7 +909,8 @@ class SmartExpenseAgentTest {
                   "field": null,
                   "value": false
                 }
-              ]
+              ],
+              "transactions": []
             }
         """.trimIndent()
 

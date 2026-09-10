@@ -91,6 +91,42 @@ class SqliteImportSessionRepositoryTest {
     }
 
     @Test
+    fun restoresAppendedTransactionsAfterRestart() = runBlocking {
+        val database = Files.createTempFile("transaction-import-append-", ".sqlite")
+        try {
+            var firstId = 0
+            val gateway = SequenceResponseGateway(initialDraftJson, appendStatementJson)
+            val firstAgent = SmartExpenseAgent(
+                repository = SqliteImportSessionRepository(database.absolutePathString()),
+                gatewayResolver = AgentGatewayResolver { gateway },
+                idGenerator = { "first-${++firstId}" },
+                nowEpochMs = { 3_000L + firstId },
+            )
+            val created = firstAgent.createSession("Append restart", defaultConfig)
+            val extracted = firstAgent.sendMessage(created.session.id, 0, "Первая выписка")
+            val appended = firstAgent.sendMessage(
+                sessionId = created.session.id,
+                expectedRevision = extracted.session.revision,
+                text = "Вторая выписка",
+            )
+
+            val restarted = SmartExpenseAgent(
+                repository = SqliteImportSessionRepository(database.absolutePathString()),
+                gatewayResolver = AgentGatewayResolver { error("LLM не нужен для восстановления") },
+                idGenerator = { "unused" },
+                nowEpochMs = { 4_000L },
+            ).getSession(created.session.id)
+
+            assertEquals(listOf("1", "2"), restarted.draft!!.transactions.map { it.id })
+            assertEquals("DEMO CAFE", restarted.draft!!.transactions.last().transaction.merchant)
+            assertEquals(appended.session.revision, restarted.session.revision)
+            assertEquals(2, restarted.metrics.size)
+        } finally {
+            deleteDatabase(database)
+        }
+    }
+
+    @Test
     fun migratesVersionTwoDatabaseWithoutDeletingSessions() = runBlocking {
         val database = Files.createTempFile("transaction-import-v2-", ".sqlite")
         try {
@@ -238,6 +274,23 @@ class SqliteImportSessionRepositoryTest {
         }
     }
 
+    private class SequenceResponseGateway(
+        vararg private val contents: String,
+    ) : ChatCompletionGateway {
+        private var index = 0
+
+        override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse =
+            ChatCompletionResponse(
+                choices = listOf(
+                    ChatChoice(
+                        message = ResponseMessage(content = contents[index++]),
+                        finishReason = "stop",
+                    ),
+                ),
+                usage = Usage(promptTokens = 5, completionTokens = 2, totalTokens = 7),
+            )
+    }
+
     private companion object {
         val defaultConfig = AgentConfig("fake", "fake-model", "disabled")
 
@@ -267,7 +320,7 @@ class SqliteImportSessionRepositoryTest {
 
         val renameMerchantPatchJson = """
             {
-              "status": "applied",
+              "intent": "correction",
               "message": "Контрагент изменён.",
               "operations": [
                 {
@@ -275,6 +328,45 @@ class SqliteImportSessionRepositoryTest {
                   "action": "set_field",
                   "field": "merchant",
                   "value": "DEMO STORE"
+                }
+              ],
+              "transactions": []
+            }
+        """.trimIndent()
+
+        val appendStatementJson = """
+            {
+              "intent": "append_statement",
+              "message": "Найдены операции во второй выписке.",
+              "operations": [],
+              "transactions": [
+                {
+                  "source_index": 8,
+                  "included": true,
+                  "direction": "expense",
+                  "occurred_at": "2026-01-15T12:10:00",
+                  "posted_at": null,
+                  "amount_minor": 125050,
+                  "currency": "RUB",
+                  "merchant": "DEMO MARKET",
+                  "category_id": "food.groceries",
+                  "card_last4": "1234",
+                  "needs_review": false,
+                  "issues": []
+                },
+                {
+                  "source_index": 9,
+                  "included": true,
+                  "direction": "expense",
+                  "occurred_at": "2026-01-17T09:00:00",
+                  "posted_at": null,
+                  "amount_minor": 70000,
+                  "currency": "RUB",
+                  "merchant": "DEMO CAFE",
+                  "category_id": "food.cafes",
+                  "card_last4": null,
+                  "needs_review": false,
+                  "issues": []
                 }
               ]
             }

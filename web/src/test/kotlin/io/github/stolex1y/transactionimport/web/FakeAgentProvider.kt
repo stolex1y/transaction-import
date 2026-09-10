@@ -31,7 +31,7 @@ class FakeAgentGateway(
             throw ContextWindowExceededException()
         }
         val content = responses.removeFirstOrNull()
-            ?: if (request.messages.any { it.role == "assistant" }) NOOP_PATCH_JSON else READY_DRAFT_JSON
+            ?: if (request.messages.any { it.role == "assistant" }) FOLLOW_UP_NOOP_JSON else READY_DRAFT_JSON
         return ChatCompletionResponse(
             choices = listOf(
                 ChatChoice(
@@ -47,7 +47,7 @@ class FakeAgentGateway(
         )
     }
 
-    internal companion object {
+    companion object {
         val READY_DRAFT_JSON = """
             {
               "status": "ready",
@@ -86,11 +86,50 @@ class FakeAgentGateway(
             }
         """.trimIndent()
 
-        val NOOP_PATCH_JSON = """
+        val FOLLOW_UP_NOOP_JSON = """
             {
-              "status": "applied",
+              "intent": "correction",
               "message": "Изменений не найдено.",
-              "operations": []
+              "operations": [],
+              "transactions": []
+            }
+        """.trimIndent()
+
+        val APPEND_STATEMENT_JSON = """
+            {
+              "intent": "append_statement",
+              "message": "Найдены операции во второй выписке.",
+              "operations": [],
+              "transactions": [
+                {
+                  "source_index": 40,
+                  "direction": "expense",
+                  "occurred_at": "2026-02-08T12:10:00",
+                  "included": true,
+                  "posted_at": null,
+                  "amount_minor": 125050,
+                  "currency": "RUB",
+                  "merchant": "ДЕМО МАРКЕТ-ABC123",
+                  "category_id": "food.groceries",
+                  "card_last4": "1234",
+                  "needs_review": false,
+                  "issues": []
+                },
+                {
+                  "source_index": 41,
+                  "direction": "expense",
+                  "occurred_at": "2026-02-09T10:00:00",
+                  "included": true,
+                  "posted_at": null,
+                  "amount_minor": 35000,
+                  "currency": "RUB",
+                  "merchant": "НОВЫЙ КАФЕ",
+                  "category_id": "food.cafes",
+                  "card_last4": null,
+                  "needs_review": false,
+                  "issues": []
+                }
+              ]
             }
         """.trimIndent()
 

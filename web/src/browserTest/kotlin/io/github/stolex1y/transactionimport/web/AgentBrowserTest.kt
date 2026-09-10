@@ -284,6 +284,86 @@ class AgentBrowserTest {
     }
 
     @Test
+    fun appendsSecondStatementWithDeduplicationAndPersistence() {
+        val database = Files.createTempFile("agent-browser-append-", ".sqlite")
+        val gateway = FakeAgentGateway(
+            responses = ArrayDeque(
+                listOf(
+                    FakeAgentGateway.READY_DRAFT_JSON,
+                    FakeAgentGateway.APPEND_STATEMENT_JSON,
+                ),
+            ),
+        )
+        val port = ServerSocket(0).use { it.localPort }
+        fun startServer() = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
+        }.start(wait = false)
+
+        var server = startServer()
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(
+                    BrowserType.LaunchOptions().setHeadless(true),
+                ).use { browser ->
+                    browser.newContext(
+                        Browser.NewContextOptions().setViewportSize(1_280, 900),
+                    ).use { context ->
+                        val page = context.newPage()
+                        val baseUrl = "http://127.0.0.1:$port"
+                        page.navigate("$baseUrl/agent")
+                        page.locator("#empty-new-session").click()
+                        page.locator("#agent-message").fill("Первая выписка")
+                        page.locator("#send-message").click()
+                        page.locator("#operation-table").waitFor()
+                        assertEquals(2, page.locator("#operation-table tbody tr").count())
+
+                        page.locator("#agent-message").fill("Вторая выписка")
+                        page.locator("#send-message").click()
+                        page.waitForFunction(
+                            "() => document.querySelectorAll('#operation-table tbody tr').length === 3",
+                        )
+                        assertEquals(
+                            listOf("1", "2", "3"),
+                            (0 until 3).map { index ->
+                                page.locator("#operation-table tbody tr").nth(index)
+                                    .getAttribute("data-transaction-id")
+                            },
+                        )
+                        assertEquals(
+                            "НОВЫЙ КАФЕ",
+                            page.locator("tr[data-transaction-id='3'] input[name='merchant']").inputValue(),
+                        )
+                        assertTrue(
+                            page.locator("#message-list .assistant").nth(1).textContent()
+                                .contains("Добавлено операций: 1"),
+                        )
+                        assertTrue(
+                            page.locator("#message-list .assistant").nth(1).textContent()
+                                .contains("Пропущено точных дубликатов: 1"),
+                        )
+                        assertEquals(2, page.locator("#metrics-table-body tr").count())
+
+                        server.stop(1_000, 5_000)
+                        server = startServer()
+                        page.reload()
+                        page.locator("#operation-table").waitFor()
+                        assertEquals(3, page.locator("#operation-table tbody tr").count())
+                        assertEquals(2, page.locator("#metrics-table-body tr").count())
+                        assertEquals(
+                            "НОВЫЙ КАФЕ",
+                            page.locator("tr[data-transaction-id='3'] input[name='merchant']").inputValue(),
+                        )
+                        assertEquals(2, gateway.requests.size)
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
     fun reportsContextOverflowWithoutChangingDraftOrConversation() {
         val database = Files.createTempFile("agent-browser-overflow-", ".sqlite")
         val gateway = FakeAgentGateway()
