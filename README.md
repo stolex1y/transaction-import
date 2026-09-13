@@ -157,6 +157,39 @@ UTF-8 upper-bound оценку без внешнего tokenizer API; она н�
 сессий доступны без ключа; отправка сообщения требует доступного провайдера.
 Для базовых страниц и экспериментов нужен `DEEPSEEK_API_KEY`.
 
+
+## Локальные demo instances
+
+Для записи сравнительных сценариев конфигурации и отдельные SQLite-базы
+создаются в игнорируемом каталоге `.gradle/demo/instances`:
+
+```text
+01-main/                 18180  Summary
+02-sliding-window/       18181  Sliding Window
+03-sticky-facts/         18182  Sticky Facts
+04-summary/              18183  Summary
+05-branching/            18184  Branching
+06-token-aware-summary/  18185  Token-aware Summary
+07-lfm-full-history/     18186  LFM без compression
+08-lfm-summary/          18187  LFM с Summary
+```
+
+Каждый инстанс запускается своим `run.sh`. Скрипт пересобирает web distribution,
+подставляет локальные `providers.json`, `agent.json`, SQLite и порт. Для
+ускорения повторного запуска используйте `SKIP_BUILD=1`.
+
+Clean-выписка для сравнительного видео генерируется командой:
+
+```bash
+python3 examples/generate_context_memory_fixture.py \
+  --output .gradle/demo/demo-context-memory.txt
+```
+
+Runner `examples/run_summary_overflow_demo.py` отправляет одну большую
+выписку, три промежуточных сообщения и пятый запрос. Он предназначен для
+локального deterministic smoke; реальный OpenRouter/LFM запуск выполняется
+пользователем отдельно во время записи.
+
 ## Проверки
 
 Обычный набор тестов не вызывает внешние API и не запускает браузер:

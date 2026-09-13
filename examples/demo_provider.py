@@ -7,7 +7,12 @@ import os
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("DEMO_PROVIDER_PORT", "8091"))
-OVERFLOW_CHARACTER_LIMIT = 12_000
+OVERFLOW_CHARACTER_LIMIT = int(
+    os.environ.get("DEMO_PROVIDER_OVERFLOW_CHARACTER_LIMIT", "12_000")
+)
+OVERFLOW_AFTER_ASSISTANTS = int(
+    os.environ.get("DEMO_PROVIDER_OVERFLOW_AFTER_ASSISTANTS", "0")
+)
 
 INITIAL_RESPONSE = {
     "status": "ready",
@@ -37,6 +42,10 @@ FOLLOW_UP_RESPONSE = {
     "operations": [],
     "transactions": [],
 }
+SUMMARY_RESPONSE = {
+    "summary": "Синтетическая выписка получена; текущий черновик и последующие пользовательские уточнения сохранены."
+}
+
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -45,8 +54,21 @@ class Handler(BaseHTTPRequestHandler):
         request = json.loads(self.rfile.read(length))
         messages = request.get("messages", [])
         prompt_chars = sum(len(str(message.get("content", ""))) for message in messages)
+        assistant_count = sum(message.get("role") == "assistant" for message in messages)
+        is_summary_request = any(
+            message.get("role") == "user"
+            and "Messages to incorporate:" in str(message.get("content", ""))
+            for message in messages
+        )
 
-        if prompt_chars > OVERFLOW_CHARACTER_LIMIT:
+        if (
+            prompt_chars > OVERFLOW_CHARACTER_LIMIT
+            or (
+                OVERFLOW_AFTER_ASSISTANTS > 0
+                and assistant_count >= OVERFLOW_AFTER_ASSISTANTS
+                and not is_summary_request
+            )
+        ):
             self.respond(
                 400,
                 {
@@ -56,10 +78,12 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
-
-        content = FOLLOW_UP_RESPONSE if any(
-            message.get("role") == "assistant" for message in messages
-        ) else INITIAL_RESPONSE
+        if is_summary_request:
+            content = SUMMARY_RESPONSE
+        elif any(message.get("role") == "assistant" for message in messages):
+            content = FOLLOW_UP_RESPONSE
+        else:
+            content = INITIAL_RESPONSE
         prompt_tokens = max(1, prompt_chars // 4)
         completion_tokens = 24
         self.respond(
