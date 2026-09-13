@@ -118,6 +118,12 @@ web-интерфейс показывает выбранную стратеги�
 `agent-token-aware-summary.json`. Для каждого запуска используйте отдельную
 SQLite-базу.
 
+Для воспроизводимой записи token-aware compaction используйте
+`examples/agent-token-aware-demo.json` вместе с
+`examples/demo-providers.json`: threshold равен `20000`, fresh-tail budget —
+`500`, summary budget — `2048`. Этот профиль предназначен для демонстрации,
+а не для изменения основного `config/agent.json`.
+
 Старый `context_compression` продолжает читаться для совместимости с
 предыдущими конфигурациями: `enabled=true` преобразуется в `summary`, а
 `enabled=false` сохраняет legacy-поведение полной истории. Новый active-файл
