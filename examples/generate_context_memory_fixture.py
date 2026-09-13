@@ -50,7 +50,7 @@ def build_fixture() -> str:
         "Источник: synthetic household account export",
         "Каждая строка ниже — одна банковская операция.",
         "",
-        "transaction_id | occurred_at | posted_at | merchant | description | amount | currency | card_last4 | channel | status | source_category | merchant_country | mcc | authorization_code | terminal_id | counterparty | balance_after | payment_purpose | provider_reference | cashback_minor",
+        "transaction_id | occurred_at | posted_at | merchant | description | amount | currency | card_last4 | channel | status | source_category | merchant_country | mcc | authorization_code | terminal_id | counterparty | balance_after | payment_purpose | provider_reference | cashback_minor | merchant_address | merchant_location | payment_instrument | exchange_rate | fee_minor | settlement_reference | accounting_note",
     ]
     start = date(2026, 3, 1)
     for index, (merchant, description, amount_minor, category) in enumerate(OPERATIONS, start=1):
@@ -77,8 +77,14 @@ def build_fixture() -> str:
                     f"counterparty-{index % 9:02d}",
                     f"{5_000_000 + amount_minor - index * 317 / 100:.2f}",
                     f"household; {description}; monthly export",
-                    f"PROVIDER-202603-{index:06d}",
                     f"{max(0, abs(amount_minor) // 1000)}",
+                    f"RU-MOW-{100 + index:03d}",
+                    f"Москва, район {index % 8 + 1}, точка обслуживания {index % 12 + 1}",
+                    "debit-card" if index % 3 else "instant-qr",
+                    "1.000000",
+                    f"{index % 3}",
+                    f"SETTLE-202603-{index:06d}",
+                    "synthetic export; settlement completed; no manual override",
                 ]
             )
         )
