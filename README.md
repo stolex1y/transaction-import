@@ -82,38 +82,200 @@ account/reference ID без телефонных признаков не изм�
 
 ## Конфигурация агента
 
-Начальные provider/model/reasoning, скрытые параметры LLM и начальный общий
-профиль задаются в `config/agent.json`. Путь к другому файлу задаётся через
-`AGENT_CONFIG_PATH`.
+Начальные provider/model/reasoning, скрытые параметры LLM, стратегия контекста
+и начальный общий профиль задаются в `config/agent.json`. Путь к другому файлу
+задаётся через `AGENT_CONFIG_PATH`. Файл читается при старте приложения.
 
-По умолчанию `temperature` не переопределяет настройку провайдера, а
-`max_tokens` равен `100000`. Эти параметры не показываются в web-интерфейсе.
-Если выбранная модель задаёт `max_output_tokens`, фактический бюджет запроса
-ограничивается этим значением. Это предотвращает ложное переполнение контекста
-для моделей с меньшим окном, например LFM с лимитом `2048`.
+### Верхнеуровневые поля
 
-`context_management` выбирает ровно одну стратегию контекста при создании
-сессии. Переключение выполняется между запусками через `AGENT_CONFIG_PATH`;
-web-интерфейс показывает выбранную стратегию только для чтения:
+Минимальная конфигурация выглядит так:
 
-- `strategy=sliding_window`: в normal-запрос попадают последние
-  `recent_messages`, полный архив остаётся в SQLite;
-- `strategy=sticky_facts`: отдельный strict-JSON `facts`-вызов обновляет
-  подтверждённые факты перед normal-вызовом; факты и обмен сохраняются
-  атомарно;
-- `strategy=branching`: запрос использует полный архив; кнопка «Создать
-  ветку» создаёт независимую копию checkpoint без изменения источника;
-- `strategy=summary`: сжимает старую историю в отдельную summary, сохраняя
+```json
+{
+  "default_provider_id": "deepseek",
+  "default_model_id": "deepseek-v4-flash",
+  "default_reasoning_mode_id": "low",
+  "temperature": null,
+  "max_tokens": 100000,
+  "default_user_prompt": "",
+  "context_management": {
+    "strategy": "summary",
+    "recent_messages": 5,
+    "summary_batch_messages": 5,
+    "summary_max_tokens": 1024
+  }
+}
+```
+
+| Поле | Тип и ограничения | Назначение |
+| --- | --- | --- |
+| `default_provider_id` | строка | `id` провайдера из `providers.json`; используется при создании новой сессии. |
+| `default_model_id` | строка | `id` модели выбранного провайдера; модель должна существовать в его `models`. |
+| `default_reasoning_mode_id` | строка | `id` режима из `reasoning_modes` выбранной модели. |
+| `temperature` | `null` или число `0.0..2.0` | Температура всех агентных LLM-вызовов. `null` не добавляет поле в запрос и оставляет решение провайдеру. |
+| `max_tokens` | положительное целое | Максимум output tokens обычного agent-вызова. Фактическое значение ограничивается `max_output_tokens` модели, если оно задано. Для summary и facts используются отдельные поля `summary_max_tokens` и `facts_max_tokens`. |
+| `default_user_prompt` | строка, максимум 8000 символов | Начальный общий профиль пользователя. Он записывается в SQLite только при первом создании профиля; изменение файла не перезаписывает уже сохранённый профиль. |
+| `context_management` | объект или `null` | Выбирает одну стратегию контекста для новых сессий. |
+
+`default_*` и `context_management` фиксируются в snapshot сессии при её
+создании. Поэтому после изменения `agent.json` нужно перезапустить приложение и
+создать новую сессию; существующие сессии продолжают работать со своей
+стратегией и provider/model/reasoning. Provider/model/reasoning текущей сессии
+можно изменить в web-интерфейсе, стратегию контекста — нет.
+
+### Поля `context_management`
+
+Допустимые значения `strategy`: `sliding_window`, `sticky_facts`,
+`branching`, `summary`, `token_aware_summary`.
+
+| Поле | По умолчанию | Используется | Что означает |
+| --- | ---: | --- | --- |
+| `strategy` | `summary` | всегда | Ровно одна стратегия обработки истории. |
+| `recent_messages` | `10` | `sliding_window`, `sticky_facts`, `summary`, `token_aware_summary` | Количество последних сообщений, оставляемых доступными без сжатия. Для `summary` это хвост после summary; для `token_aware_summary` — дополнительная минимальная граница по числу сообщений. |
+| `summary_batch_messages` | `10` | `summary`, `token_aware_summary` | Сколько старых несжатых сообщений передавать в одну summary-компакцию. |
+| `summary_max_tokens` | `1024` | `summary`, `token_aware_summary` | Максимальный output budget отдельного summary-вызова. Значение дополнительно ограничивается `max_output_tokens` модели. |
+| `summary_threshold_tokens` | `null` | `token_aware_summary` | Жёсткий порог estimated prompt tokens. Имеет приоритет над `summary_threshold_percent`. |
+| `summary_threshold_percent` | `null` | `token_aware_summary` | Порог как процент context window, только `1..99`; используется, если `summary_threshold_tokens` не задан. |
+| `summary_reserve_tokens` | `null` | `token_aware_summary` | Резерв под текущий запрос и output, если порог не задан явно. По умолчанию используется большее из `16384` и `15%` окна; резерв ограничен половиной окна. |
+| `summary_keep_recent_tokens` | `20000` | `token_aware_summary` | Целевой объём свежего хвоста, который не следует отправлять в summary. Он дополнительно ограничен вычисленным threshold; `recent_messages` сохраняет минимальное число сообщений независимо от оценки токенов. |
+| `max_facts` | `32` | `sticky_facts` | Максимальное число sticky facts, хранимых в сессии. |
+| `fact_value_max_chars` | `500` | `sticky_facts` | Максимальная длина одного значения fact. Ключ ограничен приложением 100 символами. |
+| `facts_max_tokens` | `1024` | `sticky_facts` | Максимальный output budget отдельного facts-вызова. |
+
+Поля, не относящиеся к выбранной стратегии, лучше не указывать: схема их
+принимает для общего JSON-формата, но они не влияют на поведение. Валидатор
+проверяет положительность используемых числовых полей; для
+`summary_threshold_percent` допустим диапазон `1..99`.
+
+### Стратегии контекста
+
+#### `sliding_window`
+
+```json
+{
+  "context_management": {
+    "strategy": "sliding_window",
+    "recent_messages": 8
+  }
+}
+```
+
+В обычный и follow-up запрос попадают только последние
+`recent_messages` сообщений. Полный архив остаётся в SQLite, но старые
+сообщения не отправляются модели. Дополнительных summary/facts-вызовов нет.
+Это самый предсказуемый и дешёвый вариант для длинных диалогов, если важен
+только недавний контекст; цена — потеря старых деталей для модели.
+
+#### `sticky_facts`
+
+```json
+{
+  "context_management": {
+    "strategy": "sticky_facts",
+    "recent_messages": 6,
+    "max_facts": 32,
+    "fact_value_max_chars": 500,
+    "facts_max_tokens": 1024
+  }
+}
+```
+
+Перед обычным запросом выполняется отдельный strict-JSON facts-вызов. Он
+обновляет подтверждённые факты и удаляет устаревшие ключи; затем обычный
+запрос получает facts и последние `recent_messages` сообщений. Facts и обмен
+сохраняются атомарно. Каждый пользовательский запрос может породить
+дополнительный facts-вызов, поэтому стратегия требует дополнительного
+latency/budget. `max_facts` ограничивает число записей после обновления,
+`fact_value_max_chars` отбрасывает слишком длинные значения, а
+`facts_max_tokens` должен быть достаточно большим для JSON-ответа.
+
+#### `branching`
+
+```json
+{
+  "context_management": {
+    "strategy": "branching"
+  }
+}
+```
+
+В запрос передаётся полный архив до текущего checkpoint; поля
+`recent_messages`, `summary_*` и `*_facts` для этой стратегии не применяются.
+Кнопка «Создать ветку» доступна после завершённого обмена и создаёт
+независимую сессию-копию. Изменения в ветке не меняют исходную сессию.
+`parent_session_id`, `checkpoint_message_count` и `branch_label` — внутренние
+поля созданной сессии, а не параметры `agent.json`. Стратегия удобна для
+сравнения альтернатив, но полный архив может переполнить context window.
+
+#### `summary`
+
+```json
+{
+  "context_management": {
+    "strategy": "summary",
+    "recent_messages": 5,
+    "summary_batch_messages": 5,
+    "summary_max_tokens": 1024
+  }
+}
+```
+
+После накопления первых `recent_messages + summary_batch_messages` сообщений
+старшая часть истории сворачивается отдельным summary-вызовом. Далее
+компакция запускается, когда несжатых сообщений становится больше
+`recent_messages`; за один проход обрабатывается до
+`summary_batch_messages` сообщений. Обычный запрос получает накопленную
+summary и оставшийся свежий хвост. Это хороший общий вариант для длинных
+диалогов, но summary — дополнительный LLM-вызов и сжатое содержание может
+потерять неявные детали.
+
+#### `token_aware_summary`
+
+```json
+{
+  "context_management": {
+    "strategy": "token_aware_summary",
+    "recent_messages": 4,
+    "summary_batch_messages": 4,
+    "summary_max_tokens": 1024,
+    "summary_threshold_percent": 75,
+    "summary_keep_recent_tokens": 12000
+  }
+}
+```
+
+Стратегия оценивает полный будущий prompt до обычного вызова и начинает
+компакцию, когда effective token count превышает threshold. Для оценки берётся
+максимум между последним `prompt_tokens` от provider и локальной
+консервативной UTF-8 upper-bound оценкой. Старые сообщения сворачиваются
+порциями `summary_batch_messages`; свежий хвост сохраняется с учётом
+`summary_keep_recent_tokens` и минимальных `recent_messages`.
+
+Effective threshold выбирается в следующем порядке:
+
+1. `summary_threshold_tokens`, если задан;
+2. `summary_threshold_percent` от `context_window_tokens`;
+3. `context_window_tokens - summary_reserve_tokens`;
+4. если reserve не задан, резервом служит большее из `16384` и `15%` окна.
+
+Значения threshold ограничиваются диапазоном `1..context_window_tokens-1`, а
+reserve — диапазоном `1..50%` окна. Если у модели в `providers.json` нет
+`context_window_tokens`, token-aware compaction не может рассчитать бюджет и
+не запускается; для этой стратегии поле должно быть заполнено. Отдельно
+проверьте `max_output_tokens`: малое значение модели ограничит summary и
+обычный ответ независимо от `max_tokens`.
+
+### Совместимость со старой конфигурацией
+
+`context_compression` оставлен только для чтения старых файлов. Если
+`context_management` задан, он имеет приоритет. Иначе:
+
+- `context_compression.enabled=true` преобразуется в `summary` с его
   `recent_messages`, `summary_batch_messages` и `summary_max_tokens`;
-- `strategy=token_aware_summary`: запускает Summary по effective token
-  threshold с reserve fallback, сохраняет `summary_keep_recent_tokens` свежего
-  хвоста и использует максимум provider `prompt_tokens` и локальной
-  консервативной оценки.
+- `enabled=false` сохраняет legacy-поведение полной истории без стратегии.
 
-Старый `context_compression` продолжает читаться для совместимости с
-предыдущими конфигурациями: `enabled=true` преобразуется в `summary`, а
-`enabled=false` сохраняет legacy-поведение полной истории. Новый active-файл
-использует только `context_management`.
+В новых файлах используйте только `context_management`: он явно описывает
+выбранную стратегию и не смешивает старый и новый форматы.
 
 В одной базе хранятся изолированные сессии, snapshot выбранной стратегии,
 конфигурации агентов, полный архив сообщений, отдельная накопительная summary,
