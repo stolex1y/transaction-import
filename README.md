@@ -185,10 +185,22 @@ python3 examples/generate_context_memory_fixture.py \
   --output .gradle/demo/demo-context-memory.txt
 ```
 
-Runner `examples/run_summary_overflow_demo.py` отправляет одну большую
-выписку, три промежуточных сообщения и пятый запрос. Он предназначен для
-локального deterministic smoke; реальный OpenRouter/LFM запуск выполняется
-пользователем отдельно во время записи.
+Отдельная большая выписка для Summary/full-history overflow генерируется
+локально без API-вызовов:
+
+```bash
+python3 examples/generate_summary_overflow_fixture.py \
+  --target-chars 140000 \
+  --operation-count 1 \
+  --detail-lines 2200 \
+  --output .gradle/demo/summary-overflow-statement.txt
+```
+
+Готовая последовательность промптов находится в
+`.gradle/demo/summary-overflow-prompts.txt`. Runner
+`examples/run_summary_overflow_demo.py` предназначен для локального
+deterministic smoke; реальный OpenRouter/LFM запуск выполняется пользователем
+отдельно во время записи.
 
 ## Проверки
 
