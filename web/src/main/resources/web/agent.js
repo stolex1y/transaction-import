@@ -20,6 +20,10 @@ const elements = {
     model: document.querySelector("#agent-model"),
     reasoning: document.querySelector("#agent-reasoning"),
     configNote: document.querySelector("#session-config-note"),
+    contextStrategyNote: document.querySelector("#context-strategy-note"),
+    forkSession: document.querySelector("#fork-session"),
+    factsPanel: document.querySelector("#facts-panel"),
+    factsList: document.querySelector("#facts-list"),
     deleteSession: document.querySelector("#delete-session"),
     messageList: document.querySelector("#message-list"),
     messageForm: document.querySelector("#message-form"),
@@ -86,6 +90,7 @@ elements.model.addEventListener("change", () => {
 });
 elements.reasoning.addEventListener("change", saveSessionConfig);
 elements.deleteSession.addEventListener("click", deleteSession);
+elements.forkSession.addEventListener("click", forkActiveSession);
 elements.messageForm.addEventListener("submit", sendMessage);
 elements.selectAll.addEventListener("change", setAllIncluded);
 elements.buildBatch.addEventListener("click", buildBatch);
@@ -218,7 +223,10 @@ function renderSessionList() {
         const title = document.createElement("strong");
         title.textContent = session.title;
         const details = document.createElement("span");
-        details.textContent = `${modelDisplayName(session.config)} · ${formatDate(session.updated_at_epoch_ms)}`;
+        const strategy = session.context_management
+            ? contextStrategyLabel(session.context_management.strategy)
+            : "Legacy";
+        details.textContent = `${modelDisplayName(session.config)} · ${strategy} · ${formatDate(session.updated_at_epoch_ms)}`;
         button.append(title, details);
         elements.sessionList.append(button);
     }
@@ -307,10 +315,12 @@ function renderEmptyState() {
     workingDraft = new Map();
     dirtyFields = new Map();
     localStorage.removeItem(ACTIVE_SESSION_KEY);
-    elements.toolbarTitle.textContent = "Импорт операций";
     elements.emptySession.hidden = false;
     elements.workspace.hidden = true;
     elements.deleteSession.hidden = true;
+    elements.forkSession.hidden = true;
+    elements.factsPanel.hidden = true;
+    elements.factsList.replaceChildren();
     elements.draftPanel.hidden = true;
     elements.metricsPanel.hidden = true;
     elements.metricsSummary.replaceChildren();
@@ -324,9 +334,97 @@ function renderActiveState() {
     elements.activeTitle.textContent = activeState.session.title;
     elements.toolbarTitle.textContent = activeState.session.title;
     populateConfigControls(activeState.session.config);
+    renderContextManagement();
     renderMessages();
+    renderFacts();
     renderMetrics();
     renderDraft();
+}
+
+function renderContextManagement() {
+    const context = activeState.session.context_management;
+    const lineage = activeState.session.parent_session_id
+        ? ` Ветка от ${activeState.session.parent_session_id} после ${activeState.session.checkpoint_message_count} сообщений.`
+        : "";
+    if (!context) {
+        elements.contextStrategyNote.textContent =
+            `Стратегия контекста: полная история (legacy-конфигурация).${lineage}`;
+        elements.forkSession.hidden = true;
+        return;
+    }
+    const strategy = contextStrategyLabel(context.strategy);
+    const details = context.strategy === "sliding_window" || context.strategy === "sticky_facts"
+        ? `последние ${context.recent_messages} сообщений`
+        : context.strategy === "summary"
+            ? `recent: ${context.recent_messages}; batch summary: ${context.summary_batch_messages}`
+            : context.strategy === "token_aware_summary"
+                ? tokenAwareContextDetails(context)
+                : "полная история до checkpoint";
+    elements.contextStrategyNote.textContent =
+        `Стратегия контекста: ${strategy} · ${details}. Настройка фиксирована при создании сессии.${lineage}`;
+    elements.forkSession.hidden = context.strategy !== "branching" || (activeState.messages || []).length < 2;
+}
+
+function tokenAwareContextDetails(context) {
+    const latestBudgetMetric = [...(activeState.metrics || [])]
+        .reverse()
+        .find((metric) =>
+            metric.compaction_threshold_tokens != null ||
+            metric.estimated_context_tokens != null
+        );
+    const model = selectedModel();
+    const contextWindow = latestBudgetMetric?.context_window_tokens ?? model?.context_window_tokens;
+    if (!contextWindow || contextWindow <= 1) {
+        return `fresh tail до ${formatTokens(context.summary_keep_recent_tokens)} токенов; context window неизвестно`;
+    }
+    const budget = tokenAwareBudget(context, contextWindow);
+    const estimate = latestBudgetMetric?.estimated_context_tokens == null
+        ? "оценка появится после вызова"
+        : `оценка ${formatTokens(latestBudgetMetric.estimated_context_tokens)} (${latestBudgetMetric.context_estimate_source || "hybrid"})`;
+    return `порог ${formatTokens(budget.threshold)}; reserve ${formatTokens(budget.reserve)}; ` +
+        `fresh tail до ${formatTokens(context.summary_keep_recent_tokens)}; ${estimate}`;
+}
+
+function tokenAwareBudget(context, contextWindow) {
+    const maximumReserve = Math.max(1, Math.floor(contextWindow / 2));
+    const defaultReserve = Math.max(16_384, Math.floor(contextWindow * 0.15));
+    const requestedReserve = context.summary_reserve_tokens ?? defaultReserve;
+    const reserve = Math.min(Math.max(1, requestedReserve), maximumReserve);
+    let threshold;
+    if (context.summary_threshold_tokens != null) {
+        threshold = context.summary_threshold_tokens;
+    } else if (context.summary_threshold_percent != null) {
+        threshold = Math.floor(contextWindow * context.summary_threshold_percent / 100);
+    } else {
+        threshold = contextWindow - reserve;
+    }
+    threshold = Math.min(Math.max(1, threshold), contextWindow - 1);
+    return { threshold, reserve: contextWindow - threshold };
+}
+
+function contextStrategyLabel(strategy) {
+    return {
+        sliding_window: "Sliding Window",
+        sticky_facts: "Sticky Facts",
+        branching: "Branching",
+        summary: "Summary",
+        token_aware_summary: "Token-aware Summary",
+    }[strategy] || strategy;
+}
+
+function renderFacts() {
+    const facts = activeState?.facts || [];
+    elements.factsPanel.hidden = facts.length === 0;
+    elements.factsList.replaceChildren();
+    for (const fact of facts) {
+        const item = document.createElement("li");
+        const value = document.createElement("strong");
+        value.textContent = `${fact.key}:`;
+        const source = document.createElement("small");
+        source.textContent = `источник ${fact.source_message_id}`;
+        item.append(value, document.createTextNode(` ${fact.value} `), source);
+        elements.factsList.append(item);
+    }
 }
 
 function populateConfigControls(config) {
@@ -450,16 +548,35 @@ async function deleteSession() {
     });
 }
 
+async function forkActiveSession() {
+    if (!activeState) return;
+    if (hasDirtyDraft()) {
+        showError("Сначала сохраните изменения операции.");
+        return;
+    }
+    await runBusy(async () => {
+        const state = await api(
+            `/api/agent/sessions/${encodeURIComponent(activeState.session.id)}/fork`,
+            jsonOptions("POST", { revision: activeState.session.revision }),
+        );
+        await loadSessions();
+        setActiveState(state);
+        closeDrawer();
+        showSuccess("Создана независимая ветка.");
+    });
+}
+
 function renderMessages() {
     elements.messageList.replaceChildren();
-    if (activeState.messages.length === 0) {
+    const messages = activeState.messages || [];
+    if (messages.length === 0 && !activeState.summary) {
         const empty = document.createElement("p");
         empty.className = "muted";
         empty.textContent = "Вставьте банковскую выписку первым сообщением.";
         elements.messageList.append(empty);
         return;
     }
-    for (const message of activeState.messages) {
+    for (const message of messages) {
         const item = document.createElement("article");
         item.className = `message ${message.role}`;
         const role = document.createElement("strong");
@@ -467,6 +584,23 @@ function renderMessages() {
         const content = document.createElement("p");
         content.textContent = message.display_text;
         item.append(role, content);
+        elements.messageList.append(item);
+    }
+    if (activeState.summary) {
+        const item = document.createElement("article");
+        item.className = "message summary";
+        const role = document.createElement("strong");
+        role.textContent = "Сжатая история";
+        const content = document.createElement("p");
+        content.textContent = activeState.summary.text;
+        const boundary = document.createElement("small");
+        const summaryCalls = (activeState.metrics || [])
+            .filter((metric) => metric.call_type === "summary")
+            .length;
+        boundary.textContent =
+            `Сжато сообщений истории: ${activeState.summary.summarized_message_count}; ` +
+            `вызовов сжатия в сессии: ${summaryCalls}`;
+        item.append(role, content, boundary);
         elements.messageList.append(item);
     }
     elements.messageList.scrollTop = elements.messageList.scrollHeight;
@@ -542,7 +676,13 @@ function hasCompleteMetricUsage(metric) {
 
 function metricStatusLabel(metric) {
     if (metric.status === "context_overflow") return "Переполнение контекста";
-    return hasCompleteMetricUsage(metric) ? "Успешно" : "Успешно, usage недоступен";
+    const status = hasCompleteMetricUsage(metric) ? "Успешно" : "Успешно, usage недоступен";
+    const type = metric.call_type === "summary"
+        ? "summary"
+        : metric.call_type === "facts"
+            ? "facts"
+            : "normal";
+    return `${status} · ${type}${metric.inherited ? " · наследовано" : ""}`;
 }
 
 function formatMetricTokens(value) {

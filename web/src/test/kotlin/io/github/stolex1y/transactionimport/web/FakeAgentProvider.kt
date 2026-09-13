@@ -3,6 +3,8 @@ package io.github.stolex1y.transactionimport.web
 import io.github.stolex1y.transactionimport.core.AgentGatewayResolver
 import io.github.stolex1y.transactionimport.core.AgentRuntimeConfig
 import io.github.stolex1y.transactionimport.core.ChatChoice
+import io.github.stolex1y.transactionimport.core.ContextManagementConfig
+import io.github.stolex1y.transactionimport.core.ContextStrategy
 import io.github.stolex1y.transactionimport.core.ChatCompletionGateway
 import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.ChatCompletionResponse
@@ -149,6 +151,12 @@ class FakeAgentGateway(
 fun fakeAgentDependencies(
     databasePath: String,
     gateway: FakeAgentGateway = FakeAgentGateway(),
+    contextManagement: ContextManagementConfig = ContextManagementConfig(
+        strategy = ContextStrategy.SUMMARY,
+        recentMessages = 4,
+        summaryBatchMessages = 4,
+        summaryMaxTokens = 1_024,
+    ),
 ): AgentWebDependencies {
     val catalog = ProviderCatalog(
         providers = listOf(
@@ -177,6 +185,7 @@ fun fakeAgentDependencies(
         defaultReasoningModeId = "disabled",
         maxTokens = 4_096,
         defaultUserPrompt = "",
+        contextManagement = contextManagement,
     ).validated(catalog)
     val idSequence = AtomicInteger()
     val agent = SmartExpenseAgent(

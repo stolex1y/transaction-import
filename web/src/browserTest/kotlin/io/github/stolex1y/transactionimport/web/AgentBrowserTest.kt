@@ -4,6 +4,8 @@ import com.microsoft.playwright.Browser
 import com.microsoft.playwright.BrowserType
 import com.microsoft.playwright.Page
 import com.microsoft.playwright.Playwright
+import io.github.stolex1y.transactionimport.core.ContextManagementConfig
+import io.github.stolex1y.transactionimport.core.ContextStrategy
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import kotlinx.serialization.json.Json
@@ -40,7 +42,11 @@ class AgentBrowserTest {
                         val page = context.newPage()
                         val baseUrl = "http://127.0.0.1:$port"
                         page.navigate("$baseUrl/agent")
+                        waitForAgentInitialized(page)
                         page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        assertTrue(page.locator("#context-strategy-note").textContent().contains("Summary"))
+                        assertTrue(page.locator("#fork-session").isHidden)
                         page.locator("#agent-message").fill(
                             "Списание 1250,50 ₽ и неизвестный платёж 99 ₽",
                         )
@@ -284,6 +290,113 @@ class AgentBrowserTest {
     }
 
     @Test
+    fun tokenAwareStrategyShowsEffectiveBudgetReadOnly() {
+        val database = Files.createTempFile("agent-browser-token-aware-", ".sqlite")
+        val gateway = FakeAgentGateway()
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(
+                agentDependencies = fakeAgentDependencies(
+                    databasePath = database.toString(),
+                    gateway = gateway,
+                    contextManagement = ContextManagementConfig(
+                        strategy = ContextStrategy.TOKEN_AWARE_SUMMARY,
+                        recentMessages = 2,
+                        summaryBatchMessages = 2,
+                        summaryMaxTokens = 256,
+                        summaryKeepRecentTokens = 500,
+                    ),
+                ),
+            )
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(
+                    BrowserType.LaunchOptions().setHeadless(true),
+                ).use { browser ->
+                    browser.newContext(
+                        Browser.NewContextOptions().setViewportSize(1_280, 900),
+                    ).use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        val note = page.locator("#context-strategy-note").textContent()
+                        assertTrue(note.contains("Token-aware Summary"))
+                        assertTrue(note.contains("порог"))
+                        assertTrue(note.contains("reserve"))
+                        assertTrue(note.contains("fresh tail"))
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun branchingButtonCreatesIndependentCheckpointSession() {
+        val database = Files.createTempFile("agent-browser-branch-", ".sqlite")
+        val gateway = FakeAgentGateway()
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(
+                agentDependencies = fakeAgentDependencies(
+                    databasePath = database.toString(),
+                    gateway = gateway,
+                    contextManagement = ContextManagementConfig(strategy = ContextStrategy.BRANCHING),
+                ),
+            )
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(
+                    BrowserType.LaunchOptions().setHeadless(true),
+                ).use { browser ->
+                    browser.newContext(
+                        Browser.NewContextOptions().setViewportSize(1_280, 900),
+                    ).use { context ->
+                        val page = context.newPage()
+                        val baseUrl = "http://127.0.0.1:$port"
+                        page.navigate("$baseUrl/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        assertTrue(page.locator("#context-strategy-note").textContent().contains("Branching"))
+                        page.locator("#agent-message").fill("Требования импорта")
+                        page.locator("#send-message").click()
+                        page.locator("#operation-table").waitFor()
+                        page.locator("#fork-session").waitFor()
+                        assertTrue(page.locator("#fork-session").isVisible)
+
+                        page.locator("#fork-session").click()
+                        page.waitForFunction(
+                            "() => document.querySelectorAll('#session-list .session-item').length === 2",
+                        )
+                        assertTrue(page.locator("#active-session-title").textContent().contains("ветка"))
+                        assertEquals(2, page.locator("#message-list .message").count())
+
+                        page.locator("#open-session-drawer").click()
+                        val sessionItems = page.locator("#session-list .session-item")
+                        val sourceIndex = if (sessionItems.nth(0).textContent().contains("ветка")) 1 else 0
+                        sessionItems.nth(sourceIndex).click()
+                        page.waitForFunction(
+                            "() => !document.querySelector('#active-session-title')?.textContent.includes('ветка')",
+                        )
+                        assertFalse(page.locator("#active-session-title").textContent().contains("ветка"))
+                        assertEquals(2, page.locator("#message-list .message").count())
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
     fun appendsSecondStatementWithDeduplicationAndPersistence() {
         val database = Files.createTempFile("agent-browser-append-", ".sqlite")
         val gateway = FakeAgentGateway(
@@ -311,7 +424,9 @@ class AgentBrowserTest {
                         val page = context.newPage()
                         val baseUrl = "http://127.0.0.1:$port"
                         page.navigate("$baseUrl/agent")
+                        waitForAgentInitialized(page)
                         page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
                         page.locator("#agent-message").fill("Первая выписка")
                         page.locator("#send-message").click()
                         page.locator("#operation-table").waitFor()
@@ -384,7 +499,9 @@ class AgentBrowserTest {
                         val page = context.newPage()
                         val baseUrl = "http://127.0.0.1:$port"
                         page.navigate("$baseUrl/agent")
+                        waitForAgentInitialized(page)
                         page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
                         page.locator("#agent-message").fill("Списание 1250 ₽")
                         page.locator("#send-message").click()
                         page.locator("#operation-table").waitFor()
@@ -416,6 +533,33 @@ class AgentBrowserTest {
             server.stop(1_000, 5_000)
             database.deleteIfExists()
         }
+    }
+
+    private fun waitForAgentInitialized(page: Page) {
+        page.waitForFunction(
+            """
+                () => typeof initialize === 'function' &&
+                    document.querySelector('#empty-new-session') &&
+                    !document.querySelector('#empty-new-session').disabled
+            """.trimIndent(),
+        )
+    }
+
+    private fun waitForSessionReady(page: Page) {
+        page.waitForFunction(
+            """
+                () => {
+                  const el = document.querySelector('#agent-message');
+                  const status = document.querySelector('#agent-status');
+                  return (el && !el.disabled && el.offsetParent !== null) ||
+                      Boolean(status?.textContent);
+                }
+            """.trimIndent(),
+        )
+        assertTrue(
+            page.locator("#agent-workspace").isVisible,
+            "Сессия не открылась: ${page.locator("#agent-status").textContent()}",
+        )
     }
 
     private fun waitForView(page: Page, view: String) {

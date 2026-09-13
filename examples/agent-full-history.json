@@ -5,10 +5,10 @@
   "temperature": null,
   "max_tokens": 100000,
   "default_user_prompt": "",
-  "context_management": {
-    "strategy": "summary",
-    "recent_messages": 5,
-    "summary_batch_messages": 5,
+  "context_compression": {
+    "enabled": false,
+    "recent_messages": 10,
+    "summary_batch_messages": 10,
     "summary_max_tokens": 1024
   }
 }

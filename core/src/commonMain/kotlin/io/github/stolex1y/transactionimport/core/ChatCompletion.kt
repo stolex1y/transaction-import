@@ -2,10 +2,13 @@ package io.github.stolex1y.transactionimport.core
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import kotlinx.serialization.json.JsonObject
 
 interface ChatCompletionGateway {
     val contextWindowTokens: Int?
+        get() = null
+    val maxOutputTokens: Int?
         get() = null
 
     suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse
@@ -23,6 +26,7 @@ data class ChatCompletionRequest(
     @SerialName("max_tokens") val maxTokens: Int? = null,
     val temperature: Double? = null,
     val stream: Boolean = false,
+    @Transient val useConfiguredReasoning: Boolean = true,
 )
 
 @Serializable

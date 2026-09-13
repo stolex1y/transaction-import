@@ -883,6 +883,18 @@ html[data-theme="light"] .agent-body select {
     background: var(--agent-accent-soft);
 }
 
+.message.summary {
+    max-width: 100%;
+    border-color: var(--agent-accent);
+    background: color-mix(in srgb, var(--agent-accent-soft) 70%, var(--agent-surface-soft));
+}
+
+.message.summary small {
+    display: block;
+    margin-top: 8px;
+    color: var(--agent-muted);
+}
+
 .message p {
     margin: 6px 0 0;
     overflow-wrap: anywhere;
@@ -906,6 +918,21 @@ html[data-theme="light"] .agent-body select {
 
 .message-actions .control-note {
     max-width: 720px;
+}
+
+.facts-list {
+    display: grid;
+    gap: 8px;
+    margin: 18px 0 0;
+    padding-left: 20px;
+}
+
+.facts-list li {
+    overflow-wrap: anywhere;
+}
+
+.facts-list small {
+    color: var(--agent-muted);
 }
 
 .metrics-panel {

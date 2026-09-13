@@ -1,8 +1,11 @@
 package io.github.stolex1y.transactionimport.persistence
 
 import io.github.stolex1y.transactionimport.core.AgentConfig
+import io.github.stolex1y.transactionimport.core.ContextManagementConfig
 import io.github.stolex1y.transactionimport.core.ConversationMessage
 import io.github.stolex1y.transactionimport.core.ConversationRole
+import io.github.stolex1y.transactionimport.core.ConversationSummary
+import io.github.stolex1y.transactionimport.core.ConversationSummaryUpdate
 import io.github.stolex1y.transactionimport.core.DraftTransaction
 import io.github.stolex1y.transactionimport.core.ImportDraft
 import io.github.stolex1y.transactionimport.core.ImportSession
@@ -11,8 +14,10 @@ import io.github.stolex1y.transactionimport.core.ImportSessionState
 import io.github.stolex1y.transactionimport.core.ImportStatus
 import io.github.stolex1y.transactionimport.core.ModelCallMetric
 import io.github.stolex1y.transactionimport.core.ModelCallStatus
+import io.github.stolex1y.transactionimport.core.ModelCallType
 import io.github.stolex1y.transactionimport.core.RevisionConflictException
 import io.github.stolex1y.transactionimport.core.SessionNotFoundException
+import io.github.stolex1y.transactionimport.core.StickyFact
 import io.github.stolex1y.transactionimport.core.StructuredTransaction
 import io.github.stolex1y.transactionimport.core.UserPreferences
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +31,7 @@ import java.sql.ResultSet
 
 class SqliteImportSessionRepository(
     databasePath: String,
+    private val defaultContextManagement: ContextManagementConfig? = null,
 ) : ImportSessionRepository {
     private val jdbcUrl = "jdbc:sqlite:$databasePath"
 
@@ -41,17 +47,22 @@ class SqliteImportSessionRepository(
         prepareStatement(
             """
             INSERT INTO import_sessions (
-                id, title, config_json, revision, created_at_epoch_ms, updated_at_epoch_ms,
-                draft_status, rejection_reason, unparsed_fragments_json
-            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                id, title, config_json, context_management_json, parent_session_id,
+                checkpoint_message_count, branch_label, revision, created_at_epoch_ms,
+                updated_at_epoch_ms, draft_status, rejection_reason, unparsed_fragments_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
             """.trimIndent(),
         ).use { statement ->
             statement.setString(1, session.id)
             statement.setString(2, session.title)
             statement.setString(3, databaseJson.encodeToString(session.config))
-            statement.setLong(4, session.revision)
-            statement.setLong(5, session.createdAtEpochMs)
-            statement.setLong(6, session.updatedAtEpochMs)
+            statement.setString(4, session.contextManagement?.let(databaseJson::encodeToString))
+            statement.setString(5, session.parentSessionId)
+            statement.setObject(6, session.checkpointMessageCount)
+            statement.setString(7, session.branchLabel)
+            statement.setLong(8, session.revision)
+            statement.setLong(9, session.createdAtEpochMs)
+            statement.setLong(10, session.updatedAtEpochMs)
             statement.executeUpdate()
         }
         requireState(this, session.id)
@@ -60,7 +71,8 @@ class SqliteImportSessionRepository(
     override suspend fun list(): List<ImportSession> = database {
         prepareStatement(
             """
-            SELECT id, title, config_json, revision, created_at_epoch_ms,
+            SELECT id, title, config_json, context_management_json, parent_session_id,
+                   checkpoint_message_count, branch_label, revision, created_at_epoch_ms,
                    updated_at_epoch_ms, draft_status
             FROM import_sessions
             ORDER BY updated_at_epoch_ms DESC, id ASC
@@ -86,6 +98,8 @@ class SqliteImportSessionRepository(
         draft: ImportDraft,
         metric: ModelCallMetric,
         updatedAtEpochMs: Long,
+        facts: List<StickyFact>?,
+        additionalMetrics: List<ModelCallMetric>,
     ): ImportSessionState = transaction {
         checkRevision(this, sessionId, expectedRevision)
         require(draft.version == expectedRevision + 1) {
@@ -94,8 +108,37 @@ class SqliteImportSessionRepository(
         val nextSequence = nextMessageSequence(this, sessionId)
         insertMessage(this, sessionId, nextSequence, userMessage)
         insertMessage(this, sessionId, nextSequence + 1, assistantMessage)
+        additionalMetrics.forEach { insertMetric(this, sessionId, it) }
         insertMetric(this, sessionId, metric)
+        if (facts != null) replaceFacts(this, sessionId, facts)
         replaceDraft(this, sessionId, expectedRevision, draft, updatedAtEpochMs)
+        requireState(this, sessionId)
+    }
+    override suspend fun saveSummaryBatch(
+        sessionId: String,
+        expectedRevision: Long,
+        updates: List<ConversationSummaryUpdate>,
+    ): ImportSessionState = transaction {
+        checkRevision(this, sessionId, expectedRevision)
+        require(updates.isNotEmpty()) { "Summary batch не должен быть пустым." }
+        val messageCount = countMessages(this, sessionId)
+        var previousCount = currentSummaryMessageCount(this, sessionId)
+        updates.forEach { update ->
+            val summary = update.summary
+            require(summary.text.isNotBlank()) { "Summary не должен быть пустым." }
+            require(summary.summarizedMessageCount > previousCount) {
+                "Граница summary должна двигаться вперёд."
+            }
+            require(summary.summarizedMessageCount <= messageCount) {
+                "Граница summary выходит за пределы архива сообщений."
+            }
+            require(update.metric.callType == ModelCallType.SUMMARY) {
+                "Metric summary должна иметь call_type=SUMMARY."
+            }
+            upsertSummary(this, sessionId, summary)
+            insertMetric(this, sessionId, update.metric)
+            previousCount = summary.summarizedMessageCount
+        }
         requireState(this, sessionId)
     }
 
@@ -155,6 +198,128 @@ class SqliteImportSessionRepository(
         }
     }
 
+    override suspend fun fork(
+        sessionId: String,
+        expectedRevision: Long,
+        forkSession: ImportSession,
+    ): ImportSessionState = transaction {
+        checkRevision(this, sessionId, expectedRevision)
+        val source = requireState(this, sessionId)
+        require(forkSession.id != sessionId) { "Идентификатор ветки должен отличаться от источника." }
+        require(forkSession.revision == source.session.revision) {
+            "Ревизия ветки должна совпадать с checkpoint источника."
+        }
+        require(forkSession.hasDraft == (source.draft != null)) {
+            "Состояние draft ветки должно совпадать с checkpoint источника."
+        }
+        prepareStatement(
+            """
+            INSERT INTO import_sessions (
+                id, title, config_json, context_management_json, parent_session_id,
+                checkpoint_message_count, branch_label, revision, created_at_epoch_ms,
+                updated_at_epoch_ms, draft_status, rejection_reason, unparsed_fragments_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, forkSession.id)
+            statement.setString(2, forkSession.title)
+            statement.setString(3, databaseJson.encodeToString(forkSession.config))
+            statement.setString(4, forkSession.contextManagement?.let(databaseJson::encodeToString))
+            statement.setString(5, forkSession.parentSessionId)
+            statement.setObject(6, forkSession.checkpointMessageCount)
+            statement.setString(7, forkSession.branchLabel)
+            statement.setLong(8, forkSession.revision)
+            statement.setLong(9, forkSession.createdAtEpochMs)
+            statement.setLong(10, forkSession.updatedAtEpochMs)
+            statement.setString(11, source.draft?.status?.name)
+            statement.setString(12, source.draft?.rejectionReason)
+            statement.setString(
+                13,
+                source.draft?.unparsedFragments?.let(databaseJson::encodeToString),
+            )
+            statement.executeUpdate()
+        }
+        prepareStatement(
+            """
+            INSERT INTO conversation_messages (
+                session_id, sequence_number, id, role, content, display_text, created_at_epoch_ms
+            )
+            SELECT ?, sequence_number, id, role, content, display_text, created_at_epoch_ms
+            FROM conversation_messages
+            WHERE session_id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, forkSession.id)
+            statement.setString(2, sessionId)
+            statement.executeUpdate()
+        }
+        prepareStatement(
+            """
+            INSERT INTO conversation_summaries (
+                session_id, summary_text, summarized_message_count, updated_at_epoch_ms
+            )
+            SELECT ?, summary_text, summarized_message_count, updated_at_epoch_ms
+            FROM conversation_summaries
+            WHERE session_id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, forkSession.id)
+            statement.setString(2, sessionId)
+            statement.executeUpdate()
+        }
+        prepareStatement(
+            """
+            INSERT INTO conversation_facts (
+                session_id, fact_key, fact_value, source_message_id, updated_at_epoch_ms
+            )
+            SELECT ?, fact_key, fact_value, source_message_id, updated_at_epoch_ms
+            FROM conversation_facts
+            WHERE session_id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, forkSession.id)
+            statement.setString(2, sessionId)
+            statement.executeUpdate()
+        }
+        prepareStatement(
+            """
+            INSERT INTO model_call_metrics (
+                session_id, sequence_number, id, provider_id, model_id, call_type, inherited,
+                status, prompt_tokens, completion_tokens, total_tokens,
+                context_window_tokens, estimated_context_tokens, compaction_threshold_tokens,
+                compaction_reserve_tokens, context_estimate_source, created_at_epoch_ms
+            )
+            SELECT ?, sequence_number, id, provider_id, model_id, call_type, 1,
+                   status, prompt_tokens, completion_tokens, total_tokens,
+                   context_window_tokens, estimated_context_tokens, compaction_threshold_tokens,
+                   compaction_reserve_tokens, context_estimate_source, created_at_epoch_ms
+            FROM model_call_metrics
+            WHERE session_id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, forkSession.id)
+            statement.setString(2, sessionId)
+            statement.executeUpdate()
+        }
+        prepareStatement(
+            """
+            INSERT INTO draft_transactions (
+                session_id, position, transaction_id, included, description,
+                field_errors_json, transaction_json
+            )
+            SELECT ?, position, transaction_id, included, description,
+                   field_errors_json, transaction_json
+            FROM draft_transactions
+            WHERE session_id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, forkSession.id)
+            statement.setString(2, sessionId)
+            statement.executeUpdate()
+        }
+        requireState(this, forkSession.id)
+    }
+
     override suspend fun getOrCreatePreferences(defaultUserPrompt: String): UserPreferences = transaction {
         prepareStatement(
             "INSERT OR IGNORE INTO user_preferences (singleton_id, user_prompt) VALUES (1, ?)",
@@ -190,6 +355,10 @@ class SqliteImportSessionRepository(
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
                     config_json TEXT NOT NULL,
+                    context_management_json TEXT,
+                    parent_session_id TEXT,
+                    checkpoint_message_count INTEGER,
+                    branch_label TEXT,
                     revision INTEGER NOT NULL,
                     created_at_epoch_ms INTEGER NOT NULL,
                     updated_at_epoch_ms INTEGER NOT NULL,
@@ -217,17 +386,47 @@ class SqliteImportSessionRepository(
             )
             statement.execute(
                 """
+                CREATE TABLE IF NOT EXISTS conversation_summaries (
+                    session_id TEXT PRIMARY KEY,
+                    summary_text TEXT NOT NULL,
+                    summarized_message_count INTEGER NOT NULL,
+                    updated_at_epoch_ms INTEGER NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES import_sessions(id) ON DELETE CASCADE
+                )
+                """.trimIndent(),
+            )
+            statement.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversation_facts (
+                    session_id TEXT NOT NULL,
+                    fact_key TEXT NOT NULL,
+                    fact_value TEXT NOT NULL,
+                    source_message_id TEXT NOT NULL,
+                    updated_at_epoch_ms INTEGER NOT NULL,
+                    PRIMARY KEY (session_id, fact_key),
+                    FOREIGN KEY (session_id) REFERENCES import_sessions(id) ON DELETE CASCADE
+                )
+                """.trimIndent(),
+            )
+            statement.execute(
+                """
                 CREATE TABLE IF NOT EXISTS model_call_metrics (
                     session_id TEXT NOT NULL,
                     sequence_number INTEGER NOT NULL,
                     id TEXT NOT NULL,
                     provider_id TEXT NOT NULL,
                     model_id TEXT NOT NULL,
+                    call_type TEXT NOT NULL DEFAULT 'NORMAL',
+                    inherited INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     prompt_tokens INTEGER,
                     completion_tokens INTEGER,
                     total_tokens INTEGER,
                     context_window_tokens INTEGER,
+                    estimated_context_tokens INTEGER,
+                    compaction_threshold_tokens INTEGER,
+                    compaction_reserve_tokens INTEGER,
+                    context_estimate_source TEXT,
                     created_at_epoch_ms INTEGER NOT NULL,
                     PRIMARY KEY (session_id, sequence_number),
                     UNIQUE (session_id, id),
@@ -272,13 +471,74 @@ class SqliteImportSessionRepository(
             column = "field_errors_json",
             definition = "field_errors_json TEXT NOT NULL DEFAULT '{}'",
         )
+        ensureColumn(
+            connection,
+            table = "model_call_metrics",
+            column = "call_type",
+            definition = "call_type TEXT NOT NULL DEFAULT 'NORMAL'",
+        )
+        ensureColumn(
+            connection,
+            table = "model_call_metrics",
+            column = "inherited",
+            definition = "inherited INTEGER NOT NULL DEFAULT 0",
+        )
+        ensureColumn(
+            connection,
+            table = "model_call_metrics",
+            column = "estimated_context_tokens",
+            definition = "estimated_context_tokens INTEGER",
+        )
+        ensureColumn(
+            connection,
+            table = "model_call_metrics",
+            column = "compaction_threshold_tokens",
+            definition = "compaction_threshold_tokens INTEGER",
+        )
+        ensureColumn(
+            connection,
+            table = "model_call_metrics",
+            column = "compaction_reserve_tokens",
+            definition = "compaction_reserve_tokens INTEGER",
+        )
+        ensureColumn(
+            connection,
+            table = "model_call_metrics",
+            column = "context_estimate_source",
+            definition = "context_estimate_source TEXT",
+        )
+        ensureColumn(
+            connection,
+            table = "import_sessions",
+            column = "context_management_json",
+            definition = "context_management_json TEXT",
+        )
+        ensureColumn(
+            connection,
+            table = "import_sessions",
+            column = "parent_session_id",
+            definition = "parent_session_id TEXT",
+        )
+        ensureColumn(
+            connection,
+            table = "import_sessions",
+            column = "checkpoint_message_count",
+            definition = "checkpoint_message_count INTEGER",
+        )
+        ensureColumn(
+            connection,
+            table = "import_sessions",
+            column = "branch_label",
+            definition = "branch_label TEXT",
+        )
         migrateTransactionIds(connection)
     }
 
     private fun readState(connection: Connection, id: String): ImportSessionState? {
         val header = connection.prepareStatement(
             """
-            SELECT id, title, config_json, revision, created_at_epoch_ms,
+            SELECT id, title, config_json, context_management_json, parent_session_id,
+                   checkpoint_message_count, branch_label, revision, created_at_epoch_ms,
                    updated_at_epoch_ms, draft_status, rejection_reason, unparsed_fragments_json
             FROM import_sessions
             WHERE id = ?
@@ -320,10 +580,56 @@ class SqliteImportSessionRepository(
                 }
             }
         }
+        val summary = connection.prepareStatement(
+            """
+            SELECT summary_text, summarized_message_count, updated_at_epoch_ms
+            FROM conversation_summaries
+            WHERE session_id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, id)
+            statement.executeQuery().use { rows ->
+                if (rows.next()) {
+                    ConversationSummary(
+                        text = rows.getString("summary_text"),
+                        summarizedMessageCount = rows.getInt("summarized_message_count"),
+                        updatedAtEpochMs = rows.getLong("updated_at_epoch_ms"),
+                    )
+                } else {
+                    null
+                }
+            }
+        }
+        val facts = connection.prepareStatement(
+            """
+            SELECT fact_key, fact_value, source_message_id, updated_at_epoch_ms
+            FROM conversation_facts
+            WHERE session_id = ?
+            ORDER BY updated_at_epoch_ms ASC, fact_key ASC
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, id)
+            statement.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        add(
+                            StickyFact(
+                                key = rows.getString("fact_key"),
+                                value = rows.getString("fact_value"),
+                                sourceMessageId = rows.getString("source_message_id"),
+                                updatedAtEpochMs = rows.getLong("updated_at_epoch_ms"),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
         val metrics = connection.prepareStatement(
             """
-            SELECT id, provider_id, model_id, status, prompt_tokens, completion_tokens,
-                   total_tokens, context_window_tokens, created_at_epoch_ms
+            SELECT id, provider_id, model_id, call_type, inherited, status, prompt_tokens, completion_tokens,
+                   total_tokens, context_window_tokens, estimated_context_tokens,
+                   compaction_threshold_tokens, compaction_reserve_tokens, context_estimate_source,
+                   created_at_epoch_ms
             FROM model_call_metrics
             WHERE session_id = ?
             ORDER BY sequence_number ASC
@@ -338,11 +644,17 @@ class SqliteImportSessionRepository(
                                 id = rows.getString("id"),
                                 providerId = rows.getString("provider_id"),
                                 modelId = rows.getString("model_id"),
+                                callType = ModelCallType.valueOf(rows.getString("call_type")),
+                                inherited = rows.getInt("inherited") != 0,
                                 status = ModelCallStatus.valueOf(rows.getString("status")),
                                 promptTokens = rows.getIntOrNull("prompt_tokens"),
                                 completionTokens = rows.getIntOrNull("completion_tokens"),
                                 totalTokens = rows.getIntOrNull("total_tokens"),
                                 contextWindowTokens = rows.getIntOrNull("context_window_tokens"),
+                                estimatedContextTokens = rows.getIntOrNull("estimated_context_tokens"),
+                                compactionThresholdTokens = rows.getIntOrNull("compaction_threshold_tokens"),
+                                compactionReserveTokens = rows.getIntOrNull("compaction_reserve_tokens"),
+                                contextEstimateSource = rows.getString("context_estimate_source"),
                                 createdAtEpochMs = rows.getLong("created_at_epoch_ms"),
                             ),
                         )
@@ -393,7 +705,14 @@ class SqliteImportSessionRepository(
                 version = header.session.revision,
             )
         }
-        return ImportSessionState(header.session, messages, draft, metrics)
+        return ImportSessionState(
+            session = header.session,
+            messages = messages,
+            draft = draft,
+            facts = facts,
+            metrics = metrics,
+            summary = summary,
+        )
     }
 
     private fun ensureColumn(
@@ -502,6 +821,12 @@ class SqliteImportSessionRepository(
         id = getString("id"),
         title = getString("title"),
         config = databaseJson.decodeFromString<AgentConfig>(getString("config_json")),
+        contextManagement = getString("context_management_json")
+            ?.let(databaseJson::decodeFromString)
+            ?: defaultContextManagement,
+        parentSessionId = getString("parent_session_id"),
+        checkpointMessageCount = getIntOrNull("checkpoint_message_count"),
+        branchLabel = getString("branch_label"),
         revision = getLong("revision"),
         createdAtEpochMs = getLong("created_at_epoch_ms"),
         updatedAtEpochMs = getLong("updated_at_epoch_ms"),
@@ -577,10 +902,11 @@ class SqliteImportSessionRepository(
         connection.prepareStatement(
             """
             INSERT INTO model_call_metrics (
-                session_id, sequence_number, id, provider_id, model_id, status,
+                session_id, sequence_number, id, provider_id, model_id, call_type, inherited, status,
                 prompt_tokens, completion_tokens, total_tokens,
-                context_window_tokens, created_at_epoch_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                context_window_tokens, estimated_context_tokens, compaction_threshold_tokens,
+                compaction_reserve_tokens, context_estimate_source, created_at_epoch_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
         ).use { statement ->
             statement.setString(1, sessionId)
@@ -588,15 +914,67 @@ class SqliteImportSessionRepository(
             statement.setString(3, metric.id)
             statement.setString(4, metric.providerId)
             statement.setString(5, metric.modelId)
-            statement.setString(6, metric.status.name)
-            statement.setNullableInt(7, metric.promptTokens)
-            statement.setNullableInt(8, metric.completionTokens)
-            statement.setNullableInt(9, metric.totalTokens)
-            statement.setNullableInt(10, metric.contextWindowTokens)
-            statement.setLong(11, metric.createdAtEpochMs)
+            statement.setString(6, metric.callType.name)
+            statement.setInt(7, if (metric.inherited) 1 else 0)
+            statement.setString(8, metric.status.name)
+            statement.setNullableInt(9, metric.promptTokens)
+            statement.setNullableInt(10, metric.completionTokens)
+            statement.setNullableInt(11, metric.totalTokens)
+            statement.setNullableInt(12, metric.contextWindowTokens)
+            statement.setNullableInt(13, metric.estimatedContextTokens)
+            statement.setNullableInt(14, metric.compactionThresholdTokens)
+            statement.setNullableInt(15, metric.compactionReserveTokens)
+            statement.setString(16, metric.contextEstimateSource)
+            statement.setLong(17, metric.createdAtEpochMs)
             statement.executeUpdate()
         }
     }
+    private fun currentSummaryMessageCount(connection: Connection, sessionId: String): Int =
+        connection.prepareStatement(
+            "SELECT COALESCE(MAX(summarized_message_count), 0) FROM conversation_summaries WHERE session_id = ?",
+        ).use { statement ->
+            statement.setString(1, sessionId)
+            statement.executeQuery().use { rows ->
+                check(rows.next())
+                rows.getInt(1)
+            }
+        }
+
+    private fun upsertSummary(
+        connection: Connection,
+        sessionId: String,
+        summary: ConversationSummary,
+    ) {
+        connection.prepareStatement(
+            """
+            INSERT INTO conversation_summaries (
+                session_id, summary_text, summarized_message_count, updated_at_epoch_ms
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                summary_text = excluded.summary_text,
+                summarized_message_count = excluded.summarized_message_count,
+                updated_at_epoch_ms = excluded.updated_at_epoch_ms
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, sessionId)
+            statement.setString(2, summary.text)
+            statement.setInt(3, summary.summarizedMessageCount)
+            statement.setLong(4, summary.updatedAtEpochMs)
+            statement.executeUpdate()
+        }
+    }
+
+    private fun countMessages(connection: Connection, sessionId: String): Int =
+        connection.prepareStatement(
+            "SELECT COUNT(*) FROM conversation_messages WHERE session_id = ?",
+        ).use { statement ->
+            statement.setString(1, sessionId)
+            statement.executeQuery().use { rows ->
+                check(rows.next())
+                rows.getInt(1)
+            }
+        }
+
 
     private fun nextMetricSequence(connection: Connection, sessionId: String): Int =
         connection.prepareStatement(
@@ -614,6 +992,34 @@ class SqliteImportSessionRepository(
 
     private fun java.sql.PreparedStatement.setNullableInt(index: Int, value: Int?) {
         if (value == null) setNull(index, java.sql.Types.INTEGER) else setInt(index, value)
+    }
+
+    private fun replaceFacts(
+        connection: Connection,
+        sessionId: String,
+        facts: List<StickyFact>,
+    ) {
+        connection.prepareStatement("DELETE FROM conversation_facts WHERE session_id = ?").use { statement ->
+            statement.setString(1, sessionId)
+            statement.executeUpdate()
+        }
+        connection.prepareStatement(
+            """
+            INSERT INTO conversation_facts (
+                session_id, fact_key, fact_value, source_message_id, updated_at_epoch_ms
+            ) VALUES (?, ?, ?, ?, ?)
+            """.trimIndent(),
+        ).use { statement ->
+            facts.forEach { fact ->
+                statement.setString(1, sessionId)
+                statement.setString(2, fact.key)
+                statement.setString(3, fact.value)
+                statement.setString(4, fact.sourceMessageId)
+                statement.setLong(5, fact.updatedAtEpochMs)
+                statement.addBatch()
+            }
+            statement.executeBatch()
+        }
     }
 
     private fun replaceDraft(

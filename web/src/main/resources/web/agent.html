@@ -58,6 +58,9 @@
                         <p class="eyebrow">Текущая сессия</p>
                         <h1 id="active-session-title">Импорт</h1>
                     </div>
+                    <button id="fork-session" class="secondary-button compact-button" type="button" hidden>
+                        Создать ветку
+                    </button>
                 </div>
                 <div class="model-settings" aria-label="Настройки агента">
                     <label>
@@ -74,6 +77,7 @@
                     </label>
                 </div>
                 <p id="session-config-note" class="control-note">Изменения применяются к следующим сообщениям; диалог и черновик сохраняются.</p>
+                <p id="context-strategy-note" class="control-note">Стратегия контекста загружается вместе с сессией.</p>
             </section>
 
             <section id="conversation-panel" class="panel conversation-panel" aria-labelledby="conversation-title">
@@ -89,6 +93,15 @@
                         <button id="send-message" type="submit">Отправить</button>
                     </div>
                 </form>
+            </section>
+            <section id="facts-panel" class="panel facts-panel" hidden aria-labelledby="facts-title">
+                <div class="section-heading">
+                    <div>
+                        <h2 id="facts-title">Sticky facts</h2>
+                        <p class="control-note">Факты обновляются отдельным вызовом и используются только в выбранной сессии.</p>
+                    </div>
+                </div>
+                <ul id="facts-list" class="facts-list"></ul>
             </section>
             <section id="metrics-panel" class="panel metrics-panel" hidden aria-labelledby="metrics-title">
                 <div class="section-heading">

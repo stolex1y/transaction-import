@@ -72,12 +72,16 @@ data class ProviderModelDefinition(
     @SerialName("display_name") val displayName: String = id,
     @SerialName("reasoning_modes") val reasoningModes: List<ReasoningModeDefinition>,
     @SerialName("context_window_tokens") val contextWindowTokens: Int? = null,
+    @SerialName("max_output_tokens") val maxOutputTokens: Int? = null,
 ) {
     internal fun validate(providerId: String) {
         require(id.isNotBlank()) { "Идентификатор модели провайдера $providerId не должен быть пустым." }
         require(displayName.isNotBlank()) { "Название модели $id не должно быть пустым." }
         require(contextWindowTokens == null || contextWindowTokens > 0) {
             "context_window_tokens модели $providerId/$id должен быть положительным."
+        }
+        require(maxOutputTokens == null || maxOutputTokens > 0) {
+            "max_output_tokens модели $providerId/$id должен быть положительным."
         }
         require(reasoningModes.isNotEmpty()) { "Модель $id должна содержать режим reasoning." }
         require(reasoningModes.map { it.id }.distinct().size == reasoningModes.size) {
@@ -132,6 +136,107 @@ data class AgentConfig(
 }
 
 @Serializable
+enum class ContextStrategy {
+    @SerialName("sliding_window")
+    SLIDING_WINDOW,
+
+    @SerialName("sticky_facts")
+    STICKY_FACTS,
+
+    @SerialName("branching")
+    BRANCHING,
+    @SerialName("summary")
+    SUMMARY,
+
+    @SerialName("token_aware_summary")
+    TOKEN_AWARE_SUMMARY,
+}
+
+@Serializable
+data class ContextManagementConfig(
+    val strategy: ContextStrategy = ContextStrategy.SUMMARY,
+    @SerialName("recent_messages") val recentMessages: Int = 10,
+    @SerialName("summary_batch_messages") val summaryBatchMessages: Int = 10,
+    @SerialName("summary_max_tokens") val summaryMaxTokens: Int = 1_024,
+    @SerialName("summary_threshold_tokens") val summaryThresholdTokens: Int? = null,
+    @SerialName("summary_threshold_percent") val summaryThresholdPercent: Int? = null,
+    @SerialName("summary_reserve_tokens") val summaryReserveTokens: Int? = null,
+    @SerialName("summary_keep_recent_tokens") val summaryKeepRecentTokens: Int = 20_000,
+    @SerialName("max_facts") val maxFacts: Int = 32,
+    @SerialName("fact_value_max_chars") val factValueMaxChars: Int = 500,
+    @SerialName("facts_max_tokens") val factsMaxTokens: Int = 1_024,
+) {
+    internal fun validate() {
+        when (strategy) {
+            ContextStrategy.SLIDING_WINDOW,
+            ContextStrategy.SUMMARY,
+            ContextStrategy.TOKEN_AWARE_SUMMARY -> require(recentMessages > 0) {
+                "context_management.recent_messages должен быть положительным."
+            }
+
+            ContextStrategy.STICKY_FACTS -> {
+                require(recentMessages > 0) {
+                    "context_management.recent_messages должен быть положительным."
+                }
+                require(maxFacts > 0) {
+                    "context_management.max_facts должен быть положительным."
+                }
+                require(factValueMaxChars > 0) {
+                    "context_management.fact_value_max_chars должен быть положительным."
+                }
+                require(factsMaxTokens > 0) {
+                    "context_management.facts_max_tokens должен быть положительным."
+                }
+            }
+
+            ContextStrategy.BRANCHING -> Unit
+        }
+        if (strategy == ContextStrategy.SUMMARY || strategy == ContextStrategy.TOKEN_AWARE_SUMMARY) {
+            require(summaryBatchMessages > 0) {
+                "context_management.summary_batch_messages должен быть положительным."
+            }
+            require(summaryMaxTokens > 0) {
+                "context_management.summary_max_tokens должен быть положительным."
+            }
+        }
+        if (strategy == ContextStrategy.TOKEN_AWARE_SUMMARY) {
+            require(summaryThresholdTokens == null || summaryThresholdTokens > 0) {
+                "context_management.summary_threshold_tokens должен быть положительным."
+            }
+            require(summaryThresholdPercent == null || summaryThresholdPercent in 1..99) {
+                "context_management.summary_threshold_percent должен быть в диапазоне 1..99."
+            }
+            require(summaryReserveTokens == null || summaryReserveTokens > 0) {
+                "context_management.summary_reserve_tokens должен быть положительным."
+            }
+            require(summaryKeepRecentTokens > 0) {
+                "context_management.summary_keep_recent_tokens должен быть положительным."
+            }
+        }
+    }
+}
+
+@Serializable
+data class ContextCompressionConfig(
+    val enabled: Boolean = true,
+    @SerialName("recent_messages") val recentMessages: Int = 10,
+    @SerialName("summary_batch_messages") val summaryBatchMessages: Int = 10,
+    @SerialName("summary_max_tokens") val summaryMaxTokens: Int = 1_024,
+) {
+    internal fun validate() {
+        require(recentMessages > 0) {
+            "context_compression.recent_messages должен быть положительным."
+        }
+        require(summaryBatchMessages > 0) {
+            "context_compression.summary_batch_messages должен быть положительным."
+        }
+        require(summaryMaxTokens > 0) {
+            "context_compression.summary_max_tokens должен быть положительным."
+        }
+    }
+}
+
+@Serializable
 data class AgentRuntimeConfig(
     @SerialName("default_provider_id") val defaultProviderId: String = "deepseek",
     @SerialName("default_model_id") val defaultModelId: String = "deepseek-v4-flash",
@@ -139,6 +244,10 @@ data class AgentRuntimeConfig(
     val temperature: Double? = null,
     @SerialName("max_tokens") val maxTokens: Int = 100_000,
     @SerialName("default_user_prompt") val defaultUserPrompt: String = "",
+    @SerialName("context_compression")
+    val contextCompression: ContextCompressionConfig = ContextCompressionConfig(),
+    @SerialName("context_management")
+    val contextManagement: ContextManagementConfig? = null,
 ) {
     fun defaultAgentConfig(): AgentConfig = AgentConfig(
         providerId = defaultProviderId,
@@ -146,11 +255,25 @@ data class AgentRuntimeConfig(
         reasoningModeId = defaultReasoningModeId,
     )
 
+    fun sessionContextManagement(): ContextManagementConfig? =
+        contextManagement ?: contextCompression
+            .takeIf(ContextCompressionConfig::enabled)
+            ?.let {
+                ContextManagementConfig(
+                    strategy = ContextStrategy.SUMMARY,
+                    recentMessages = it.recentMessages,
+                    summaryBatchMessages = it.summaryBatchMessages,
+                    summaryMaxTokens = it.summaryMaxTokens,
+                )
+            }
+
     fun validated(catalog: ProviderCatalog): AgentRuntimeConfig {
         require(temperature == null || temperature in 0.0..2.0) {
             "temperature должен быть в диапазоне 0.0..2.0."
         }
         require(maxTokens > 0) { "max_tokens должен быть положительным." }
+        contextCompression.validate()
+        contextManagement?.validate()
         catalog.resolve(defaultAgentConfig())
         return this
     }

@@ -97,6 +97,10 @@ data class DeleteImportSessionRequest(
 )
 
 @Serializable
+data class ForkAgentSessionRequest(
+    val revision: Long,
+)
+@Serializable
 data class UpdateUserPreferencesRequest(
     @SerialName("user_prompt") val userPrompt: String,
 )
@@ -148,8 +152,21 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
         val state = runtime.agent.createSession(
             title = runtime.newSessionTitle(),
             config = runtime.runtimeConfig.defaultAgentConfig(),
+            contextManagement = runtime.runtimeConfig.sessionContextManagement(),
         )
         call.respond(HttpStatusCode.Created, state)
+    }
+
+    post("/api/agent/sessions/{id}/fork") {
+        val id = call.parameters["id"].requiredPathParameter("id")
+        val request = call.receive<ForkAgentSessionRequest>()
+        call.respond(
+            HttpStatusCode.Created,
+            dependencies.requireAgentRuntime().agent.forkSession(
+                sessionId = id,
+                expectedRevision = request.revision,
+            ),
+        )
     }
 
     get("/api/agent/sessions/{id}") {

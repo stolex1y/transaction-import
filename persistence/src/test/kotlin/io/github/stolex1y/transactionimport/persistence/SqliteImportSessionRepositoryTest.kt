@@ -2,10 +2,18 @@ package io.github.stolex1y.transactionimport.persistence
 
 import io.github.stolex1y.transactionimport.core.AgentConfig
 import io.github.stolex1y.transactionimport.core.AgentGatewayResolver
+import io.github.stolex1y.transactionimport.core.AgentRuntimeConfig
 import io.github.stolex1y.transactionimport.core.ChatChoice
 import io.github.stolex1y.transactionimport.core.ChatCompletionGateway
 import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.ChatCompletionResponse
+import io.github.stolex1y.transactionimport.core.ContextManagementConfig
+import io.github.stolex1y.transactionimport.core.ContextStrategy
+import io.github.stolex1y.transactionimport.core.ConversationSummary
+import io.github.stolex1y.transactionimport.core.ConversationSummaryUpdate
+import io.github.stolex1y.transactionimport.core.ModelCallMetric
+import io.github.stolex1y.transactionimport.core.ModelCallStatus
+import io.github.stolex1y.transactionimport.core.ModelCallType
 import io.github.stolex1y.transactionimport.core.ResponseMessage
 import io.github.stolex1y.transactionimport.core.SmartExpenseAgent
 import io.github.stolex1y.transactionimport.core.Usage
@@ -16,6 +24,7 @@ import java.nio.file.Path
 import java.sql.DriverManager
 import kotlin.io.path.absolutePathString
 import kotlin.test.Test
+import kotlin.test.assertFailsWith
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -121,6 +130,192 @@ class SqliteImportSessionRepositoryTest {
             assertEquals("DEMO CAFE", restarted.draft!!.transactions.last().transaction.merchant)
             assertEquals(appended.session.revision, restarted.session.revision)
             assertEquals(2, restarted.metrics.size)
+        } finally {
+            deleteDatabase(database)
+        }
+    }
+
+    @Test
+    fun restoresConversationSummaryAndSummaryMetricAfterRestart() = runBlocking {
+        val database = Files.createTempFile("transaction-import-summary-", ".sqlite")
+        try {
+            var id = 0
+            val repository = SqliteImportSessionRepository(database.absolutePathString())
+            val agent = SmartExpenseAgent(
+                repository = repository,
+                gatewayResolver = AgentGatewayResolver { SingleResponseGateway(initialDraftJson) },
+                idGenerator = { "summary-${++id}" },
+                nowEpochMs = { 6_000L + id },
+            )
+            val created = agent.createSession("Summary restart", defaultConfig)
+            val state = agent.sendMessage(created.session.id, 0, "Первая выписка")
+            val saved = repository.saveSummaryBatch(
+                sessionId = state.session.id,
+                expectedRevision = state.session.revision,
+                updates = listOf(
+                    ConversationSummaryUpdate(
+                        summary = ConversationSummary(
+                            text = "Сохранённая сводка старых сообщений.",
+                            summarizedMessageCount = 2,
+                            updatedAtEpochMs = 7_000L,
+                        ),
+                        metric = ModelCallMetric(
+                            id = "summary-call",
+                            providerId = defaultConfig.providerId,
+                            modelId = defaultConfig.modelId,
+                            status = ModelCallStatus.SUCCEEDED,
+                            callType = ModelCallType.SUMMARY,
+                            promptTokens = 10,
+                            completionTokens = 3,
+                            totalTokens = 13,
+                            contextWindowTokens = 16_000,
+                            estimatedContextTokens = 12_500,
+                            compactionThresholdTokens = 12_000,
+                            compactionReserveTokens = 4_000,
+                            contextEstimateSource = "utf8_upper_bound",
+                            createdAtEpochMs = 7_000L,
+                        ),
+                    ),
+                ),
+            )
+
+            val restored = SqliteImportSessionRepository(database.absolutePathString())
+                .get(created.session.id)!!
+            assertEquals(saved.summary, restored.summary)
+            assertEquals(2, restored.messages.size)
+            assertEquals(
+                listOf(ModelCallType.NORMAL, ModelCallType.SUMMARY),
+                restored.metrics.map { it.callType },
+            )
+            val restoredMetric = restored.metrics.last()
+            assertEquals(12_500, restoredMetric.estimatedContextTokens)
+            assertEquals(12_000, restoredMetric.compactionThresholdTokens)
+            assertEquals(4_000, restoredMetric.compactionReserveTokens)
+            assertEquals("utf8_upper_bound", restoredMetric.contextEstimateSource)
+        } finally {
+            deleteDatabase(database)
+        }
+    }
+
+    @Test
+    fun rollsBackAllSummaryUpdatesWhenOneBatchIsInvalid() = runBlocking {
+        val database = Files.createTempFile("transaction-import-summary-atomic-", ".sqlite")
+        try {
+            var id = 0
+            val repository = SqliteImportSessionRepository(database.absolutePathString())
+            val agent = SmartExpenseAgent(
+                repository = repository,
+                gatewayResolver = AgentGatewayResolver { SingleResponseGateway(initialDraftJson) },
+                idGenerator = { "atomic-${++id}" },
+                nowEpochMs = { 8_000L + id },
+            )
+            val created = agent.createSession("Summary atomic", defaultConfig)
+            val state = agent.sendMessage(created.session.id, 0, "Первая выписка")
+            fun update(id: String, messageCount: Int) = ConversationSummaryUpdate(
+                summary = ConversationSummary(
+                    text = "summary-$id",
+                    summarizedMessageCount = messageCount,
+                    updatedAtEpochMs = 9_000L,
+                ),
+                metric = ModelCallMetric(
+                    id = id,
+                    providerId = defaultConfig.providerId,
+                    modelId = defaultConfig.modelId,
+                    status = ModelCallStatus.SUCCEEDED,
+                    callType = ModelCallType.SUMMARY,
+                    promptTokens = 1,
+                    completionTokens = 1,
+                    totalTokens = 2,
+                    createdAtEpochMs = 9_000L,
+                ),
+            )
+
+            assertFailsWith<IllegalArgumentException> {
+                repository.saveSummaryBatch(
+                    sessionId = state.session.id,
+                    expectedRevision = state.session.revision,
+                    updates = listOf(update("summary-1", 1), update("summary-2", 3)),
+                )
+            }
+            val restored = repository.get(created.session.id)!!
+            assertNull(restored.summary)
+            assertEquals(1, restored.metrics.size)
+        } finally {
+            deleteDatabase(database)
+        }
+    }
+
+    @Test
+    fun restoresStickyFactsAndFactsMetricAfterRestart() = runBlocking {
+        val database = Files.createTempFile("transaction-import-facts-", ".sqlite")
+        try {
+            var id = 0
+            val strategy = ContextManagementConfig(
+                strategy = ContextStrategy.STICKY_FACTS,
+                recentMessages = 4,
+            )
+            val agent = SmartExpenseAgent(
+                repository = SqliteImportSessionRepository(database.absolutePathString()),
+                gatewayResolver = AgentGatewayResolver {
+                    SequenceResponseGateway(
+                        """{"upserts":[{"key":"import_code","value":"SEPTEMBER-FAMILY"}],"delete_keys":[]}""",
+                        initialDraftJson,
+                    )
+                },
+                idGenerator = { "facts-${++id}" },
+                nowEpochMs = { 10_000L + id },
+                runtimeConfig = AgentRuntimeConfig(
+                    maxTokens = 100_000,
+                    contextManagement = strategy,
+                ),
+            )
+            val created = agent.createSession("Facts restart", defaultConfig, strategy)
+            agent.sendMessage(created.session.id, 0, "Код SEPTEMBER-FAMILY")
+
+            val restored = SqliteImportSessionRepository(database.absolutePathString())
+                .get(created.session.id)!!
+            assertEquals("SEPTEMBER-FAMILY", restored.facts.single().value)
+            assertEquals(
+                listOf(ModelCallType.FACTS, ModelCallType.NORMAL),
+                restored.metrics.map { it.callType },
+            )
+        } finally {
+            deleteDatabase(database)
+        }
+    }
+
+    @Test
+    fun forksCheckpointWithInheritedMetricsAndIndependentSessionHeader() = runBlocking {
+        val database = Files.createTempFile("transaction-import-fork-", ".sqlite")
+        try {
+            var id = 0
+            val gateway = SequenceResponseGateway(initialDraftJson, renameMerchantPatchJson)
+            val strategy = ContextManagementConfig(strategy = ContextStrategy.BRANCHING)
+            val agent = SmartExpenseAgent(
+                repository = SqliteImportSessionRepository(database.absolutePathString()),
+                gatewayResolver = AgentGatewayResolver { gateway },
+                idGenerator = { "fork-${++id}" },
+                nowEpochMs = { 11_000L + id },
+                runtimeConfig = AgentRuntimeConfig(
+                    maxTokens = 100_000,
+                    contextManagement = strategy,
+                ),
+            )
+            val created = agent.createSession("Branch source", defaultConfig, strategy)
+            var source = agent.sendMessage(created.session.id, 0, "Требования")
+            source = agent.sendMessage(source.session.id, source.session.revision, "Соглашение A")
+            val forked = agent.forkSession(source.session.id, source.session.revision)
+
+            val restored = SqliteImportSessionRepository(database.absolutePathString())
+                .get(forked.session.id)!!
+            val sourceAfter = SqliteImportSessionRepository(database.absolutePathString())
+                .get(source.session.id)!!
+            assertEquals(source.messages, restored.messages)
+            assertEquals(source.draft, restored.draft)
+            assertEquals(source.session.id, restored.session.parentSessionId)
+            assertTrue(restored.metrics.all { it.inherited })
+            assertEquals(source.messages, sourceAfter.messages)
+            assertEquals(source.session.revision, sourceAfter.session.revision)
         } finally {
             deleteDatabase(database)
         }

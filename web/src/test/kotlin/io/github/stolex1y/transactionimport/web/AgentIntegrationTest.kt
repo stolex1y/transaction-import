@@ -39,6 +39,10 @@ class AgentIntegrationTest {
                 val created = client.post("/api/agent/sessions")
                 assertEquals(HttpStatusCode.Created, created.status)
                 var state = created.jsonObject()
+                assertEquals(
+                    "summary",
+                    state["session"]!!.jsonObject["context_management"]!!.jsonObject["strategy"]!!.jsonPrimitive.content,
+                )
                 val sessionId = state.sessionId()
 
                 val extracted = client.post("/api/agent/sessions/$sessionId/messages") {

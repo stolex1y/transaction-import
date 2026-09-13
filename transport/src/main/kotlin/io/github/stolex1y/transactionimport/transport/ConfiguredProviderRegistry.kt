@@ -78,6 +78,7 @@ private class ConfiguredChatCompletionGateway(
     private val resolved: ResolvedAgentConfig,
 ) : ChatCompletionGateway {
     override val contextWindowTokens: Int? = resolved.model.contextWindowTokens
+    override val maxOutputTokens: Int? = resolved.model.maxOutputTokens
 
     private val endpoint = resolved.provider.baseUrl.trimEnd('/') +
         resolved.provider.chatCompletionsPath
@@ -91,9 +92,11 @@ private class ConfiguredChatCompletionGateway(
             .let(providerJson::parseToJsonElement)
             .jsonObject
             .toMutableMap()
-        bodyFields.remove("thinking")
-        bodyFields.remove("reasoning_effort")
-        bodyFields.putAll(resolved.reasoningMode.requestFields)
+        if (request.useConfiguredReasoning) {
+            bodyFields.remove("thinking")
+            bodyFields.remove("reasoning_effort")
+            bodyFields.putAll(resolved.reasoningMode.requestFields)
+        }
 
         val response = httpClient.post(endpoint) {
             header(HttpHeaders.Authorization, "Bearer $apiKey")

@@ -9,7 +9,7 @@
       "models": [
         {
           "id": "deepseek-v4-flash",
-          "context_window_tokens": 50000,
+          "context_window_tokens": 1000000,
           "display_name": "DeepSeek V4 Flash",
           "reasoning_modes": [
             {
@@ -107,6 +107,22 @@
               "id": "high",
               "display_name": "Подробный",
               "request_fields": { "reasoning": { "effort": "high" } }
+            }
+          ]
+        },
+        {
+          "id": "liquid/lfm-2.5-2.6b:free",
+          "context_window_tokens": 65536,
+          "max_output_tokens": 2048,
+          "display_name": "LFM2.5 2.6B Free",
+          "reasoning_modes": [
+            {
+              "id": "low",
+              "display_name": "Базовый",
+              "request_fields": {
+                "reasoning": { "effort": "low" },
+                "include_reasoning": false
+              }
             }
           ]
         }

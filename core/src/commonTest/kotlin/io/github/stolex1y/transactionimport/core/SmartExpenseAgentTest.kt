@@ -58,6 +58,197 @@ class SmartExpenseAgentTest {
         assertTrue(corrected.draft!!.transactions.single { it.id == "1" }.included)
         assertFalse(corrected.draft!!.transactions.single { it.id == "2" }.included)
     }
+    @Test
+    fun capsRuntimeOutputBudgetToSelectedModelLimit() = runBlocking {
+        val gateway = QueuedGateway(initialDraftJson).also { it.maxOutputTokens = 2_048 }
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Ограничение ответа", defaultConfig)
+
+        agent.sendMessage(created.session.id, 0, "Т")
+
+        assertEquals(2_048, gateway.requests.single().maxTokens)
+    }
+
+    @Test
+    fun compressesOldHistoryIntoSummaryBeforeNextFollowUp() = runBlocking {
+        val responses = buildList {
+            add(initialDraftJson)
+            repeat(9) { add(emptyAppliedPatchJson) }
+            add("""{"summary":"Сводка старых решений OLD-START"}""")
+            add(emptyAppliedPatchJson)
+            add("""{"summary":"Сводка старых решений OLD-START плюс новые уточнения"}""")
+            add(emptyAppliedPatchJson)
+        }
+        val gateway = QueuedGateway(*responses.toTypedArray())
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, gateway)
+        val created = agent.createSession("Сжатие истории", defaultConfig)
+
+        var state = agent.sendMessage(created.session.id, 0, "OLD-START")
+        repeat(9) { index ->
+            state = agent.sendMessage(
+                sessionId = state.session.id,
+                expectedRevision = state.session.revision,
+                text = "Уточнение $index",
+            )
+        }
+        val compressed = agent.sendMessage(
+            sessionId = state.session.id,
+            expectedRevision = state.session.revision,
+            text = "Уточнение 9",
+        )
+
+        assertEquals(12, gateway.requests.size)
+        assertEquals(22, compressed.messages.size)
+        assertEquals(10, compressed.summary?.summarizedMessageCount)
+        assertEquals("Сводка старых решений OLD-START", compressed.summary?.text)
+        assertEquals(1, compressed.metrics.count { it.callType == ModelCallType.SUMMARY })
+        assertEquals(11, compressed.metrics.count { it.callType == ModelCallType.NORMAL })
+        assertFalse(gateway.requests[10].useConfiguredReasoning)
+
+        val mainRequest = gateway.requests.last()
+        assertEquals(14, mainRequest.messages.size)
+        assertTrue(mainRequest.messages.any { it.content.contains("Сводка старых решений OLD-START") })
+        assertTrue(mainRequest.messages.none { it.content == "OLD-START" })
+        assertTrue(mainRequest.messages.any { it.content == "Уточнение 8" })
+        val compressedAgain = agent.sendMessage(
+            sessionId = compressed.session.id,
+            expectedRevision = compressed.session.revision,
+            text = "Уточнение 10",
+        )
+        assertEquals(14, gateway.requests.size)
+        assertEquals(20, compressedAgain.summary?.summarizedMessageCount)
+        assertEquals(24, compressedAgain.messages.size)
+        assertEquals(2, compressedAgain.metrics.count { it.callType == ModelCallType.SUMMARY })
+        assertEquals(12, compressedAgain.metrics.count { it.callType == ModelCallType.NORMAL })
+        assertEquals(6, gateway.requests.last().messages.size)
+        assertTrue(gateway.requests[12].messages.last().content.contains("Сводка старых решений OLD-START"))
+        val fullGateway = QueuedGateway(emptyAppliedPatchJson)
+        val fullAgent = testAgent(
+            repository = repository,
+            gateway = fullGateway,
+            runtimeConfig = AgentRuntimeConfig(
+                maxTokens = 100_000,
+                contextCompression = ContextCompressionConfig(enabled = false),
+            ),
+        )
+        fullAgent.sendMessage(
+            sessionId = compressedAgain.session.id,
+            expectedRevision = compressedAgain.session.revision,
+            text = "Full baseline",
+        )
+        assertTrue(fullGateway.requests.single().messages.any { it.content.contains("OLD-START") })
+        assertTrue(
+            fullGateway.requests.single().messages.none {
+                it.content.contains("Compressed conversation summary")
+            },
+        )
+    }
+
+    @Test
+    fun summaryFailureDoesNotSendNormalRequestOrPersistBoundary() = runBlocking {
+        val responses = buildList {
+            add(initialDraftJson)
+            repeat(9) { add(emptyAppliedPatchJson) }
+            add("""{"unexpected":"broken"}""")
+        }
+        val gateway = QueuedGateway(*responses.toTypedArray())
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, gateway)
+        val created = agent.createSession("Ошибка summary", defaultConfig)
+
+        var state = agent.sendMessage(created.session.id, 0, "OLD-START")
+        repeat(9) { index ->
+            state = agent.sendMessage(
+                sessionId = state.session.id,
+                expectedRevision = state.session.revision,
+                text = "Уточнение $index",
+            )
+        }
+
+        assertFailsWith<AgentResponseException> {
+            agent.sendMessage(
+                sessionId = state.session.id,
+                expectedRevision = state.session.revision,
+                text = "Не отправляй normal request",
+            )
+        }
+        val stored = repository.get(created.session.id)!!
+        assertEquals(11, gateway.requests.size)
+        assertNull(stored.summary)
+        assertEquals(20, stored.messages.size)
+        assertEquals(10, stored.metrics.size)
+    }
+
+    @Test
+    fun tokenAwareSummaryUsesTokenThresholdAndLocalFallback() = runBlocking {
+        val gateway = TokenAwareGateway(
+            contextWindowTokens = 16_000,
+            initialResponse = initialDraftJson,
+            summaryResponse = """{"summary":"TOKEN-AWARE-SUMMARY"}""",
+        )
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(
+            repository = repository,
+            gateway = gateway,
+            runtimeConfig = AgentRuntimeConfig(
+                maxTokens = 100_000,
+                contextManagement = ContextManagementConfig(
+                    strategy = ContextStrategy.TOKEN_AWARE_SUMMARY,
+                    recentMessages = 1,
+                    summaryBatchMessages = 1,
+                    summaryMaxTokens = 256,
+                    summaryThresholdTokens = 12_000,
+                    summaryKeepRecentTokens = 500,
+                ),
+            ),
+        )
+        val created = agent.createSession("Token-aware summary", defaultConfig)
+
+        var state = agent.sendMessage(created.session.id, 0, "Первая выписка")
+        repeat(6) { index ->
+            state = agent.sendMessage(
+                sessionId = state.session.id,
+                expectedRevision = state.session.revision,
+                text = "Старое уточнение $index " + "x".repeat(1_500),
+            )
+        }
+
+        val summaryRequestIndex = gateway.requests.indexOfFirst {
+            it.messages.firstOrNull()?.content?.contains("Summarize an earlier") == true
+        }
+        assertTrue(summaryRequestIndex >= 0)
+        assertTrue(
+            gateway.requests.drop(summaryRequestIndex + 1).any { request ->
+                request.messages.any { message -> message.content.contains("TOKEN-AWARE-SUMMARY") }
+            },
+        )
+        assertTrue(state.summary!!.summarizedMessageCount > 0)
+        assertTrue(state.metrics.any { it.callType == ModelCallType.SUMMARY })
+        val normalMetric = state.metrics.last { it.callType == ModelCallType.NORMAL }
+        assertTrue(normalMetric.estimatedContextTokens != null)
+        assertEquals(12_000, normalMetric.compactionThresholdTokens)
+        assertEquals("utf8_upper_bound", normalMetric.contextEstimateSource)
+    }
+
+    @Test
+    fun tokenAwareBudgetUsesExplicitOverridesAndSmallWindowFallback() {
+        val defaultConfig = ContextManagementConfig(
+            strategy = ContextStrategy.TOKEN_AWARE_SUMMARY,
+            summaryKeepRecentTokens = 100,
+        )
+        val defaultBudget = defaultConfig.tokenAwareBudget(128)
+        assertEquals(64, defaultBudget.thresholdTokens)
+        assertEquals(64, defaultBudget.reserveTokens)
+
+        val explicitBudget = defaultConfig.copy(
+            summaryThresholdTokens = 10_000,
+            summaryThresholdPercent = 90,
+            summaryReserveTokens = 50_000,
+        ).tokenAwareBudget(20_000)
+        assertEquals(10_000, explicitBudget.thresholdTokens)
+        assertEquals(10_000, explicitBudget.reserveTokens)
+    }
 
     @Test
     fun emptyGlobalPromptDoesNotAddPreferenceBlockToNewSession() = runBlocking {
@@ -492,9 +683,152 @@ class SmartExpenseAgentTest {
         assertEquals(128, result.metrics.single().contextWindowTokens)
     }
 
+    @Test
+    fun slidingWindowUsesOnlyConfiguredRecentMessagesButKeepsArchive() = runBlocking {
+        val gateway = QueuedGateway(initialDraftJson, emptyAppliedPatchJson, emptyAppliedPatchJson, emptyAppliedPatchJson)
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(
+            repository = repository,
+            gateway = gateway,
+            runtimeConfig = AgentRuntimeConfig(
+                maxTokens = 100_000,
+                contextManagement = ContextManagementConfig(
+                    strategy = ContextStrategy.SLIDING_WINDOW,
+                    recentMessages = 2,
+                ),
+            ),
+        )
+        val created = agent.createSession("Sliding Window", defaultConfig)
+        var state = agent.sendMessage(created.session.id, 0, "first")
+        repeat(3) { index ->
+            state = agent.sendMessage(state.session.id, state.session.revision, "follow-up-$index")
+        }
+
+        val request = gateway.requests.last()
+        assertEquals(8, state.messages.size)
+        assertTrue(state.messages.any { it.content.contains("first") })
+        assertFalse(request.messages.any { it.content == "first" })
+        assertTrue(request.messages.any { it.content == "follow-up-1" })
+        assertTrue(request.messages.any { it.content == "follow-up-2" })
+    }
+
+    @Test
+    fun stickyFactsRunsSeparateUpdaterAndPersistsOnlyAfterNormalSuccess() = runBlocking {
+        val gateway = QueuedGateway(
+            """{"upserts":[{"key":"import_code","value":"SEPTEMBER-FAMILY"}],"delete_keys":[]}""",
+            initialDraftJson,
+        )
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(
+            repository = repository,
+            gateway = gateway,
+            runtimeConfig = AgentRuntimeConfig(
+                maxTokens = 100_000,
+                contextManagement = ContextManagementConfig(
+                    strategy = ContextStrategy.STICKY_FACTS,
+                    recentMessages = 2,
+                    maxFacts = 4,
+                ),
+            ),
+        )
+        val created = agent.createSession("Sticky Facts", defaultConfig)
+        val result = agent.sendMessage(created.session.id, 0, "Код импорта SEPTEMBER-FAMILY")
+
+        assertEquals(2, gateway.requests.size)
+        assertEquals(ModelCallType.FACTS, result.metrics[0].callType)
+        assertEquals(ModelCallType.NORMAL, result.metrics[1].callType)
+        assertEquals("SEPTEMBER-FAMILY", result.facts.single().value)
+        assertTrue(gateway.requests[1].messages.any { it.content.contains("SEPTEMBER-FAMILY") })
+    }
+
+    @Test
+    fun stickyFactsFailureDoesNotSendNormalRequestOrPersistFacts() = runBlocking {
+        val gateway = QueuedGateway("""{"unexpected":"broken"}""")
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(
+            repository = repository,
+            gateway = gateway,
+            runtimeConfig = AgentRuntimeConfig(
+                maxTokens = 100_000,
+                contextManagement = ContextManagementConfig(
+                    strategy = ContextStrategy.STICKY_FACTS,
+                    recentMessages = 2,
+                ),
+            ),
+        )
+        val created = agent.createSession("Sticky Facts error", defaultConfig)
+
+        assertFailsWith<AgentResponseException> {
+            agent.sendMessage(created.session.id, 0, "Не сохраняй это")
+        }
+        val stored = repository.get(created.session.id)!!
+        assertEquals(1, gateway.requests.size)
+        assertTrue(stored.messages.isEmpty())
+        assertTrue(stored.facts.isEmpty())
+        assertTrue(stored.metrics.isEmpty())
+    }
+
+    @Test
+    fun sessionContextSnapshotWinsOverLaterRuntimeConfiguration() = runBlocking {
+        val gateway = QueuedGateway(initialDraftJson, emptyAppliedPatchJson)
+        val repository = MemoryImportSessionRepository()
+        val slidingAgent = testAgent(
+            repository = repository,
+            gateway = gateway,
+            runtimeConfig = AgentRuntimeConfig(
+                maxTokens = 100_000,
+                contextManagement = ContextManagementConfig(
+                    strategy = ContextStrategy.BRANCHING,
+                ),
+            ),
+        )
+        val created = slidingAgent.createSession(
+            title = "Snapshot",
+            config = defaultConfig,
+            contextManagement = ContextManagementConfig(
+                strategy = ContextStrategy.SLIDING_WINDOW,
+                recentMessages = 1,
+            ),
+        )
+        var state = slidingAgent.sendMessage(created.session.id, 0, "first")
+        state = slidingAgent.sendMessage(state.session.id, state.session.revision, "second")
+
+        assertTrue(gateway.requests.last().messages.none { it.content == "first" })
+        assertEquals(ContextStrategy.SLIDING_WINDOW, state.session.contextManagement?.strategy)
+    }
+
+    @Test
+    fun branchingForkCopiesCheckpointAndKeepsSourceIndependent() = runBlocking {
+        val gateway = QueuedGateway(initialDraftJson, emptyAppliedPatchJson, emptyAppliedPatchJson)
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(
+            repository = repository,
+            gateway = gateway,
+            runtimeConfig = AgentRuntimeConfig(
+                maxTokens = 100_000,
+                contextManagement = ContextManagementConfig(strategy = ContextStrategy.BRANCHING),
+            ),
+        )
+        val created = agent.createSession("Branching", defaultConfig)
+        var source = agent.sendMessage(created.session.id, 0, "Требования")
+        source = agent.sendMessage(source.session.id, source.session.revision, "Соглашение A")
+        val fork = agent.forkSession(source.session.id, source.session.revision)
+        val forked = agent.sendMessage(fork.session.id, fork.session.revision, "Решение B")
+        val sourceAfter = repository.get(source.session.id)!!
+
+        assertEquals(source.messages, fork.messages)
+        assertEquals(source.draft, fork.draft)
+        assertEquals(source.session.id, fork.session.parentSessionId)
+        assertTrue(fork.metrics.all(ModelCallMetric::inherited))
+        assertEquals(source.messages, sourceAfter.messages)
+        assertEquals(6, forked.messages.size)
+        assertTrue(forked.metrics.last().inherited.not())
+    }
+
     private fun testAgent(
         repository: MemoryImportSessionRepository,
         gateway: ChatCompletionGateway,
+        runtimeConfig: AgentRuntimeConfig = AgentRuntimeConfig(maxTokens = 100_000),
     ): SmartExpenseAgent {
         var nextId = 0
         var now = 1_000L
@@ -503,12 +837,14 @@ class SmartExpenseAgentTest {
             gatewayResolver = AgentGatewayResolver { gateway },
             idGenerator = { "id-${++nextId}" },
             nowEpochMs = { ++now },
-            runtimeConfig = AgentRuntimeConfig(maxTokens = 100_000),
+            runtimeConfig = runtimeConfig,
         )
     }
 
 
     private class QueuedGateway(vararg responseContents: String) : ChatCompletionGateway {
+        override var contextWindowTokens: Int? = null
+        override var maxOutputTokens: Int? = null
         private val responses = responseContents.toMutableList()
         val requests = mutableListOf<ChatCompletionRequest>()
 
@@ -518,6 +854,32 @@ class SmartExpenseAgentTest {
                 choices = listOf(
                     ChatChoice(
                         message = ResponseMessage(content = responses.removeFirst()),
+                        finishReason = "stop",
+                    ),
+                ),
+            )
+        }
+    }
+
+    private class TokenAwareGateway(
+        override val contextWindowTokens: Int,
+        private val initialResponse: String,
+        private val summaryResponse: String,
+    ) : ChatCompletionGateway {
+        val requests = mutableListOf<ChatCompletionRequest>()
+
+        override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+            requests += request
+            val firstMessage = request.messages.firstOrNull()?.content.orEmpty()
+            val content = when {
+                firstMessage.contains("Summarize an earlier") -> summaryResponse
+                firstMessage.contains("Extract financial transactions") -> initialResponse
+                else -> emptyAppliedPatchJson
+            }
+            return ChatCompletionResponse(
+                choices = listOf(
+                    ChatChoice(
+                        message = ResponseMessage(content = content),
                         finishReason = "stop",
                     ),
                 ),
@@ -574,16 +936,31 @@ class SmartExpenseAgentTest {
             draft: ImportDraft,
             metric: ModelCallMetric,
             updatedAtEpochMs: Long,
+            facts: List<StickyFact>?,
+            additionalMetrics: List<ModelCallMetric>,
         ): ImportSessionState = update(
             sessionId,
             expectedRevision,
             updatedAtEpochMs,
             draft,
-            metrics = { it.metrics + metric },
+            metrics = { it.metrics + additionalMetrics + metric },
+            facts = facts,
         ) { state ->
             state.messages + userMessage + assistantMessage
         }
 
+        override suspend fun saveSummaryBatch(
+            sessionId: String,
+            expectedRevision: Long,
+            updates: List<ConversationSummaryUpdate>,
+        ): ImportSessionState {
+            val current = checkedState(sessionId, expectedRevision)
+            require(updates.isNotEmpty())
+            return current.copy(
+                summary = updates.last().summary,
+                metrics = current.metrics + updates.map(ConversationSummaryUpdate::metric),
+            ).also { states[sessionId] = it }
+        }
         override suspend fun saveCallMetric(
             sessionId: String,
             expectedRevision: Long,
@@ -614,12 +991,29 @@ class SmartExpenseAgentTest {
                     updatedAtEpochMs = updatedAtEpochMs,
                 ),
                 draft = current.draft?.copy(version = expectedRevision + 1),
+                facts = current.facts,
             ).also { states[sessionId] = it }
         }
 
         override suspend fun delete(sessionId: String, expectedRevision: Long) {
             checkedState(sessionId, expectedRevision)
             states.remove(sessionId)
+        }
+
+        override suspend fun fork(
+            sessionId: String,
+            expectedRevision: Long,
+            forkSession: ImportSession,
+        ): ImportSessionState {
+            val current = checkedState(sessionId, expectedRevision)
+            return ImportSessionState(
+                session = forkSession,
+                messages = current.messages,
+                draft = current.draft,
+                facts = current.facts,
+                metrics = current.metrics.map { it.copy(inherited = true) },
+                summary = current.summary,
+            ).also { states[forkSession.id] = it }
         }
 
         override suspend fun getOrCreatePreferences(defaultUserPrompt: String): UserPreferences =
@@ -634,6 +1028,7 @@ class SmartExpenseAgentTest {
             updatedAtEpochMs: Long,
             draft: ImportDraft,
             metrics: (ImportSessionState) -> List<ModelCallMetric> = { it.metrics },
+            facts: List<StickyFact>? = null,
             messages: (ImportSessionState) -> List<ConversationMessage>,
         ): ImportSessionState {
             val current = checkedState(sessionId, expectedRevision)
@@ -645,7 +1040,9 @@ class SmartExpenseAgentTest {
                 ),
                 messages = messages(current),
                 draft = draft,
+                facts = facts ?: current.facts,
                 metrics = metrics(current),
+                summary = current.summary,
             )
             states[sessionId] = updated
             return updated

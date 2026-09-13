@@ -2,6 +2,7 @@ package io.github.stolex1y.transactionimport.transport
 
 import io.github.stolex1y.transactionimport.core.AgentConfig
 import io.github.stolex1y.transactionimport.core.ContextWindowExceededException
+import io.github.stolex1y.transactionimport.core.ContextStrategy
 import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.RequestMessage
 import io.github.stolex1y.transactionimport.core.ResponseFormat
@@ -116,6 +117,22 @@ class ConfiguredProviderRegistryTest {
             assertEquals("quality", body.getValue("provider_preference").jsonPrimitive.content)
             assertEquals("json_object", body.getValue("response_format").jsonObject.getValue("type").jsonPrimitive.content)
             assertEquals("{}", response.choices.single().message.content)
+            gateway.complete(
+                ChatCompletionRequest(
+                    model = "future-model",
+                    messages = listOf(RequestMessage("user", "summary statement")),
+                    thinking = ThinkingOptions("disabled"),
+                    reasoningEffort = null,
+                    responseFormat = ResponseFormat("json_object"),
+                    maxTokens = 100,
+                    stream = false,
+                    useConfiguredReasoning = false,
+                ),
+            )
+            val explicitRequest = Json.parseToJsonElement(requireNotNull(captured).bodyAsString()).jsonObject
+            assertEquals("disabled", explicitRequest.getValue("thinking").jsonObject.getValue("type").jsonPrimitive.content)
+            assertFalse(explicitRequest.containsKey("reasoning"))
+            assertFalse(explicitRequest.containsKey("provider_preference"))
         } finally {
             client.close()
         }
@@ -218,18 +235,75 @@ class ConfiguredProviderRegistryTest {
               "default_reasoning_mode_id": "disabled",
               "temperature": null,
               "max_tokens": 100000,
-              "default_user_prompt": ""
+              "default_user_prompt": "",
+              "context_management": {
+                "strategy": "sliding_window",
+                "recent_messages": 4
+              }
             }
             """.trimIndent(),
             catalog,
         )
 
         assertEquals(100_000, runtime.maxTokens)
+        assertEquals(ContextStrategy.SLIDING_WINDOW, runtime.contextManagement?.strategy)
+        assertEquals(4, runtime.contextManagement?.recentMessages)
         assertNull(runtime.temperature)
         assertEquals(
             AgentConfig("deepseek", "deepseek-v4-flash", "disabled"),
             runtime.defaultAgentConfig(),
         )
+    }
+    @Test
+    fun decodesTokenAwareSummaryParameters() {
+        val catalog = decodeProviderCatalog(
+            """
+            {
+              "providers": [
+                {
+                  "id": "token-provider",
+                  "display_name": "Token Provider",
+                  "base_url": "https://provider.example/v1",
+                  "credential_env": "TOKEN_PROVIDER_KEY",
+                  "models": [
+                    {
+                      "id": "token-model",
+                      "context_window_tokens": 32000,
+                      "reasoning_modes": [
+                        { "id": "disabled", "request_fields": {} }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+        val runtime = decodeAgentRuntimeConfig(
+            """
+            {
+              "default_provider_id": "token-provider",
+              "default_model_id": "token-model",
+              "default_reasoning_mode_id": "disabled",
+              "context_management": {
+                "strategy": "token_aware_summary",
+                "recent_messages": 2,
+                "summary_batch_messages": 4,
+                "summary_max_tokens": 1024,
+                "summary_threshold_tokens": null,
+                "summary_threshold_percent": 75,
+                "summary_reserve_tokens": null,
+                "summary_keep_recent_tokens": 20000
+              }
+            }
+            """.trimIndent(),
+            catalog,
+        )
+
+        val context = requireNotNull(runtime.contextManagement)
+        assertEquals(ContextStrategy.TOKEN_AWARE_SUMMARY, context.strategy)
+        assertEquals(75, context.summaryThresholdPercent)
+        assertEquals(20_000, context.summaryKeepRecentTokens)
     }
 }
 

@@ -75,7 +75,10 @@ fun main() {
 
     try {
         val providerRegistry = ConfiguredProviderRegistry(httpClient, catalog)
-        val repository = SqliteImportSessionRepository(databasePath.toString())
+        val repository = SqliteImportSessionRepository(
+            databasePath = databasePath.toString(),
+            defaultContextManagement = runtimeConfig.sessionContextManagement(),
+        )
         val agent = SmartExpenseAgent(
             repository = repository,
             gatewayResolver = providerRegistry,
