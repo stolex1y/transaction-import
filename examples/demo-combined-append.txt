@@ -1,6 +1,4 @@
-ВТОРАЯ СИНТЕТИЧЕСКАЯ ВЫПИСКА ДЛЯ ДЕМОНСТРАЦИИ
-
-Операция 1 — повтор строки первой выписки:
+Операция 1:
 occurred_at: 2026-02-15T09:02:00
 posted_at: 2026-02-16T10:00:00
 direction: expense
@@ -15,7 +13,7 @@ posted_at: 2026-08-18T16:02:00
 direction: expense
 amount_minor: 600000
 currency: RUB
-merchant: Госуслуги
+merchant: Кофейня
 card_last4: 6960
 
 Операция 3:
@@ -24,5 +22,5 @@ posted_at: 2026-08-19T14:31:00
 direction: expense
 amount_minor: 600000
 currency: RUB
-merchant: Госуслуги
+merchant: Кофейня
 card_last4: 9818
