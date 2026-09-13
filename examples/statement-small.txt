@@ -1,0 +1,6 @@
+СИНТЕТИЧЕСКАЯ БАНКОВСКАЯ ВЫПИСКА
+Период: 2026-03-01 — 2026-03-02
+transaction_id | occurred_at | posted_at | merchant | description | amount | currency | card_last4 | channel | status
+TX-001 | 2026-03-01 09:07 | 2026-03-02 | NOVA MARKET | продукты и молоко | -1250.00 | RUB | 4405 | card | posted
+TX-002 | 2026-03-02 18:42 | 2026-03-02 | CITY RIDE | поездка завершена | -185.00 | RUB | 4405 | card | posted
+TX-003 | 2026-03-02 20:10 | 2026-03-03 | RIVER PAY | возврат части заказа | 650.00 | RUB | 4405 | card | posted

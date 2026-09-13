@@ -5,7 +5,6 @@ Transaction Import — локальное web-приложение для изв
 
 ## Возможности
 
-- разовый импорт в свободном или контролируемом JSON-режиме;
 - локальная проверка обязательных полей, типов и предметных инвариантов;
 - отдельные агентные сессии с изменяемыми provider/model/reasoning;
 - общий пользовательский профиль для будущих запросов всех сессий;
@@ -26,32 +25,31 @@ Transaction Import — локальное web-приложение для изв
   сохраняет консервативную локальную оценку occupancy и effective reserve;
 - даты операций в UI показываются как `DD-MM-YYYY HH:mm`, а в SQLite и API
   сохраняются в ISO 8601.
-- отдельные страницы воспроизводимых экспериментов.
 
 Приложение не записывает операции в финансовый ledger. Подготовленный JSON —
 конечный результат текущего сценария.
 
 ## Web-интерфейс
 
-После запуска доступны:
+После запуска доступен основной интерфейс:
 
-- `http://127.0.0.1:8080/agent` — Smart Expense Agent с несколькими сессиями;
-- `http://127.0.0.1:8080/` — разовый импорт;
-- `http://127.0.0.1:8080/experiments` — страницы сравнительных экспериментов.
+- `http://127.0.0.1:8080/agent` — Smart Expense Agent с несколькими
+  сессиями.
 
 Основной агентный сценарий:
 
-1. одним нажатием «Новый импорт» создать сессию с автоматическим названием;
-2. при необходимости изменить provider, model или reasoning для будущих запросов;
+1. одним нажатием «Новая сессия» создать сессию с автоматическим названием;
+2. при необходимости изменить provider, model или reasoning для будущих
+   запросов;
 3. задать общий профиль в выдвижном меню сессий;
 4. отправить синтетическую или обезличенную выписку;
-5. выбрать табличное или карточное представление, проверить операции, исправить поля и добавить пользовательские описания;
+5. проверить операции, исправить поля и добавить пользовательские описания;
 6. исключить ненужные операции либо изменить выбор массовым флажком;
 7. подготовить и скачать JSON с выбранными валидными операциями;
 8. отправить следующую выписку в ту же сессию: новые операции добавятся с
    продолжением ID, а точные дубликаты будут пропущены;
-9. открыть панель токенов, сравнить input/output/total короткого и длинного
-   диалога и при переполнении получить объяснимую ошибку без изменения draft.
+9. открыть панель токенов и при переполнении получить объяснимую ошибку без
+   изменения draft.
 
 Явные телефоны с международным префиксом либо меткой `тел.`, `телефон` или
 `phone` маскируются локально с сохранением последних четырёх цифр. Длинные
@@ -105,24 +103,12 @@ web-интерфейс показывает выбранную стратеги�
   атомарно;
 - `strategy=branching`: запрос использует полный архив; кнопка «Создать
   ветку» создаёт независимую копию checkpoint без изменения источника;
-- `strategy=summary`: сохраняет D04 summary-поведение с
+- `strategy=summary`: сжимает старую историю в отдельную summary, сохраняя
   `recent_messages`, `summary_batch_messages` и `summary_max_tokens`;
 - `strategy=token_aware_summary`: запускает Summary по effective token
   threshold с reserve fallback, сохраняет `summary_keep_recent_tokens` свежего
   хвоста и использует максимум provider `prompt_tokens` и локальной
   консервативной оценки.
-
-Готовые профили для сравнения находятся в
-`examples/agent-sliding-window.json`, `agent-sticky-facts.json`,
-`agent-branching.json`, `agent-summary.json` и
-`agent-token-aware-summary.json`. Для каждого запуска используйте отдельную
-SQLite-базу.
-
-Для воспроизводимой записи token-aware compaction используйте
-`examples/agent-token-aware-demo.json` вместе с
-`examples/demo-providers.json`: threshold равен `20000`, fresh-tail budget —
-`500`, summary budget — `2048`. Этот профиль предназначен для демонстрации,
-а не для изменения основного `config/agent.json`.
 
 Старый `context_compression` продолжает читаться для совместимости с
 предыдущими конфигурациями: `enabled=true` преобразуется в `summary`, а
@@ -155,52 +141,7 @@ UTF-8 upper-bound оценку без внешнего tokenizer API; она н�
 
 Порт меняется переменной `PORT`. Создание, просмотр и локальное редактирование
 сессий доступны без ключа; отправка сообщения требует доступного провайдера.
-Для базовых страниц и экспериментов нужен `DEEPSEEK_API_KEY`.
-
-
-## Локальные demo instances
-
-Для записи сравнительных сценариев конфигурации и отдельные SQLite-базы
-создаются в игнорируемом каталоге `.gradle/demo/instances`:
-
-```text
-01-main/                 18180  Summary
-02-sliding-window/       18181  Sliding Window
-03-sticky-facts/         18182  Sticky Facts
-04-summary/              18183  Summary
-05-branching/            18184  Branching
-06-token-aware-summary/  18185  Token-aware Summary
-07-lfm-full-history/     18186  LFM без compression
-08-lfm-summary/          18187  LFM с Summary
-```
-
-Каждый инстанс запускается своим `run.sh`. Скрипт пересобирает web distribution,
-подставляет локальные `providers.json`, `agent.json`, SQLite и порт. Для
-ускорения повторного запуска используйте `SKIP_BUILD=1`.
-
-Clean-выписка для сравнительного видео генерируется командой:
-
-```bash
-python3 examples/generate_context_memory_fixture.py \
-  --output .gradle/demo/demo-context-memory.txt
-```
-
-Отдельная большая выписка для Summary/full-history overflow генерируется
-локально без API-вызовов:
-
-```bash
-python3 examples/generate_summary_overflow_fixture.py \
-  --target-chars 140000 \
-  --operation-count 1 \
-  --detail-lines 2200 \
-  --output .gradle/demo/summary-overflow-statement.txt
-```
-
-Готовая последовательность промптов находится в
-`.gradle/demo/summary-overflow-prompts.txt`. Runner
-`examples/run_summary_overflow_demo.py` предназначен для локального
-deterministic smoke; реальный OpenRouter/LFM запуск выполняется пользователем
-отдельно во время записи.
+Для запуска с DeepSeek нужен `DEEPSEEK_API_KEY`.
 
 ## Проверки
 
@@ -226,14 +167,3 @@ input при повторной отправке истории, table/card swit
 и изолированное удаление. Отдельный overflow-сценарий подтверждает русскую
 ошибку без изменения messages и draft. `playwrightInstall` нужен один раз на
 окружение после изменения версии Playwright.
-
-## Серия экспериментов
-
-- `/experiments/d01` — baseline unrestricted;
-- `/experiments/d02` — свободный ответ и controlled JSON;
-- `/experiments/d03` — prompt strategies;
-- `/experiments/d04` — preset temperature `0`, `0.7` и `1.2`;
-- `/experiments/d05` — DeepSeek и OpenRouter.
-
-Для D05 модель OpenRouter задаётся через `OPENROUTER_MODEL`; по умолчанию
-используется `z-ai/glm-5.2:free`.

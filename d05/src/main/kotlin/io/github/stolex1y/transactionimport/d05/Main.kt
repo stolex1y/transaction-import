@@ -10,7 +10,7 @@ import java.nio.file.Path
 import kotlin.io.path.readText
 
 suspend fun main(args: Array<String>) {
-    val fixturePath = Path.of(args.firstOrNull() ?: "examples/demo-task-d01.txt")
+    val fixturePath = Path.of(args.firstOrNull() ?: "examples/statement-monthly.txt")
     val deepSeekApiKey = requireEnvironment("DEEPSEEK_API_KEY")
     val openRouterApiKey = requireEnvironment("OPENROUTER_API_KEY")
     val openRouterModel = System.getenv("OPENROUTER_MODEL")

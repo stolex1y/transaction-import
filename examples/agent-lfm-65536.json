@@ -1,8 +1,0 @@
-{
-  "default_provider_id": "openrouter",
-  "default_model_id": "liquid/lfm-2.5-2.6b:free",
-  "default_reasoning_mode_id": "low",
-  "temperature": 0.1,
-  "max_tokens": 2048,
-  "default_user_prompt": ""
-}
