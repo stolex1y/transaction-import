@@ -2,6 +2,7 @@ package io.github.stolex1y.transactionimport.persistence
 
 import io.github.stolex1y.transactionimport.core.AgentConfig
 import io.github.stolex1y.transactionimport.core.AgentGatewayResolver
+import io.github.stolex1y.transactionimport.core.CategoryType
 import io.github.stolex1y.transactionimport.core.AgentRuntimeConfig
 import io.github.stolex1y.transactionimport.core.ChatChoice
 import io.github.stolex1y.transactionimport.core.ChatCompletionGateway
@@ -12,11 +13,15 @@ import io.github.stolex1y.transactionimport.core.ContextStrategy
 import io.github.stolex1y.transactionimport.core.ConversationSummary
 import io.github.stolex1y.transactionimport.core.ConversationSummaryUpdate
 import io.github.stolex1y.transactionimport.core.ModelCallMetric
+import io.github.stolex1y.transactionimport.core.MemoryLayer
+import io.github.stolex1y.transactionimport.core.MemoryCandidateStatus
 import io.github.stolex1y.transactionimport.core.ModelCallStatus
 import io.github.stolex1y.transactionimport.core.ModelCallType
 import io.github.stolex1y.transactionimport.core.ResponseMessage
 import io.github.stolex1y.transactionimport.core.SmartExpenseAgent
 import io.github.stolex1y.transactionimport.core.Usage
+import io.github.stolex1y.transactionimport.core.TransactionCategory
+import io.github.stolex1y.transactionimport.core.ReceiptStatus
 import io.github.stolex1y.transactionimport.core.UserPreferences
 import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
@@ -30,15 +35,47 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+
 class SqliteImportSessionRepositoryTest {
     @Test
-    fun restoresConversationDraftConfigurationAndPreferencesAfterRestart() = runBlocking {
+    fun restoresReceiptStateAfterRestart() = runBlocking {
+        val database = Files.createTempFile("transaction-import-stateful-", ".sqlite")
+        try {
+            var id = 0
+            val firstAgent = SmartExpenseAgent(
+                repository = SqliteImportSessionRepository(database.absolutePathString()),
+                gatewayResolver = AgentGatewayResolver { error("LLM не нужен для этой проверки") },
+                idGenerator = { "stateful-${++id}" },
+                nowEpochMs = { 1_000L + id },
+            )
+            val created = firstAgent.createSession("Stateful restart", defaultConfig)
+            assertEquals(ReceiptStatus.NOT_STARTED, created.receiptState.status)
+
+            val restartedAgent = SmartExpenseAgent(
+                repository = SqliteImportSessionRepository(database.absolutePathString()),
+                gatewayResolver = AgentGatewayResolver { error("LLM не нужен для этой проверки") },
+                idGenerator = { "unused" },
+                nowEpochMs = { 2_000L },
+            )
+            val restored = restartedAgent.getSession(created.session.id)
+
+            assertEquals(created.session.revision, restored.session.revision)
+            assertEquals(ReceiptStatus.NOT_STARTED, restored.receiptState.status)
+            assertNull(restored.receiptState.lastCompliance)
+        } finally {
+            deleteDatabase(database)
+        }
+    }
+    @Test
+    fun restoresConversationDraftConfigurationPreferencesAndCandidatesAfterRestart() = runBlocking {
         val database = Files.createTempFile("transaction-import-restart-", ".sqlite")
         try {
             var firstId = 0
             val firstAgent = SmartExpenseAgent(
                 repository = SqliteImportSessionRepository(database.absolutePathString()),
-                gatewayResolver = AgentGatewayResolver { SingleResponseGateway(initialDraftJson) },
+                gatewayResolver = AgentGatewayResolver {
+                    SingleResponseGateway(initialDraftWithMemoryCandidateJson)
+                },
                 idGenerator = { "first-${++firstId}" },
                 nowEpochMs = { 1_000L + firstId },
             )
@@ -48,6 +85,7 @@ class SqliteImportSessionRepositoryTest {
                 expectedRevision = 0,
                 text = "15.01 DEMO MARKET 1250,50 RUB",
             )
+            val candidate = extracted.memoryCandidates.single()
             val transaction = extracted.draft!!.transactions.single().transaction
             val described = firstAgent.replaceTransaction(
                 sessionId = created.session.id,
@@ -63,6 +101,12 @@ class SqliteImportSessionRepositoryTest {
                 config = defaultConfig.copy(modelId = "next-model"),
             )
             firstAgent.updatePreferences("Не выбирай переводы между счетами")
+            val accepted = firstAgent.acceptMemoryCandidate(
+                sessionId = created.session.id,
+                expectedRevision = saved.session.revision,
+                candidateId = candidate.id,
+            )
+            assertEquals(MemoryCandidateStatus.ACCEPTED, accepted.memoryCandidates.single().status)
 
             var secondId = 0
             val secondGateway = SingleResponseGateway(renameMerchantPatchJson)
@@ -73,11 +117,23 @@ class SqliteImportSessionRepositoryTest {
                 nowEpochMs = { 2_000L + secondId },
             )
             val restored = secondAgent.getSession(created.session.id)
+            assertEquals(ReceiptStatus.READY_FOR_EXPORT, restored.receiptState.status)
             assertEquals(7, restored.metrics.single().totalTokens)
             assertEquals("Рабочий обед", restored.draft!!.transactions.single().description)
             assertNull(restored.draft!!.transactions.single().transaction.cardLast4)
+            assertEquals(
+                MemoryCandidateStatus.ACCEPTED,
+                restored.memoryCandidates.single().status,
+            )
             assertEquals("Не выбирай переводы между счетами", secondAgent.getPreferences().userPrompt)
-
+            assertEquals(
+                "Подтверждённое правило для новых сессий",
+                secondAgent.getPreferences().confirmedDecisions.single().text,
+            )
+            assertEquals(
+                listOf(MemoryLayer.LONG_TERM),
+                restored.memoryTrace!!.selectedLayers,
+            )
             val corrected = secondAgent.sendMessage(
                 sessionId = restored.session.id,
                 expectedRevision = restored.session.revision,
@@ -94,6 +150,40 @@ class SqliteImportSessionRepositoryTest {
             secondAgent.deleteSession(created.session.id, corrected.session.revision)
             assertNull(SqliteImportSessionRepository(database.absolutePathString()).get(created.session.id))
             assertEquals(sibling.session.id, secondAgent.getSession(sibling.session.id).session.id)
+        } finally {
+            deleteDatabase(database)
+        }
+    }
+
+    @Test
+    fun persistsSeededGlobalCategoryCatalogAndCustomArchive() = runBlocking {
+        val database = Files.createTempFile("transaction-import-categories-", ".sqlite")
+        try {
+            val repository = SqliteImportSessionRepository(database.absolutePathString())
+            val initial = repository.listCategories(includeArchived = true)
+            val food = initial.single { it.id == "category.food" }
+            val groceries = initial.single { it.id == "food.groceries" }
+            val transfer = initial.single { it.id == "transfer.internal" }
+            assertEquals(CategoryType.EXPENSE, food.type)
+            assertNull(food.parentId)
+            assertEquals("category.food", groceries.parentId)
+            assertTrue(transfer.archived)
+
+            val inserted = repository.insertCategory(
+                TransactionCategory(
+                    id = "custom.transport",
+                    displayName = "Городские поездки",
+                    type = CategoryType.EXPENSE,
+                    hint = "такси",
+                ),
+            )
+            assertEquals("Городские поездки", inserted.displayName)
+            val updated = repository.updateCategory(inserted.copy(displayName = "Такси"))
+            assertEquals("Такси", updated.displayName)
+            val archived = repository.archiveCategory(updated.id)
+            assertTrue(archived.archived)
+            assertTrue(repository.listCategories().none { it.id == updated.id })
+            assertTrue(repository.listCategories(includeArchived = true).any { it.id == updated.id })
         } finally {
             deleteDatabase(database)
         }
@@ -329,7 +419,7 @@ class SqliteImportSessionRepositoryTest {
             val repository = SqliteImportSessionRepository(database.absolutePathString())
             val restored = repository.get("legacy-session")!!
 
-            assertEquals("legacy-model", restored.session.config.modelId)
+            assertEquals("deepseek-flash", restored.session.config.modelId)
             assertEquals(1, restored.draft!!.transactions.size)
             assertEquals("", restored.draft!!.transactions.single().description)
             assertTrue(restored.draft!!.transactions.single().fieldErrors.isEmpty())
@@ -344,8 +434,34 @@ class SqliteImportSessionRepositoryTest {
                     }
                 }
             }
-            assertEquals(UserPreferences("Начальная настройка"), repository.getOrCreatePreferences("Начальная настройка"))
-            assertEquals(UserPreferences("Новая настройка"), repository.savePreferences(UserPreferences("Новая настройка")))
+            val migratedPreferences = repository.getOrCreatePreferences("Начальная настройка")
+            assertTrue(migratedPreferences.userPrompt.contains("Имя пользователя: Алиса"))
+            assertTrue(migratedPreferences.userPrompt.contains("Ограничения: Не писать в ledger"))
+            assertFalse(migratedPreferences.userPrompt.contains("task_invariants"))
+            DriverManager.getConnection("jdbc:sqlite:${database.absolutePathString()}").use { connection ->
+                connection.prepareStatement(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('user_profile', 'task_invariants')",
+                ).use { statement ->
+                    statement.executeQuery().use { rows ->
+                        assertFalse(rows.next())
+                    }
+                }
+                connection.prepareStatement(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('task_states', 'receipt_states')",
+                ).use { statement ->
+                    statement.executeQuery().use { rows ->
+                        val tables = generateSequence {
+                            if (rows.next()) rows.getString("name") else null
+                        }.toSet()
+                        assertFalse("task_states" in tables)
+                        assertTrue("receipt_states" in tables)
+                    }
+                }
+            }
+            assertEquals(
+                UserPreferences("Новая настройка"),
+                repository.savePreferences(UserPreferences("Новая настройка")),
+            )
 
             val transaction = restored.draft!!.transactions.single().transaction
             val updated = SmartExpenseAgent(
@@ -426,7 +542,7 @@ class SqliteImportSessionRepositoryTest {
                     """
                     INSERT INTO import_sessions VALUES (
                         'legacy-session', 'Старая сессия',
-                        '{"provider_id":"legacy","model_id":"legacy-model","reasoning_mode_id":"disabled","temperature":0.2,"max_tokens":2000}',
+                        '{"provider_id":"legacy","model_id":"deepseek-v4-flash","reasoning_mode_id":"disabled","temperature":0.2,"max_tokens":2000}',
                         1, 1000, 1100, 'READY', NULL, '[]'
                     )
                     """.trimIndent(),
@@ -436,6 +552,61 @@ class SqliteImportSessionRepositoryTest {
                     INSERT INTO draft_transactions VALUES (
                         'legacy-session', 0, 'tx-1', 1,
                         '{"source_index":1,"direction":"expense","occurred_at":"2026-01-15T12:10:00","posted_at":null,"amount_minor":125050,"currency":"RUB","merchant":"DEMO MARKET","category_id":"food.groceries","card_last4":null,"needs_review":false,"issues":[]}'
+                    )
+                    """.trimIndent(),
+                )
+                statement.execute(
+                    """
+                    CREATE TABLE user_profile (
+                        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                        name TEXT NOT NULL,
+                        addressing TEXT NOT NULL,
+                        style TEXT NOT NULL,
+                        output_format TEXT NOT NULL,
+                        constraints_text TEXT NOT NULL,
+                        context_text TEXT NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                statement.execute(
+                    """
+                    INSERT INTO user_profile VALUES (
+                        1, 'Алиса', 'на ты', 'Кратко', 'JSON',
+                        'Не писать в ledger', 'Синтетический контекст'
+                    )
+                    """.trimIndent(),
+                )
+                statement.execute(
+                    """
+                    CREATE TABLE task_invariants (
+                        id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        title TEXT NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                statement.execute(
+                    "INSERT INTO task_invariants VALUES ('legacy-invariant', 'legacy-session', 'Только RUB')",
+                )
+                statement.execute(
+                    """
+                    CREATE TABLE task_states (
+                        session_id TEXT PRIMARY KEY,
+                        stage TEXT NOT NULL,
+                        current_step TEXT NOT NULL,
+                        expected_action TEXT NOT NULL,
+                        paused INTEGER NOT NULL,
+                        pause_reason TEXT,
+                        state_revision INTEGER NOT NULL,
+                        last_compliance_json TEXT
+                    )
+                    """.trimIndent(),
+                )
+                statement.execute(
+                    """
+                    INSERT INTO task_states VALUES (
+                        'legacy-session', 'PLANNING', 'await_input',
+                        'Отправьте выписку', 1, 'Старое поле', 1, NULL
                     )
                     """.trimIndent(),
                 )
@@ -512,6 +683,10 @@ class SqliteImportSessionRepositoryTest {
               "unparsed_fragments": []
             }
         """.trimIndent()
+        val initialDraftWithMemoryCandidateJson = initialDraftJson.replace(
+            "\"unparsed_fragments\": []",
+            "\"unparsed_fragments\": [],\n  \"memory_candidates\": [{\"text\":\"Подтверждённое правило для новых сессий\",\"reason\":\"Пользователь явно задал повторяющееся правило.\"}]",
+        )
 
         val renameMerchantPatchJson = """
             {

@@ -24,6 +24,25 @@ import kotlin.test.assertTrue
 
 class AgentIntegrationTest {
     @Test
+    fun exposesOnlyAgentSurface() {
+        val database = Files.createTempFile("agent-surface-", ".sqlite")
+        try {
+            testApplication {
+                application { module(agentDependencies = fakeAgentDependencies(database.toString())) }
+
+                assertEquals(HttpStatusCode.OK, client.get("/agent").status)
+                assertEquals(HttpStatusCode.OK, client.get("/assets/agent.js").status)
+                assertEquals(HttpStatusCode.NotFound, client.get("/").status)
+                assertEquals(HttpStatusCode.NotFound, client.get("/experiments").status)
+                assertEquals(HttpStatusCode.NotFound, client.post("/api/extract").status)
+                assertEquals(HttpStatusCode.NotFound, client.post("/api/experiments/d04").status)
+            }
+        } finally {
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
     fun fakeProviderDrivesHttpAgentWorkflowWithoutExternalApi() {
         val database = Files.createTempFile("agent-integration-", ".sqlite")
         val gateway = FakeAgentGateway()
@@ -37,7 +56,7 @@ class AgentIntegrationTest {
                 assertEquals(HttpStatusCode.OK, preferences.status)
 
                 val created = client.post("/api/agent/sessions")
-                assertEquals(HttpStatusCode.Created, created.status)
+                assertEquals(HttpStatusCode.Created, created.status, created.bodyAsText())
                 var state = created.jsonObject()
                 assertEquals(
                     "summary",
@@ -123,6 +142,328 @@ class AgentIntegrationTest {
                 }
                 assertEquals(HttpStatusCode.NoContent, deleted.status)
                 assertEquals(0, client.get("/api/agent/sessions").jsonObjectArray().size)
+            }
+        } finally {
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun exposesReceiptStateAndRepeatableExportOverHttp() {
+        val database = Files.createTempFile("agent-stateful-", ".sqlite")
+        val gateway = FakeAgentGateway(
+            ArrayDeque(
+                listOf(
+                    FakeAgentGateway.READY_DRAFT_JSON,
+                    FakeAgentGateway.APPEND_STATEMENT_JSON,
+                ),
+            ),
+        )
+        try {
+            testApplication {
+                application { module(agentDependencies = fakeAgentDependencies(database.toString(), gateway)) }
+
+                val createdResponse = client.post("/api/agent/sessions")
+                assertEquals(HttpStatusCode.Created, createdResponse.status, createdResponse.bodyAsText())
+                val created = createdResponse.jsonObject()
+                val sessionId = created.sessionId()
+                assertEquals(
+                    "not_started",
+                    created["receipt_state"]!!.jsonObject["status"]!!.jsonPrimitive.content,
+                )
+                assertFalse(created.containsKey("task_state"))
+
+                val systemInvariants = client.get("/api/agent/sessions/$sessionId/invariants")
+                assertEquals(HttpStatusCode.OK, systemInvariants.status)
+                val invariantBody = systemInvariants.jsonObject()
+                assertEquals(5, invariantBody["system"]!!.jsonArray.size)
+                assertFalse(invariantBody.containsKey("task"))
+                assertEquals(
+                    HttpStatusCode.NotFound,
+                    client.post("/api/agent/sessions/$sessionId/transition").status,
+                )
+
+                val extracted = client.post("/api/agent/sessions/$sessionId/messages") {
+                    jsonBody("""{"revision":0,"text":"Синтетическая выписка"}""")
+                }
+                assertEquals(HttpStatusCode.OK, extracted.status)
+                var state = extracted.jsonObject()
+                assertEquals(
+                    "has_errors",
+                    state["receipt_state"]!!.jsonObject["status"]!!.jsonPrimitive.content,
+                )
+
+                val excluded = client.put("/api/agent/sessions/$sessionId/transactions/2") {
+                    jsonBody(
+                        """
+                            {
+                              "revision":1,
+                              "included":false,
+                              "direction":"expense",
+                              "occurred_at":"2026-02-08T18:45:00",
+                              "posted_at":null,
+                              "amount_minor":9900,
+                              "merchant":"НЕИЗВЕСТНЫЙ ПЛАТЁЖ",
+                              "description":"",
+                              "category_id":null,
+                              "card_last4":null
+                            }
+                        """.trimIndent(),
+                    )
+                }
+                assertEquals(HttpStatusCode.OK, excluded.status)
+                state = excluded.jsonObject()
+
+                val firstBatch = client.get("/api/agent/sessions/$sessionId/batch")
+                assertEquals(HttpStatusCode.OK, firstBatch.status)
+                assertEquals(1, firstBatch.jsonObject()["transactions"]!!.jsonArray.size)
+
+                val afterFirstExport = client.get("/api/agent/sessions/$sessionId").jsonObject()
+                assertEquals(
+                    "ready_for_export",
+                    afterFirstExport["receipt_state"]!!.jsonObject["status"]!!.jsonPrimitive.content,
+                )
+                assertFalse(afterFirstExport.containsKey("task_state"))
+
+                val edited = client.put("/api/agent/sessions/$sessionId/transactions/1") {
+                    jsonBody(
+                        """
+                            {
+                              "revision":${afterFirstExport.revision()},
+                              "included":true,
+                              "direction":"expense",
+                              "occurred_at":"2026-02-08T12:10:00",
+                              "posted_at":null,
+                              "amount_minor":125050,
+                              "merchant":"ПОСЛЕ ЭКСПОРТА",
+                              "description":"",
+                              "category_id":"food.groceries",
+                              "card_last4":"1234"
+                            }
+                        """.trimIndent(),
+                    )
+                }
+                assertEquals(HttpStatusCode.OK, edited.status)
+                assertEquals(
+                    "ready_for_export",
+                    edited.jsonObject()["receipt_state"]!!.jsonObject["status"]!!.jsonPrimitive.content,
+                )
+                val repeatedBatch = client.get("/api/agent/sessions/$sessionId/batch")
+                assertEquals(HttpStatusCode.OK, repeatedBatch.status)
+                assertEquals(
+                    "ПОСЛЕ ЭКСПОРТА",
+                    repeatedBatch.jsonObject()["transactions"]!!.jsonArray.single()
+                        .jsonObject["merchant"]!!.jsonPrimitive.content,
+                )
+
+                val appended = client.post("/api/agent/sessions/$sessionId/messages") {
+                    jsonBody("""{"revision":${edited.jsonObject().revision()},"text":"Добавь вторую выписку"}""")
+                }
+                assertEquals(HttpStatusCode.OK, appended.status)
+                state = appended.jsonObject()
+                assertEquals(
+                    "has_errors",
+                    state["receipt_state"]!!.jsonObject["status"]!!.jsonPrimitive.content,
+                )
+                assertEquals(4, state.transactions().size)
+
+                val repaired = client.put("/api/agent/sessions/$sessionId/transactions/4") {
+                    jsonBody(
+                        """
+                            {
+                              "revision":${state.revision()},
+                              "included":true,
+                              "direction":"expense",
+                              "occurred_at":"2026-02-09T10:00:00",
+                              "posted_at":null,
+                              "amount_minor":35000,
+                              "merchant":"НОВЫЙ КАФЕ",
+                              "description":"",
+                              "category_id":"food.cafe",
+                              "card_last4":null
+                            }
+                        """.trimIndent(),
+                    )
+                }
+                assertEquals(HttpStatusCode.OK, repaired.status)
+                assertEquals(
+                    "ready_for_export",
+                    repaired.jsonObject()["receipt_state"]!!.jsonObject["status"]!!.jsonPrimitive.content,
+                )
+                assertEquals(
+                    3,
+                    client.get("/api/agent/sessions/$sessionId/batch")
+                        .jsonObject()["transactions"]!!.jsonArray.size,
+                )
+            }
+        } finally {
+            database.deleteIfExists()
+        }
+    }
+    @Test
+    fun exposesExplicitMemoryTraceAndConfirmedDecision() {
+        val database = Files.createTempFile("agent-memory-", ".sqlite")
+        val gateway = FakeAgentGateway(
+            ArrayDeque(
+                listOf(
+                    FakeAgentGateway.READY_DRAFT_WITH_MEMORY_CANDIDATE_JSON,
+                    FakeAgentGateway.FOLLOW_UP_NOOP_JSON,
+                ),
+            ),
+        )
+        try {
+            testApplication {
+                application { module(agentDependencies = fakeAgentDependencies(database.toString(), gateway)) }
+
+                val preferences = client.put("/api/agent/preferences") {
+                    jsonBody("""{"user_prompt":"Общие инструкции для всех сессий"}""")
+                }
+                assertEquals(HttpStatusCode.OK, preferences.status)
+
+                val created = client.post("/api/agent/sessions").jsonObject()
+                val sessionId = created.sessionId()
+                assertEquals(
+                    listOf("long_term"),
+                    client.get("/api/agent/sessions/$sessionId/memory")
+                        .jsonObject()["selected_layers"]!!.jsonArray
+                        .map { it.jsonPrimitive.content },
+                )
+                val emptyProjection = client.get("/api/agent/sessions/$sessionId/memory/projection")
+                assertEquals(HttpStatusCode.OK, emptyProjection.status)
+                assertEquals(
+                    listOf("long_term"),
+                    emptyProjection.jsonObject()["selected_layers"]!!.jsonArray
+                        .map { it.jsonPrimitive.content },
+                )
+                assertFalse(emptyProjection.bodyAsText().contains("\"content\""))
+
+                val extracted = client.post("/api/agent/sessions/$sessionId/messages") {
+                    jsonBody("""{"revision":0,"text":"SECRET-SYNTHETIC-STATEMENT"}""")
+                }
+                assertEquals(HttpStatusCode.OK, extracted.status)
+                var state = extracted.jsonObject()
+                val projection = client.get("/api/agent/sessions/$sessionId/memory/projection")
+                assertEquals(HttpStatusCode.OK, projection.status)
+                val projectionBody = projection.bodyAsText()
+                assertTrue(projectionBody.contains("\"short_term\""))
+                assertTrue(projectionBody.contains("\"working\""))
+                assertTrue(projectionBody.contains("\"display_text\""))
+                assertTrue(projectionBody.contains("\"category_display_name\":\"Еда / Продукты\""))
+                assertFalse(projectionBody.contains("\"content\""))
+                assertFalse(projectionBody.contains("\"category_id\""))
+                assertTrue(gateway.requests.first().messages.first().content.contains("Общие инструкции для всех сессий"))
+                val candidate = state["memory_candidates"]!!.jsonArray.single().jsonObject
+                val candidateId = candidate["id"]!!.jsonPrimitive.content
+                assertEquals("pending", candidate["status"]!!.jsonPrimitive.content)
+                assertEquals(
+                    state["messages"]!!.jsonArray.last().jsonObject["id"]!!.jsonPrimitive.content,
+                    candidate["source_message_id"]!!.jsonPrimitive.content,
+                )
+
+                val accepted = client.post(
+                    "/api/agent/sessions/$sessionId/memory-candidates/$candidateId/accept",
+                ) {
+                    jsonBody("""{"revision":${state.revision()}}""")
+                }
+                assertEquals(HttpStatusCode.OK, accepted.status)
+                state = accepted.jsonObject()
+                assertEquals(
+                    "accepted",
+                    state["memory_candidates"]!!.jsonArray.single().jsonObject["status"]!!.jsonPrimitive.content,
+                )
+                val preferencesAfterAccept = client.get("/api/agent/preferences").jsonObject()
+                val decision = preferencesAfterAccept["confirmed_decisions"]!!.jsonArray.single().jsonObject
+                val decisionId = decision["id"]!!.jsonPrimitive.content
+                assertEquals(
+                    candidate["text"]!!.jsonPrimitive.content,
+                    decision["text"]!!.jsonPrimitive.content,
+                )
+
+                val followUp = client.post("/api/agent/sessions/$sessionId/messages") {
+                    jsonBody("""{"revision":${state.revision()},"text":"Уточнение текущего draft"}""")
+                }
+                assertEquals(HttpStatusCode.OK, followUp.status)
+                state = followUp.jsonObject()
+                assertTrue(gateway.requests[1].messages.first().content.contains(candidate["text"]!!.jsonPrimitive.content))
+                assertEquals(
+                    listOf("short_term", "working", "long_term"),
+                    state["memory_trace"]!!.jsonObject["selected_layers"]!!.jsonArray
+                        .map { it.jsonPrimitive.content },
+                )
+
+                val edited = client.put("/api/agent/preferences/decisions/$decisionId") {
+                    jsonBody("""{"text":"Изменённое решение"}""")
+                }
+                assertEquals(HttpStatusCode.OK, edited.status)
+                assertEquals(
+                    "Изменённое решение",
+                    edited.jsonObject()["confirmed_decisions"]!!.jsonArray.single().jsonObject["text"]!!
+                        .jsonPrimitive.content,
+                )
+                val deleted = client.delete("/api/agent/preferences/decisions/$decisionId")
+                assertEquals(HttpStatusCode.OK, deleted.status)
+                assertTrue(deleted.jsonObject()["confirmed_decisions"]!!.jsonArray.isEmpty())
+                assertEquals(
+                    HttpStatusCode.NotFound,
+                    client.get("/api/agent/sessions/$sessionId/memory/report").status,
+                )
+            }
+        } finally {
+            database.deleteIfExists()
+        }
+    }
+
+
+    @Test
+    fun exposesGlobalCategoryCatalogAndArchiveEndpoints() {
+        val database = Files.createTempFile("agent-categories-", ".sqlite")
+        try {
+            testApplication {
+                application { module(agentDependencies = fakeAgentDependencies(database.toString())) }
+
+                val providers = client.get("/api/agent/providers").jsonObject()
+                val activeCategories = providers["categories"]!!.jsonArray
+                assertTrue(activeCategories.any {
+                    it.jsonObject["display_name"]!!.jsonPrimitive.content == "Продукты"
+                })
+                assertTrue(activeCategories.none {
+                    it.jsonObject["display_name"]!!.jsonPrimitive.content == "Еда"
+                })
+                assertTrue(activeCategories.none {
+                    it.jsonObject["display_name"]!!.jsonPrimitive.content == "Между своими счетами"
+                })
+
+                val initialCategories = client.get("/api/agent/categories").jsonObjectArray()
+                val transfer = initialCategories.single {
+                    it.jsonObject["display_name"]!!.jsonPrimitive.content == "Между своими счетами"
+                }
+                assertTrue(transfer.jsonObject["archived"]!!.jsonPrimitive.content.toBoolean())
+
+                val created = client.post("/api/agent/categories") {
+                    jsonBody(
+                        """{"display_name":"Такси и каршеринг","type":"expense","hint":"городские поездки"}""",
+                    )
+                }
+                assertEquals(HttpStatusCode.Created, created.status)
+                val createdCategory = created.jsonObjectArray().single {
+                    it.jsonObject["display_name"]!!.jsonPrimitive.content == "Такси и каршеринг"
+                }
+                val categoryId = createdCategory.jsonObject["id"]!!.jsonPrimitive.content
+
+                val updated = client.put("/api/agent/categories/$categoryId") {
+                    jsonBody("""{"display_name":"Наземный транспорт","hint":"городские поездки"}""")
+                }
+                assertEquals(HttpStatusCode.OK, updated.status)
+                assertTrue(updated.jsonObjectArray().any {
+                    it.jsonObject["display_name"]!!.jsonPrimitive.content == "Наземный транспорт"
+                })
+
+                val archived = client.delete("/api/agent/categories/$categoryId")
+                assertEquals(HttpStatusCode.OK, archived.status)
+                val archivedCategory = archived.jsonObjectArray().single {
+                    it.jsonObject["id"]!!.jsonPrimitive.content == categoryId
+                }
+                assertTrue(archivedCategory.jsonObject["archived"]!!.jsonPrimitive.content.toBoolean())
             }
         } finally {
             database.deleteIfExists()

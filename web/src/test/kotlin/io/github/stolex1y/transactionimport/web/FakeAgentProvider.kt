@@ -64,6 +64,7 @@ class FakeAgentGateway(
                   "amount_minor": 125050,
                   "currency": "RUB",
                   "merchant": "ДЕМО МАРКЕТ",
+                  "description": "Покупка яблок",
                   "category_id": "food.groceries",
                   "card_last4": "1234",
                   "needs_review": false,
@@ -87,6 +88,11 @@ class FakeAgentGateway(
               "unparsed_fragments": []
             }
         """.trimIndent()
+
+        val READY_DRAFT_WITH_MEMORY_CANDIDATE_JSON = READY_DRAFT_JSON.replace(
+            "\"unparsed_fragments\": []",
+            "\"unparsed_fragments\": [],\n  \"memory_candidates\": [{\"text\":\"Исключать переводы между своими счетами\",\"reason\":\"Правило явно подтверждается сообщением пользователя.\"}]",
+        )
 
         val FOLLOW_UP_NOOP_JSON = """
             {

@@ -8,9 +8,9 @@
       "credential_env": "DEEPSEEK_API_KEY",
       "models": [
         {
-          "id": "deepseek-v4-flash",
+          "id": "deepseek-flash",
           "context_window_tokens": 1000000,
-          "display_name": "DeepSeek V4 Flash",
+          "display_name": "DeepSeek V4.1 Flash",
           "reasoning_modes": [
             {
               "id": "disabled",
@@ -46,7 +46,7 @@
         {
           "id": "deepseek-v4-pro",
           "context_window_tokens": 1000000,
-          "display_name": "DeepSeek V4 Pro",
+          "display_name": "DeepSeek V4 Pro 0813",
           "reasoning_modes": [
             {
               "id": "disabled",

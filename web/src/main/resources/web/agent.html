@@ -35,13 +35,47 @@
         </div>
         <button id="delete-session" class="danger-button" type="button" hidden>Удалить выбранную сессию</button>
 
+
         <form id="preferences-form" class="preferences-form">
-            <h2>Общий профиль</h2>
+            <h2>Общие инструкции</h2>
             <label for="global-user-prompt">Инструкции для всех сессий</label>
             <textarea id="global-user-prompt" rows="6" maxlength="8000" placeholder="Например: не выбирай переводы между моими счетами"></textarea>
             <p class="control-note">Инструкции применяются к следующим сообщениям во всех сессиях.</p>
-            <button id="save-preferences" class="secondary-button" type="submit">Сохранить профиль</button>
+            <button id="save-preferences" class="secondary-button" type="submit">Сохранить инструкции</button>
         </form>
+        <section class="category-manager" aria-labelledby="categories-title">
+            <h2 id="categories-title">Категории операций</h2>
+            <p class="control-note">Общий справочник для всех сессий. В операции выбираются только конечные категории.</p>
+            <form id="category-form" class="category-form">
+                <input id="category-edit-id" type="hidden">
+                <label for="category-name">Название <span aria-hidden="true">*</span></label>
+                <input id="category-name" name="display_name" maxlength="120" required>
+                <label for="category-parent">Родительская категория</label>
+                <select id="category-parent" name="parent_id"></select>
+                <label for="category-type">Тип корневой категории</label>
+                <select id="category-type" name="type">
+                    <option value="expense">Расход</option>
+                    <option value="income">Доход</option>
+                </select>
+                <label for="category-hint">Подсказка для модели (необязательно)</label>
+                <textarea id="category-hint" name="hint" rows="2" maxlength="500"></textarea>
+                <div class="category-form-actions">
+                    <button id="save-category" class="secondary-button compact-button" type="submit">Добавить категорию</button>
+                    <button id="cancel-category-edit" class="compact-button" type="button" hidden>Отмена</button>
+                </div>
+            </form>
+            <div id="category-list" class="category-list"></div>
+        </section>
+        <section class="task-invariants" aria-labelledby="task-invariants-title">
+            <h2 id="task-invariants-title">Системные инварианты</h2>
+            <p class="control-note">Эти правила зафиксированы приложением и не редактируются пользовательскими инструкциями.</p>
+            <div id="system-invariant-list" class="invariant-list"></div>
+        </section>
+        <section class="confirmed-decisions" aria-labelledby="decisions-title">
+            <h2 id="decisions-title">Подтверждённые решения</h2>
+            <p class="control-note">Появляются из кандидатов в сообщениях агента после явного подтверждения.</p>
+            <ul id="confirmed-decisions-list" class="confirmed-decisions-list"></ul>
+        </section>
     </aside>
 
     <main class="agent-main">
@@ -79,6 +113,18 @@
                 <p id="session-config-note" class="control-note">Изменения применяются к следующим сообщениям; диалог и черновик сохраняются.</p>
                 <p id="context-strategy-note" class="control-note">Стратегия контекста загружается вместе с сессией.</p>
             </section>
+            <section class="panel receipt-state-panel" aria-labelledby="receipt-state-title">
+                <div class="section-heading">
+                    <div>
+                        <h2 id="receipt-state-title">Состояние выписки</h2>
+                        <p id="receipt-status-detail" class="control-note">Вставьте выписку или уточнение.</p>
+                    </div>
+                </div>
+                <div class="receipt-state-grid">
+                    <div><span class="eyebrow">Статус</span><strong id="receipt-status">Не начато</strong></div>
+                    <div><span class="eyebrow">Выбрано операций</span><strong id="receipt-operation-count">—</strong></div>
+                </div>
+            </section>
 
             <section id="conversation-panel" class="panel conversation-panel" aria-labelledby="conversation-title">
                 <div class="section-heading">
@@ -93,6 +139,15 @@
                         <button id="send-message" type="submit">Отправить</button>
                     </div>
                 </form>
+            </section>
+            <section id="memory-panel" class="panel memory-panel" hidden aria-labelledby="memory-title">
+                <div class="section-heading">
+                    <div>
+                        <h2 id="memory-title">Memory layers</h2>
+                        <p id="memory-request-note" class="control-note"></p>
+                    </div>
+                </div>
+                <div id="memory-layer-list" class="memory-layer-list"></div>
             </section>
             <section id="facts-panel" class="panel facts-panel" hidden aria-labelledby="facts-title">
                 <div class="section-heading">
@@ -142,7 +197,7 @@
                             <button id="table-view" class="view-option" type="button" aria-pressed="true">Таблица</button>
                             <button id="card-view" class="view-option" type="button" aria-pressed="false">Карточки</button>
                         </div>
-                        <button id="build-batch" class="compact-button" type="button">Подготовить импорт</button>
+                        <button id="build-batch" class="compact-button" type="button">Экспортировать</button>
                     </div>
                 </div>
                 <label id="select-all-label" class="select-all-control" hidden>
@@ -150,13 +205,6 @@
                     <span>Выбрать все операции</span>
                 </label>
                 <div id="draft-editor" class="operation-editor"></div>
-                <section id="batch-result" class="batch-result" hidden aria-labelledby="batch-title">
-                    <div class="section-heading">
-                        <h2 id="batch-title">Подготовленные операции</h2>
-                        <button id="download-batch" class="secondary-button compact-button" type="button">Скачать JSON</button>
-                    </div>
-                    <pre id="batch-json" class="metadata"></pre>
-                </section>
             </section>
         </div>
     </main>

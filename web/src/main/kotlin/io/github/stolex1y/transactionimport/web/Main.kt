@@ -1,12 +1,8 @@
 package io.github.stolex1y.transactionimport.web
 
 import io.github.stolex1y.transactionimport.core.SmartExpenseAgent
-import io.github.stolex1y.transactionimport.core.TransactionImportService
-import io.github.stolex1y.transactionimport.d05.DEFAULT_OPENROUTER_MODEL
-import io.github.stolex1y.transactionimport.d05.OpenRouterGateway
 import io.github.stolex1y.transactionimport.persistence.SqliteImportSessionRepository
 import io.github.stolex1y.transactionimport.transport.ConfiguredProviderRegistry
-import io.github.stolex1y.transactionimport.transport.DeepSeekGateway
 import io.github.stolex1y.transactionimport.transport.loadProviderCatalog
 import io.github.stolex1y.transactionimport.transport.loadAgentRuntimeConfig
 import io.ktor.client.HttpClient
@@ -21,8 +17,6 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
 
-private const val API_KEY_ENV = "DEEPSEEK_API_KEY"
-private const val OPENROUTER_MODEL_ENV = "OPENROUTER_MODEL"
 private const val PROVIDER_CONFIG_ENV = "PROVIDER_CONFIG_PATH"
 private const val AGENT_CONFIG_ENV = "AGENT_CONFIG_PATH"
 private const val DATABASE_PATH_ENV = "TRANSACTION_IMPORT_DB"
@@ -48,10 +42,6 @@ fun main() {
     val catalog = loadProviderCatalog(providerConfigPath)
     val runtimeConfig = loadAgentRuntimeConfig(agentConfigPath, catalog)
 
-    val openRouterModel = System.getenv(OPENROUTER_MODEL_ENV)
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() }
-        ?: DEFAULT_OPENROUTER_MODEL
     val port = System.getenv("PORT")
         ?.toIntOrNull()
         ?.takeIf { it in 1..65_535 }
@@ -87,20 +77,6 @@ fun main() {
             runtimeConfig = runtimeConfig,
             configValidator = { catalog.resolve(it) },
         )
-        val deepSeekGateway = System.getenv(API_KEY_ENV)
-            ?.takeIf { it.isNotBlank() }
-            ?.let { DeepSeekGateway(httpClient, it) }
-        val service = deepSeekGateway?.let(::TransactionImportService)
-        val experimentService = deepSeekGateway?.let { gateway ->
-            val openRouterGateway = System.getenv("OPENROUTER_API_KEY")
-                ?.takeIf { it.isNotBlank() }
-                ?.let { OpenRouterGateway(httpClient, it) }
-            ExperimentService(
-                deepSeekGateway = gateway,
-                openRouterGateway = openRouterGateway,
-                openRouterModel = openRouterModel,
-            )
-        }
         val agentDependencies = AgentWebDependencies(
             agent = agent,
             catalog = catalog,
@@ -108,7 +84,7 @@ fun main() {
             availableProviderIds = providerRegistry.availableProviderIds(),
         )
         embeddedServer(Netty, host = "127.0.0.1", port = port) {
-            module(service, experimentService, agentDependencies)
+            module(agentDependencies = agentDependencies)
         }.start(wait = true)
     } finally {
         httpClient.close()

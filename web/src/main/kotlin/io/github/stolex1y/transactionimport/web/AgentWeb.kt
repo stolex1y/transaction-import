@@ -6,9 +6,12 @@ import io.github.stolex1y.transactionimport.core.ProviderCatalog
 import io.github.stolex1y.transactionimport.core.ProviderUnavailableException
 import io.github.stolex1y.transactionimport.core.SmartExpenseAgent
 import io.github.stolex1y.transactionimport.core.StructuredTransaction
-import io.github.stolex1y.transactionimport.core.TRANSACTION_CATEGORIES
+import io.github.stolex1y.transactionimport.core.CategoryCatalog
+import io.github.stolex1y.transactionimport.core.CategoryType
 import io.github.stolex1y.transactionimport.core.TransactionCategory
 import io.github.stolex1y.transactionimport.core.TransactionDirection
+import io.github.stolex1y.transactionimport.core.SYSTEM_TASK_INVARIANTS
+import io.github.stolex1y.transactionimport.core.TaskInvariant
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
 import io.ktor.server.request.receive
@@ -100,9 +103,38 @@ data class DeleteImportSessionRequest(
 data class ForkAgentSessionRequest(
     val revision: Long,
 )
+
+@Serializable
+data class SystemInvariantCatalogResponse(
+    @SerialName("system") val systemInvariants: List<TaskInvariant>,
+)
+
 @Serializable
 data class UpdateUserPreferencesRequest(
     @SerialName("user_prompt") val userPrompt: String,
+)
+@Serializable
+data class AcceptMemoryCandidateRequest(
+    val revision: Long,
+)
+@Serializable
+data class UpdateConfirmedDecisionRequest(
+    val text: String,
+)
+
+@Serializable
+data class CreateCategoryRequest(
+    @SerialName("display_name") val displayName: String,
+    val type: CategoryType? = null,
+    @SerialName("parent_id") val parentId: String? = null,
+    val hint: String = "",
+)
+
+@Serializable
+data class UpdateCategoryRequest(
+    @SerialName("display_name") val displayName: String,
+    @SerialName("parent_id") val parentId: String? = null,
+    val hint: String = "",
 )
 
 internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
@@ -127,10 +159,11 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
                         },
                     )
                 },
-                categories = TRANSACTION_CATEGORIES,
+                categories = CategoryCatalog(runtime.agent.listCategories()).activeLeafCategories(),
             ),
         )
     }
+
 
     get("/api/agent/preferences") {
         call.respond(dependencies.requireAgentRuntime().agent.getPreferences())
@@ -142,6 +175,61 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
             dependencies.requireAgentRuntime().agent.updatePreferences(request.userPrompt),
         )
     }
+    put("/api/agent/preferences/decisions/{decisionId}") {
+        val decisionId = call.parameters["decisionId"].requiredPathParameter("decisionId")
+        val request = call.receive<UpdateConfirmedDecisionRequest>()
+        call.respond(
+            dependencies.requireAgentRuntime().agent.updateConfirmedDecision(decisionId, request.text),
+        )
+    }
+    delete("/api/agent/preferences/decisions/{decisionId}") {
+        val decisionId = call.parameters["decisionId"].requiredPathParameter("decisionId")
+        call.respond(
+            dependencies.requireAgentRuntime().agent.deleteConfirmedDecision(decisionId),
+        )
+    }
+
+    get("/api/agent/categories") {
+        call.respond(dependencies.requireAgentRuntime().agent.listCategories(includeArchived = true))
+    }
+    post("/api/agent/categories") {
+        val runtime = dependencies.requireAgentRuntime()
+        val request = call.receive<CreateCategoryRequest>()
+        call.respond(
+            HttpStatusCode.Created,
+            runtime.agent.createCategory(
+                displayName = request.displayName,
+                type = request.type,
+                parentId = request.parentId,
+                hint = request.hint,
+            ),
+        )
+    }
+    put("/api/agent/categories/{categoryId}") {
+        val runtime = dependencies.requireAgentRuntime()
+        val categoryId = call.parameters["categoryId"].requiredPathParameter("categoryId")
+        val request = call.receive<UpdateCategoryRequest>()
+        call.respond(
+            runtime.agent.updateCategory(
+                id = categoryId,
+                displayName = request.displayName,
+                parentId = request.parentId,
+                hint = request.hint,
+            ),
+        )
+    }
+    delete("/api/agent/categories/{categoryId}") {
+        val runtime = dependencies.requireAgentRuntime()
+        val categoryId = call.parameters["categoryId"].requiredPathParameter("categoryId")
+        call.respond(runtime.agent.archiveCategory(categoryId))
+    }
+
+    get("/api/agent/sessions/{id}/invariants") {
+        call.respond(
+            SystemInvariantCatalogResponse(systemInvariants = SYSTEM_TASK_INVARIANTS),
+        )
+    }
+
 
     get("/api/agent/sessions") {
         call.respond(dependencies.requireAgentRuntime().agent.listSessions())
@@ -172,6 +260,26 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
     get("/api/agent/sessions/{id}") {
         val id = call.parameters["id"].requiredPathParameter("id")
         call.respond(dependencies.requireAgentRuntime().agent.getSession(id))
+    }
+    get("/api/agent/sessions/{id}/memory") {
+        val id = call.parameters["id"].requiredPathParameter("id")
+        call.respond(dependencies.requireAgentRuntime().agent.getMemoryTrace(id))
+    }
+    get("/api/agent/sessions/{id}/memory/projection") {
+        val id = call.parameters["id"].requiredPathParameter("id")
+        call.respond(dependencies.requireAgentRuntime().agent.getMemoryProjection(id))
+    }
+    post("/api/agent/sessions/{id}/memory-candidates/{candidateId}/accept") {
+        val id = call.parameters["id"].requiredPathParameter("id")
+        val candidateId = call.parameters["candidateId"].requiredPathParameter("candidateId")
+        val request = call.receive<AcceptMemoryCandidateRequest>()
+        call.respond(
+            dependencies.requireAgentRuntime().agent.acceptMemoryCandidate(
+                sessionId = id,
+                expectedRevision = request.revision,
+                candidateId = candidateId,
+            ),
+        )
     }
 
     put("/api/agent/sessions/{id}/config") {

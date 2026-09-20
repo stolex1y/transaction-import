@@ -11,10 +11,24 @@ const elements = {
     preferencesForm: document.querySelector("#preferences-form"),
     globalUserPrompt: document.querySelector("#global-user-prompt"),
     savePreferences: document.querySelector("#save-preferences"),
+    confirmedDecisionsList: document.querySelector("#confirmed-decisions-list"),
+    categoryForm: document.querySelector("#category-form"),
+    categoryEditId: document.querySelector("#category-edit-id"),
+    categoryName: document.querySelector("#category-name"),
+    categoryParent: document.querySelector("#category-parent"),
+    categoryType: document.querySelector("#category-type"),
+    categoryHint: document.querySelector("#category-hint"),
+    saveCategory: document.querySelector("#save-category"),
+    cancelCategoryEdit: document.querySelector("#cancel-category-edit"),
+    categoryList: document.querySelector("#category-list"),
     themeToggle: document.querySelector("#theme-toggle"),
     toolbarTitle: document.querySelector("#toolbar-session-title"),
     emptySession: document.querySelector("#empty-session"),
     workspace: document.querySelector("#agent-workspace"),
+    receiptStatus: document.querySelector("#receipt-status"),
+    receiptStatusDetail: document.querySelector("#receipt-status-detail"),
+    receiptOperationCount: document.querySelector("#receipt-operation-count"),
+    systemInvariantList: document.querySelector("#system-invariant-list"),
     activeTitle: document.querySelector("#active-session-title"),
     provider: document.querySelector("#agent-provider"),
     model: document.querySelector("#agent-model"),
@@ -24,6 +38,9 @@ const elements = {
     forkSession: document.querySelector("#fork-session"),
     factsPanel: document.querySelector("#facts-panel"),
     factsList: document.querySelector("#facts-list"),
+    memoryPanel: document.querySelector("#memory-panel"),
+    memoryRequestNote: document.querySelector("#memory-request-note"),
+    memoryLayerList: document.querySelector("#memory-layer-list"),
     deleteSession: document.querySelector("#delete-session"),
     messageList: document.querySelector("#message-list"),
     messageForm: document.querySelector("#message-form"),
@@ -41,20 +58,21 @@ const elements = {
     cardView: document.querySelector("#card-view"),
     draftEditor: document.querySelector("#draft-editor"),
     buildBatch: document.querySelector("#build-batch"),
-    batchResult: document.querySelector("#batch-result"),
-    batchJson: document.querySelector("#batch-json"),
-    downloadBatch: document.querySelector("#download-batch"),
     status: document.querySelector("#agent-status"),
 };
-
+let taskInvariantCatalog = { system: [] };
+const THEME_KEY = "smart-expense-theme";
 const ACTIVE_SESSION_KEY = "smart-expense-active-session";
 const VIEW_KEY = "smart-expense-operation-view";
-const MOBILE_VIEW = window.matchMedia("(max-width: 767px)");
-const THEME_KEY = "smart-expense-theme";
+const MOBILE_VIEW = window.matchMedia("(max-width: 760px)");
 let catalog = { providers: [], categories: [] };
+let categoryCatalog = [];
 let sessions = [];
 let activeState = null;
-let batchPayload = null;
+let memoryProjection = null;
+let memoryProjectionRequest = 0;
+let expandedMemoryLayer = null;
+let editingCategoryId = "";
 let busy = false;
 let preferredView = localStorage.getItem(VIEW_KEY) === "cards" ? "cards" : "table";
 let workingDraft = new Map();
@@ -80,6 +98,10 @@ for (const button of [elements.newSession, elements.drawerNewSession, elements.e
     button.addEventListener("click", createSession);
 }
 elements.preferencesForm.addEventListener("submit", savePreferences);
+elements.categoryForm.addEventListener("submit", saveCategoryForm);
+elements.cancelCategoryEdit.addEventListener("click", resetCategoryForm);
+elements.categoryParent.addEventListener("change", syncCategoryTypeControl);
+elements.categoryList.addEventListener("click", handleCategoryListClick);
 elements.provider.addEventListener("change", () => {
     syncModels();
     saveSessionConfig();
@@ -93,8 +115,7 @@ elements.deleteSession.addEventListener("click", deleteSession);
 elements.forkSession.addEventListener("click", forkActiveSession);
 elements.messageForm.addEventListener("submit", sendMessage);
 elements.selectAll.addEventListener("change", setAllIncluded);
-elements.buildBatch.addEventListener("click", buildBatch);
-elements.downloadBatch.addEventListener("click", downloadBatch);
+elements.buildBatch.addEventListener("click", exportBatch);
 elements.tableView.addEventListener("click", () => selectOperationView("table"));
 elements.cardView.addEventListener("click", () => selectOperationView("cards"));
 MOBILE_VIEW.addEventListener("change", renderDraft);
@@ -109,14 +130,17 @@ initialize();
 async function initialize() {
     setBusy(true);
     try {
-        const [providerCatalog, preferences, storedSessions] = await Promise.all([
+        const [providerCatalog, preferences, storedSessions, storedCategories] = await Promise.all([
             api("/api/agent/providers"),
             api("/api/agent/preferences"),
             api("/api/agent/sessions"),
+            api("/api/agent/categories"),
         ]);
         catalog = providerCatalog;
+        categoryCatalog = storedCategories;
         sessions = storedSessions;
-        elements.globalUserPrompt.value = preferences.user_prompt;
+        renderPreferences(preferences);
+        renderCategoryManager();
         renderSessionList();
         const remembered = localStorage.getItem(ACTIVE_SESSION_KEY);
         const initial = sessions.find((session) => session.id === remembered) || sessions[0];
@@ -204,6 +228,506 @@ async function loadSessions() {
     renderSessionList();
 }
 
+function renderPreferences(preferences) {
+    elements.globalUserPrompt.value = preferences.user_prompt || "";
+    elements.confirmedDecisionsList.replaceChildren();
+    const decisions = preferences.confirmed_decisions || [];
+    if (decisions.length === 0) {
+        const empty = document.createElement("li");
+        empty.className = "muted";
+        empty.textContent = "Подтверждённых решений пока нет.";
+        elements.confirmedDecisionsList.append(empty);
+        return;
+    }
+    for (const decision of decisions) {
+        const item = document.createElement("li");
+        item.className = "confirmed-decision-item";
+        const input = document.createElement("input");
+        input.className = "decision-editor";
+        input.type = "text";
+        input.maxLength = 500;
+        input.value = decision.text;
+        input.setAttribute("aria-label", "Текст подтверждённого решения");
+        const date = document.createElement("small");
+        date.textContent = `сохранено ${formatDate(decision.created_at_epoch_ms)}`;
+        const actions = document.createElement("div");
+        actions.className = "confirmed-decision-actions";
+        const save = document.createElement("button");
+        save.type = "button";
+        save.className = "secondary-button compact-button";
+        save.textContent = "Сохранить";
+        save.addEventListener("click", () => saveConfirmedDecision(decision.id, input));
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "danger-button compact-button";
+        remove.textContent = "Удалить";
+        remove.addEventListener("click", () => deleteConfirmedDecision(decision.id));
+        actions.append(save, remove);
+        item.append(input, date, actions);
+        elements.confirmedDecisionsList.append(item);
+    }
+}
+
+function renderCategoryManager() {
+    const selectedParent = elements.categoryParent.value;
+    elements.categoryParent.replaceChildren();
+    const root = document.createElement("option");
+    root.value = "";
+    root.textContent = "Корневая категория";
+    elements.categoryParent.append(root);
+    for (const category of categoryCatalog.filter((item) => !item.archived)) {
+        if (category.id === editingCategoryId || categoryIsDescendant(category.id, editingCategoryId)) {
+            continue;
+        }
+        const option = document.createElement("option");
+        option.value = category.id;
+        option.textContent = categoryDisplayPath(category.id);
+        elements.categoryParent.append(option);
+    }
+    if ([...elements.categoryParent.options].some((option) => option.value === selectedParent)) {
+        elements.categoryParent.value = selectedParent;
+    }
+    syncCategoryTypeControl();
+
+    elements.categoryList.replaceChildren();
+    if (categoryCatalog.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "Категорий пока нет.";
+        elements.categoryList.append(empty);
+        return;
+    }
+    const sorted = [...categoryCatalog].sort((left, right) =>
+        Number(left.archived) - Number(right.archived) ||
+        categoryDisplayPath(left.id).localeCompare(categoryDisplayPath(right.id), "ru"),
+    );
+    for (const category of sorted) {
+        const item = document.createElement("article");
+        item.className = "category-item";
+        if (category.archived) item.classList.add("archived");
+        const title = document.createElement("strong");
+        title.textContent = categoryDisplayPath(category.id);
+        const meta = document.createElement("small");
+        meta.textContent = `${categoryTypeLabel(category.type)}${category.archived ? " · Архивная" : ""}`;
+        const actions = document.createElement("div");
+        actions.className = "category-actions";
+        if (!category.archived) {
+            const edit = document.createElement("button");
+            edit.type = "button";
+            edit.className = "secondary-button compact-button";
+            edit.dataset.action = "edit-category";
+            edit.dataset.categoryId = category.id;
+            edit.textContent = "Изменить";
+            const archive = document.createElement("button");
+            archive.type = "button";
+            archive.className = "danger-button compact-button";
+            archive.dataset.action = "archive-category";
+            archive.dataset.categoryId = category.id;
+            archive.textContent = "Архивировать";
+            actions.append(edit, archive);
+        }
+        item.append(title, meta, actions);
+        elements.categoryList.append(item);
+    }
+}
+
+function invariantTypeLabel(type) {
+    return {
+        no_ledger_write: "Без записи в ledger",
+        mask_explicit_phones: "Маскировать телефоны",
+        strict_json: "Строгий JSON",
+        known_categories: "Известные категории",
+        no_silent_ambiguity: "Не исправлять неоднозначность молча",
+    }[type] || type;
+}
+
+function renderTaskInvariants() {
+    elements.systemInvariantList.replaceChildren();
+    const invariants = taskInvariantCatalog.system || [];
+    if (invariants.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "Системные инварианты загружаются вместе с сессией.";
+        elements.systemInvariantList.append(empty);
+        return;
+    }
+    for (const invariant of invariants) {
+        elements.systemInvariantList.append(invariantListItem(invariant));
+    }
+}
+
+function invariantListItem(invariant) {
+    const item = document.createElement("article");
+    item.className = "category-item";
+    const title = document.createElement("strong");
+    title.textContent = invariant.title;
+    const meta = document.createElement("small");
+    meta.textContent = `${invariantTypeLabel(invariant.type)}: ${invariant.value}`;
+    const explanation = document.createElement("p");
+    explanation.className = "control-note";
+    explanation.textContent = invariant.explanation;
+    item.append(title, meta, explanation);
+    return item;
+}
+
+async function refreshTaskInvariants() {
+    if (!activeState) {
+        taskInvariantCatalog = { system: [] };
+        renderTaskInvariants();
+        return;
+    }
+    taskInvariantCatalog = await api(
+        `/api/agent/sessions/${encodeURIComponent(activeState.session.id)}/invariants`,
+    );
+    renderTaskInvariants();
+}
+function handleCategoryListClick(event) {
+    const button = event.target.closest("button[data-action]");
+    if (!button) return;
+    const category = categoryCatalog.find((item) => item.id === button.dataset.categoryId);
+    if (!category) return;
+    if (button.dataset.action === "edit-category") {
+        editingCategoryId = category.id;
+        elements.categoryEditId.value = category.id;
+        elements.categoryName.value = category.display_name;
+        elements.categoryParent.value = category.parent_id || "";
+        elements.categoryHint.value = category.hint || "";
+        elements.saveCategory.textContent = "Сохранить категорию";
+        elements.cancelCategoryEdit.hidden = false;
+        renderCategoryManager();
+        elements.categoryName.focus();
+    } else if (button.dataset.action === "archive-category") {
+        archiveCategory(category);
+    }
+}
+
+function resetCategoryForm() {
+    editingCategoryId = "";
+    elements.categoryEditId.value = "";
+    elements.categoryName.value = "";
+    elements.categoryParent.value = "";
+    elements.categoryType.value = "expense";
+    elements.categoryHint.value = "";
+    elements.saveCategory.textContent = "Добавить категорию";
+    elements.cancelCategoryEdit.hidden = true;
+    renderCategoryManager();
+}
+
+function syncCategoryTypeControl() {
+    const parent = categoryCatalog.find((item) => item.id === elements.categoryParent.value);
+    if (parent) {
+        elements.categoryType.value = parent.type;
+        elements.categoryType.disabled = true;
+        elements.categoryType.previousElementSibling.textContent = "Тип (унаследован)";
+    } else {
+        elements.categoryType.disabled = false;
+        elements.categoryType.previousElementSibling.textContent = "Тип корневой категории";
+    }
+}
+
+async function saveCategoryForm(event) {
+    event.preventDefault();
+    const id = editingCategoryId;
+    const parentId = elements.categoryParent.value || null;
+    const body = {
+        display_name: elements.categoryName.value,
+        parent_id: parentId,
+        hint: elements.categoryHint.value,
+    };
+    if (!id) body.type = parentId ? null : elements.categoryType.value;
+    await runBusy(async () => {
+        const url = id
+            ? `/api/agent/categories/${encodeURIComponent(id)}`
+            : "/api/agent/categories";
+        categoryCatalog = await api(url, jsonOptions(id ? "PUT" : "POST", body));
+        resetCategoryForm();
+        await reloadCategoryCatalog();
+        showSuccess(id ? "Категория обновлена." : "Категория создана.");
+    });
+}
+
+async function archiveCategory(category) {
+    if (!window.confirm(`Архивировать категорию «${category.display_name}»? Старые операции сохранят ссылку на неё.`)) {
+        return;
+    }
+    await runBusy(async () => {
+        categoryCatalog = await api(
+            `/api/agent/categories/${encodeURIComponent(category.id)}`,
+            { method: "DELETE" },
+        );
+        await reloadCategoryCatalog();
+        showSuccess("Категория архивирована.");
+    });
+}
+
+async function reloadCategoryCatalog() {
+    const [providerCatalog, storedCategories] = await Promise.all([
+        api("/api/agent/providers"),
+        api("/api/agent/categories"),
+    ]);
+    catalog = providerCatalog;
+    categoryCatalog = storedCategories;
+    renderCategoryManager();
+    if (activeState) {
+        renderDraft();
+        renderMemoryTrace();
+        memoryProjection = null;
+        memoryProjectionRequest += 1;
+        await refreshMemoryProjection();
+    }
+}
+
+function categoryDisplayPath(id) {
+    const byId = new Map(categoryCatalog.map((category) => [category.id, category]));
+    const names = [];
+    const visited = new Set();
+    let current = byId.get(id);
+    while (current && !visited.has(current.id)) {
+        names.push(current.display_name);
+        visited.add(current.id);
+        current = current.parent_id ? byId.get(current.parent_id) : null;
+    }
+    return names.reverse().join(" / ") || "Категория без названия";
+}
+
+function categoryIsDescendant(categoryId, ancestorId) {
+    if (!ancestorId) return false;
+    const byId = new Map(categoryCatalog.map((category) => [category.id, category]));
+    let current = byId.get(categoryId);
+    const visited = new Set();
+    while (current?.parent_id && !visited.has(current.id)) {
+        if (current.parent_id === ancestorId) return true;
+        visited.add(current.id);
+        current = byId.get(current.parent_id);
+    }
+    return false;
+}
+
+function categoryIsLeaf(categoryId) {
+    return !categoryCatalog.some(
+        (category) => !category.archived && category.parent_id === categoryId,
+    );
+}
+
+function categoryTypeLabel(type) {
+    return type === "income" ? "Доход" : "Расход";
+}
+
+
+function renderMemoryCandidate(candidate) {
+    const item = document.createElement("section");
+    item.className = "memory-candidate";
+    const title = document.createElement("strong");
+    title.textContent = "Кандидат решения";
+    const text = document.createElement("p");
+    text.textContent = candidate.text;
+    const reason = document.createElement("small");
+    reason.textContent = `Почему: ${candidate.reason}`;
+    item.append(title, text, reason);
+    if (candidate.status === "accepted") {
+        const accepted = document.createElement("small");
+        accepted.className = "candidate-status";
+        accepted.textContent = "Добавлено в подтверждённые решения.";
+        item.append(accepted);
+    } else {
+        const accept = document.createElement("button");
+        accept.type = "button";
+        accept.className = "secondary-button compact-button";
+        accept.textContent = "Добавить в подтверждённые решения";
+        accept.addEventListener("click", () => acceptMemoryCandidate(candidate.id));
+        item.append(accept);
+    }
+    return item;
+}
+
+
+function renderMemoryTrace() {
+    const trace = activeState?.memory_trace;
+    const projection = memoryProjection;
+    const selectedLayers = projection?.selected_layers || trace?.selected_layers || [];
+    elements.memoryPanel.hidden = !activeState || (!trace && !projection);
+    elements.memoryLayerList.replaceChildren();
+    if (elements.memoryPanel.hidden) {
+        elements.memoryRequestNote.textContent = "";
+        return;
+    }
+    elements.memoryRequestNote.textContent = selectedLayers.length > 0
+        ? `В следующий запрос войдут: ${selectedLayers.map(memoryLayerLabel).join(", ")}. ` +
+          "Предпросмотр рассчитан без дополнительного вызова модели."
+        : "Для следующего запроса слои памяти ещё не определены.";
+    const traceByLayer = new Map((trace?.layers || []).map((layer) => [layer.layer, layer]));
+    for (const layer of selectedLayers) {
+        const item = document.createElement("article");
+        item.className = "memory-layer";
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "memory-layer-toggle";
+        toggle.setAttribute("aria-expanded", String(expandedMemoryLayer === layer));
+        const heading = document.createElement("span");
+        heading.className = "memory-layer-heading";
+        const title = document.createElement("strong");
+        title.textContent = memoryLayerLabel(layer);
+        const summary = document.createElement("span");
+        summary.className = "memory-layer-summary";
+        summary.textContent = memoryLayerSummary(layer, projection, traceByLayer.get(layer));
+        heading.append(title, summary);
+        const affordance = document.createElement("span");
+        affordance.className = "memory-layer-affordance";
+        affordance.textContent = expandedMemoryLayer === layer ? "Скрыть" : "Подробнее";
+        toggle.append(heading, affordance);
+        toggle.addEventListener("click", () => {
+            expandedMemoryLayer = expandedMemoryLayer === layer ? null : layer;
+            renderMemoryTrace();
+        });
+        item.append(toggle);
+        if (expandedMemoryLayer === layer) {
+            item.append(renderMemoryLayerDetail(layer, projection));
+        }
+        elements.memoryLayerList.append(item);
+    }
+}
+
+async function refreshMemoryProjection() {
+    const sessionId = activeState?.session.id;
+    if (!sessionId) return;
+    const requestId = ++memoryProjectionRequest;
+    try {
+        const projection = await api(
+            `/api/agent/sessions/${encodeURIComponent(sessionId)}/memory/projection`,
+        );
+        if (
+            requestId !== memoryProjectionRequest ||
+            !activeState ||
+            activeState.session.id !== sessionId
+        ) return;
+        memoryProjection = projection;
+        renderMemoryTrace();
+    } catch (_) {
+        if (requestId === memoryProjectionRequest && activeState?.session.id === sessionId) {
+            elements.memoryRequestNote.textContent =
+                "Предпросмотр слоёв временно недоступен.";
+        }
+    }
+}
+
+function memoryLayerSummary(layer, projection, trace) {
+    if (!projection) {
+        return trace ? `Доступны: ${(trace.labels || []).join(", ")}` : "Подробности загружаются";
+    }
+    if (layer === "short_term") {
+        const shortTerm = projection.short_term;
+        return `${shortTerm?.messages?.length || 0} сообщений` +
+            (shortTerm?.summary ? " · есть сжатый контекст" : "");
+    }
+    if (layer === "working") {
+        return `${projection.working?.transactions?.length || 0} операций черновика`;
+    }
+    const longTerm = projection.long_term || {};
+    return `${longTerm.confirmed_decisions?.length || 0} подтверждённых решений` +
+        (longTerm.user_prompt ? " · есть общие инструкции" : "");
+}
+
+function renderMemoryLayerDetail(layer, projection) {
+    const detail = document.createElement("div");
+    detail.className = "memory-layer-detail";
+    if (!projection) {
+        detail.textContent = "Детали загружаются.";
+        return detail;
+    }
+    if (layer === "short_term") {
+        const shortTerm = projection.short_term || {};
+        appendMemoryText(detail, "Сжатый контекст", shortTerm.summary);
+        if ((shortTerm.messages || []).length > 0) {
+            const title = document.createElement("strong");
+            title.textContent = "Сообщения";
+            detail.append(title);
+            const list = document.createElement("ul");
+            list.className = "memory-detail-list";
+            for (const message of shortTerm.messages) {
+                const item = document.createElement("li");
+                const role = document.createElement("strong");
+                role.textContent = message.role === "user" ? "Вы: " : "Агент: ";
+                item.append(role, document.createTextNode(message.display_text));
+                list.append(item);
+            }
+            detail.append(list);
+        }
+        if ((shortTerm.facts || []).length > 0) {
+            const title = document.createElement("strong");
+            title.textContent = "Явные факты";
+            detail.append(title);
+            const list = document.createElement("ul");
+            list.className = "memory-detail-list";
+            for (const fact of shortTerm.facts) {
+                const item = document.createElement("li");
+                item.textContent = `${fact.key}: ${fact.value}`;
+                list.append(item);
+            }
+            detail.append(list);
+        }
+        return detail;
+    }
+    if (layer === "working") {
+        const working = projection.working || {};
+        appendMemoryText(
+            detail,
+            "Черновик",
+            working.status === "ready"
+                ? `готов, операций: ${(working.transactions || []).length}`
+                : working.rejection_reason || "требует уточнения",
+        );
+        appendMemoryText(detail, "Не разобрано", (working.unparsed_fragments || []).join(" · "));
+        for (const transaction of working.transactions || []) {
+            const item = document.createElement("p");
+            item.className = "memory-transaction";
+            const category = transaction.category_display_name
+                ? ` · ${transaction.category_display_name}`
+                : "";
+            item.textContent =
+                `${transaction.id}: ${transaction.merchant} · ` +
+                `${minorToMajor(transaction.amount_minor, transaction.currency)} ${transaction.currency}${category}`;
+            detail.append(item);
+            for (const issue of transaction.issues || []) {
+                detail.append(errorText(issue));
+            }
+        }
+        return detail;
+    }
+    const longTerm = projection.long_term || {};
+    appendMemoryText(detail, "Общие инструкции", longTerm.user_prompt);
+    if ((longTerm.confirmed_decisions || []).length > 0) {
+        const title = document.createElement("strong");
+        title.textContent = "Подтверждённые решения";
+        detail.append(title);
+        const list = document.createElement("ul");
+        list.className = "memory-detail-list";
+        for (const decision of longTerm.confirmed_decisions) {
+            const item = document.createElement("li");
+            item.textContent = decision.text;
+            list.append(item);
+        }
+        detail.append(list);
+    }
+    return detail;
+}
+
+function appendMemoryText(parent, label, value) {
+    if (!value) return;
+    const paragraph = document.createElement("p");
+    const title = document.createElement("strong");
+    title.textContent = `${label}: `;
+    paragraph.append(title, document.createTextNode(value));
+    parent.append(paragraph);
+}
+
+function memoryLayerLabel(layer) {
+    return {
+        short_term: "short-term",
+        working: "working",
+        long_term: "long-term",
+    }[layer] || layer;
+}
+
 function renderSessionList() {
     elements.sessionList.replaceChildren();
     if (sessions.length === 0) {
@@ -258,7 +782,10 @@ function setActiveState(
     const previousWorking = workingDraft;
     const previousDirty = dirtyFields;
     activeState = state;
-    batchPayload = null;
+    memoryProjection = null;
+    expandedMemoryLayer = null;
+    memoryProjectionRequest += 1;
+    workingDraft = new Map();
     workingDraft = new Map();
     dirtyFields = new Map();
     for (const row of state.draft?.transactions || []) {
@@ -312,6 +839,9 @@ function hasDirtyDraft() {
 
 function renderEmptyState() {
     activeState = null;
+    memoryProjection = null;
+    expandedMemoryLayer = null;
+    memoryProjectionRequest += 1;
     workingDraft = new Map();
     dirtyFields = new Map();
     localStorage.removeItem(ACTIVE_SESSION_KEY);
@@ -320,11 +850,17 @@ function renderEmptyState() {
     elements.deleteSession.hidden = true;
     elements.forkSession.hidden = true;
     elements.factsPanel.hidden = true;
+    elements.memoryPanel.hidden = true;
+    elements.memoryLayerList.replaceChildren();
+    elements.memoryRequestNote.textContent = "";
     elements.factsList.replaceChildren();
     elements.draftPanel.hidden = true;
     elements.metricsPanel.hidden = true;
     elements.metricsSummary.replaceChildren();
     elements.metricsTableBody.replaceChildren();
+    taskInvariantCatalog = { system: [] };
+    renderTaskInvariants();
+    renderReceiptStatus();
 }
 
 function renderActiveState() {
@@ -332,14 +868,73 @@ function renderActiveState() {
     elements.workspace.hidden = false;
     elements.deleteSession.hidden = false;
     elements.activeTitle.textContent = activeState.session.title;
+    renderReceiptStatus();
+    renderTaskInvariants();
+    refreshTaskInvariants().catch((error) => showError(error.message));
     elements.toolbarTitle.textContent = activeState.session.title;
     populateConfigControls(activeState.session.config);
     renderContextManagement();
     renderMessages();
+
     renderFacts();
+    renderMemoryTrace();
+    refreshMemoryProjection();
     renderMetrics();
     renderDraft();
 }
+function renderReceiptStatus() {
+    const draft = activeState?.draft;
+    const compliance = activeState?.receipt_state?.last_compliance;
+    const complianceMessage = compliance?.status === "conflict"
+        ? (compliance.conflicts || [])
+            .map((conflict) => `${conflict.title}: ${conflict.explanation}`)
+            .join(" · ")
+        : "";
+    if (!draft) {
+        if (activeState?.receipt_state?.status === "has_errors") {
+            elements.receiptStatus.textContent = "Содержит ошибки";
+            elements.receiptStatusDetail.textContent =
+                complianceMessage || "Исправьте блокирующий результат обработки.";
+        } else {
+            elements.receiptStatus.textContent = "Не начато";
+            elements.receiptStatusDetail.textContent = "Вставьте выписку или уточнение.";
+        }
+        elements.receiptOperationCount.textContent = "—";
+        return;
+    }
+
+    const { included, invalid } = draftMetrics(draft);
+    elements.receiptOperationCount.textContent = String(included);
+    const blockers = [];
+    if (draft.status !== "ready") {
+        blockers.push(draft.rejection_reason || "Выписка не распознана как финансовые операции.");
+    }
+    if ((draft.unparsed_fragments || []).length > 0) {
+        blockers.push(`Неразобранных фрагментов: ${draft.unparsed_fragments.length}.`);
+    }
+    if (invalid > 0) {
+        blockers.push(`Исправьте ошибки в ${invalid} ${operationWord(invalid)}.`);
+    }
+    if (included === 0) {
+        blockers.push("Выберите хотя бы одну операцию.");
+    }
+    if (hasDirtyDraft()) {
+        blockers.push("Сохраните изменения в операциях.");
+    }
+    if (complianceMessage) {
+        blockers.push(complianceMessage);
+    }
+    if (blockers.length > 0) {
+        elements.receiptStatus.textContent = "Содержит ошибки";
+        elements.receiptStatusDetail.textContent = blockers.join(" ");
+        return;
+    }
+
+    elements.receiptStatus.textContent = "Готово к экспорту";
+    elements.receiptStatusDetail.textContent =
+        `Выбрано операций: ${included}. Выписка прошла локальную проверку.`;
+}
+
 
 function renderContextManagement() {
     const context = activeState.session.context_management;
@@ -519,8 +1114,52 @@ async function savePreferences(event) {
             "/api/agent/preferences",
             jsonOptions("PUT", { user_prompt: elements.globalUserPrompt.value }),
         );
-        elements.globalUserPrompt.value = preferences.user_prompt;
-        showSuccess("Общий профиль сохранён.");
+        renderPreferences(preferences);
+        showSuccess("Общие инструкции сохранены.");
+    });
+}
+
+async function acceptMemoryCandidate(candidateId) {
+    if (!activeState) return;
+    await runBusy(async () => {
+        const state = await api(
+            `/api/agent/sessions/${encodeURIComponent(activeState.session.id)}` +
+                `/memory-candidates/${encodeURIComponent(candidateId)}/accept`,
+            jsonOptions("POST", { revision: activeState.session.revision }),
+        );
+        setActiveState(state);
+        await loadSessions();
+        renderPreferences(await api("/api/agent/preferences"));
+        showSuccess("Кандидат добавлен в подтверждённые решения.");
+    }, true);
+}
+
+async function saveConfirmedDecision(decisionId, input) {
+    const text = input.value.trim();
+    if (!text) {
+        showError("Текст подтверждённого решения не должен быть пустым.");
+        input.focus();
+        return;
+    }
+    await runBusy(async () => {
+        const preferences = await api(
+            `/api/agent/preferences/decisions/${encodeURIComponent(decisionId)}`,
+            jsonOptions("PUT", { text }),
+        );
+        renderPreferences(preferences);
+        showSuccess("Подтверждённое решение обновлено.");
+    });
+}
+
+async function deleteConfirmedDecision(decisionId) {
+    if (!window.confirm("Удалить подтверждённое решение? Это действие нельзя отменить.")) return;
+    await runBusy(async () => {
+        const preferences = await api(
+            `/api/agent/preferences/decisions/${encodeURIComponent(decisionId)}`,
+            { method: "DELETE" },
+        );
+        renderPreferences(preferences);
+        showSuccess("Подтверждённое решение удалено.");
     });
 }
 
@@ -583,7 +1222,23 @@ function renderMessages() {
         role.textContent = message.role === "user" ? "Вы" : "Агент";
         const content = document.createElement("p");
         content.textContent = message.display_text;
-        item.append(role, content);
+        const copyActions = document.createElement("div");
+        copyActions.className = "message-copy-actions";
+        const copy = document.createElement("button");
+        copy.type = "button";
+        copy.className = "secondary-button compact-button";
+        copy.textContent = "Копировать";
+        copy.setAttribute("aria-label", `Копировать сообщение: ${message.role === "user" ? "пользователя" : "агента"}`);
+        copy.addEventListener("click", () => copyMessage(message.display_text));
+        item.append(role, content, copyActions);
+        copyActions.append(copy);
+        if (message.role === "assistant") {
+            const candidates = (activeState.memory_candidates || [])
+                .filter((candidate) => candidate.source_message_id === message.id);
+            for (const candidate of candidates) {
+                item.append(renderMemoryCandidate(candidate));
+            }
+        }
         elements.messageList.append(item);
     }
     if (activeState.summary) {
@@ -601,9 +1256,22 @@ function renderMessages() {
             `Сжато сообщений истории: ${activeState.summary.summarized_message_count}; ` +
             `вызовов сжатия в сессии: ${summaryCalls}`;
         item.append(role, content, boundary);
+
         elements.messageList.append(item);
     }
     elements.messageList.scrollTop = elements.messageList.scrollHeight;
+}
+
+async function copyMessage(text) {
+    try {
+        if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+            throw new Error("Clipboard API недоступен.");
+        }
+        await navigator.clipboard.writeText(text);
+        showSuccess("Сообщение скопировано.");
+    } catch (_) {
+        showError("Не удалось скопировать сообщение. Разрешите доступ к буферу обмена в браузере.");
+    }
 }
 
 function renderMetrics() {
@@ -759,8 +1427,6 @@ function updateWorkingDraft(event) {
     const fields = dirtyFields.get(holder.dataset.transactionId) || new Set();
     fields.add(control.name);
     dirtyFields.set(holder.dataset.transactionId, fields);
-    elements.batchResult.hidden = true;
-    batchPayload = null;
     if (control.name === "included") {
         renderDraft();
     } else {
@@ -788,14 +1454,13 @@ function updateDraftSummary(draft) {
     }
     if (hasDirtyDraft()) parts.push("Есть несохранённые изменения.");
     elements.draftStatus.textContent = parts.join(" ");
+    renderReceiptStatus();
     elements.buildBatch.disabled = busy || included === 0 || invalid > 0 || hasDirtyDraft();
     elements.selectAll.checked = included === draft.transactions.length && draft.transactions.length > 0;
     elements.selectAll.indeterminate = included > 0 && included < draft.transactions.length;
 }
 
 function renderDraft() {
-    elements.batchResult.hidden = true;
-    batchPayload = null;
     const draft = activeState?.draft;
     elements.draftPanel.hidden = !draft;
     elements.draftEditor.replaceChildren();
@@ -825,6 +1490,7 @@ function renderDraft() {
             elements.draftEditor.append(createOperationCard(row));
         }
     }
+    setBusy(busy);
 }
 
 function createOperationCard(row) {
@@ -859,7 +1525,7 @@ function createOperationCard(row) {
         fieldControl("Валюта", readOnlyInput("currency", editor.currency), row, "currency", editor.included),
         fieldControl("Магазин или получатель", textInput("merchant", editor.merchant), row, "merchant", editor.included),
         fieldControl("Описание", textInput("description", editor.description, 500), row, "description", editor.included),
-        fieldControl("Категория", categorySelect(editor.category_id), row, "category_id", editor.included),
+        fieldControl("Категория", categorySelect(editor.category_id, editor.direction), row, "category_id", editor.included),
         fieldControl("Последние 4 цифры карты (необязательно)", textInput("card_last4", editor.card_last4, 4), row, "card_last4", editor.included),
     );
 
@@ -920,7 +1586,7 @@ function createOperationTableRow(row) {
         tableFieldCell("Валюта", readOnlyInput("currency", editor.currency), row, "currency", editor.included),
         tableFieldCell("Магазин или получатель", textInput("merchant", editor.merchant), row, "merchant", editor.included),
         tableFieldCell("Описание", textInput("description", editor.description, 500), row, "description", editor.included),
-        tableFieldCell("Категория", categorySelect(editor.category_id), row, "category_id", editor.included),
+        tableFieldCell("Категория", categorySelect(editor.category_id, editor.direction), row, "category_id", editor.included),
         tableFieldCell("Последние 4 цифры карты", textInput("card_last4", editor.card_last4, 4), row, "card_last4", editor.included),
     );
     const action = document.createElement("div");
@@ -1026,18 +1692,33 @@ function directionSelect(selected) {
     return select;
 }
 
-function categorySelect(selected) {
+function categorySelect(selected, direction) {
     const select = document.createElement("select");
     select.name = "category_id";
     const empty = document.createElement("option");
     empty.value = "";
     empty.textContent = "Не выбрана";
     select.append(empty);
-    for (const category of catalog.categories) {
+    const eligible = categoryCatalog.filter(
+        (category) => !category.archived &&
+            categoryIsLeaf(category.id) &&
+            category.type === direction,
+    );
+    for (const category of eligible) {
         const option = document.createElement("option");
         option.value = category.id;
-        option.textContent = category.display_name;
+        option.textContent = categoryDisplayPath(category.id);
         option.selected = category.id === selected;
+        select.append(option);
+    }
+    if (selected && !eligible.some((category) => category.id === selected)) {
+        const current = categoryCatalog.find((category) => category.id === selected);
+        const option = document.createElement("option");
+        option.value = selected;
+        option.textContent = current
+            ? `${categoryDisplayPath(selected)} (${current.archived ? "архивная" : "требует замены"})`
+            : "Неизвестная категория (нужно заменить)";
+        option.selected = true;
         select.append(option);
     }
     return select;
@@ -1131,25 +1812,27 @@ function operationWord(count) {
     return count === 1 ? "операции" : "операциях";
 }
 
-async function buildBatch() {
+async function exportBatch() {
     if (!activeState) return;
     await runBusy(async () => {
-        batchPayload = await api(
+        const exportedBatch = await api(
             `/api/agent/sessions/${encodeURIComponent(activeState.session.id)}/batch`,
         );
-        elements.batchJson.textContent = JSON.stringify(batchPayload, null, 2);
-        elements.batchResult.hidden = false;
-        showSuccess(`Подготовлено операций: ${batchPayload.transactions.length}.`);
+        const refreshedState = await api(
+            `/api/agent/sessions/${encodeURIComponent(activeState.session.id)}`,
+        );
+        setActiveState(refreshedState);
+        downloadJson(exportedBatch, `${safeFileName(refreshedState.session.title)}.json`);
+        showSuccess(`Экспортировано операций: ${exportedBatch.transactions.length}.`);
     });
 }
 
-function downloadBatch() {
-    if (!batchPayload || !activeState) return;
-    const blob = new Blob([`${JSON.stringify(batchPayload, null, 2)}\n`], { type: "application/json" });
+function downloadJson(payload, filename) {
+    const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${safeFileName(activeState.session.title)}.json`;
+    link.download = filename;
     document.body.append(link);
     link.click();
     link.remove();
@@ -1181,9 +1864,15 @@ async function runBusy(action, reloadOnConflict = false) {
 function setBusy(value) {
     busy = value;
     elements.app.setAttribute("aria-busy", String(value));
-    for (const control of elements.app.querySelectorAll("button, select")) control.disabled = value;
+    for (const control of elements.app.querySelectorAll("button, select, input, textarea")) {
+        control.disabled = value;
+    }
     elements.globalUserPrompt.disabled = value;
-    elements.message.disabled = value;
+    elements.categoryName.disabled = value;
+    elements.categoryHint.disabled = value;
+    elements.categoryParent.disabled = value;
+    elements.categoryType.disabled = value || Boolean(elements.categoryParent.value);
+    elements.message.disabled = value || !activeState;
     elements.provider.disabled = value || !activeState;
     elements.model.disabled = value || !activeState;
     elements.reasoning.disabled = value || !activeState;

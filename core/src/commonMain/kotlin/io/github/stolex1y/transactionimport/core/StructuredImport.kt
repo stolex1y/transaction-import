@@ -7,15 +7,26 @@ import kotlinx.serialization.json.Json
 
 const val STRUCTURED_SCHEMA_SIGNATURE = "transaction-import.v1"
 
+@Serializable
+enum class CategoryType {
+    @SerialName("income")
+    INCOME,
+
+    @SerialName("expense")
+    EXPENSE,
+}
+
 internal data class CategoryDefinition(
     val id: String,
     val displayName: String,
     val description: String,
+    val type: CategoryType = CategoryType.EXPENSE,
+    val parentId: String? = null,
 )
 
-internal val D02_CATEGORY_CATALOG = listOf(
+internal val DEFAULT_CATEGORY_DEFINITIONS = listOf(
     CategoryDefinition("food.groceries", "Продукты", "groceries and supermarkets"),
-    CategoryDefinition("income.salary", "Зарплата", "salary income"),
+    CategoryDefinition("income.salary", "Зарплата", "salary income", CategoryType.INCOME),
     CategoryDefinition("services.digital", "Цифровые сервисы", "online and digital services"),
     CategoryDefinition("transfer.internal", "Между своими счетами", "transfer between the user's own accounts"),
     CategoryDefinition("health.pharmacy", "Аптеки и здоровье", "pharmacies and medicines"),
@@ -28,13 +39,158 @@ internal val D02_CATEGORY_CATALOG = listOf(
 data class TransactionCategory(
     val id: String,
     @SerialName("display_name") val displayName: String,
+    val type: CategoryType = CategoryType.EXPENSE,
+    @SerialName("parent_id") val parentId: String? = null,
+    val hint: String = "",
+    val archived: Boolean = false,
 )
 
-val TRANSACTION_CATEGORIES: List<TransactionCategory> = D02_CATEGORY_CATALOG.map {
-    TransactionCategory(it.id, it.displayName)
+val TRANSACTION_CATEGORIES: List<TransactionCategory> = DEFAULT_CATEGORY_DEFINITIONS.map {
+    TransactionCategory(
+        id = it.id,
+        displayName = it.displayName,
+        type = it.type,
+        parentId = it.parentId,
+        hint = it.description,
+    )
 }
 
 val TRANSACTION_CATEGORY_IDS: List<String> = TRANSACTION_CATEGORIES.map(TransactionCategory::id)
+
+val DEFAULT_AGENT_CATEGORIES: List<TransactionCategory> = listOf(
+    TransactionCategory(
+        id = "category.food",
+        displayName = "Еда",
+        type = CategoryType.EXPENSE,
+        hint = "Группа расходов на продукты и питание.",
+    ),
+    TransactionCategory(
+        id = "food.groceries",
+        displayName = "Продукты",
+        type = CategoryType.EXPENSE,
+        parentId = "category.food",
+        hint = "groceries and supermarkets",
+    ),
+    TransactionCategory(
+        id = "income.salary",
+        displayName = "Зарплата",
+        type = CategoryType.INCOME,
+        hint = "salary income",
+    ),
+    TransactionCategory(
+        id = "services.digital",
+        displayName = "Цифровые сервисы",
+        type = CategoryType.EXPENSE,
+        hint = "online and digital services",
+    ),
+    TransactionCategory(
+        id = "transfer.internal",
+        displayName = "Между своими счетами",
+        type = CategoryType.EXPENSE,
+        hint = "legacy internal transfer category",
+        archived = true,
+    ),
+    TransactionCategory(
+        id = "health.pharmacy",
+        displayName = "Аптеки и здоровье",
+        type = CategoryType.EXPENSE,
+        hint = "pharmacies and medicines",
+    ),
+    TransactionCategory(
+        id = "food.cafe",
+        displayName = "Кафе и рестораны",
+        type = CategoryType.EXPENSE,
+        parentId = "category.food",
+        hint = "cafes and restaurants",
+    ),
+    TransactionCategory(
+        id = "transport",
+        displayName = "Транспорт",
+        type = CategoryType.EXPENSE,
+        hint = "public transport, taxis, and fuel",
+    ),
+    TransactionCategory(
+        id = "housing",
+        displayName = "Жильё",
+        type = CategoryType.EXPENSE,
+        hint = "rent, utilities, and home expenses",
+    ),
+)
+
+class CategoryCatalog(
+    categories: List<TransactionCategory>,
+) {
+    val categories: List<TransactionCategory> = categories.toList()
+    private val byId = this.categories.associateBy(TransactionCategory::id)
+
+    init {
+        require(this.categories.map(TransactionCategory::id).distinct().size == this.categories.size) {
+            "Идентификаторы категорий должны быть уникальными."
+        }
+        require(
+            this.categories.all {
+                it.id.isNotBlank() && it.displayName.trim().isNotEmpty()
+            },
+        ) {
+            "Идентификатор и отображаемое название категории не должны быть пустыми."
+        }
+        require(
+            this.categories
+                .map { it.displayName.trim().lowercase() }
+                .distinct()
+                .size == this.categories.size,
+        ) {
+            "Отображаемые названия категорий должны быть уникальными."
+        }
+        this.categories.forEach { category ->
+            val parent = category.parentId?.let { parentId ->
+                byId[parentId] ?: throw IllegalArgumentException(
+                    "Родительская категория не найдена: $parentId",
+                )
+            }
+            require(parent == null || parent.type == category.type) {
+                "Тип дочерней категории должен совпадать с типом родителя."
+            }
+            val visited = mutableSetOf<String>()
+            var ancestor = category.parentId
+            while (ancestor != null && visited.add(ancestor)) {
+                require(ancestor != category.id) {
+                    "Иерархия категорий не должна содержать циклы."
+                }
+                ancestor = byId[ancestor]?.parentId
+            }
+        }
+    }
+
+    fun find(id: String): TransactionCategory? = byId[id]
+
+    fun isLeaf(id: String): Boolean =
+        categories.none { !it.archived && it.parentId == id }
+
+    fun activeLeafCategories(direction: TransactionDirection? = null): List<TransactionCategory> =
+        categories.filter { category ->
+            !category.archived &&
+                isLeaf(category.id) &&
+                (direction == null || category.type.matches(direction))
+        }
+
+    fun displayPath(id: String): String {
+        val path = mutableListOf<String>()
+        val visited = mutableSetOf<String>()
+        var current = byId[id]
+        while (current != null && visited.add(current.id)) {
+            path += current.displayName
+            current = current.parentId?.let(byId::get)
+        }
+        return path.asReversed().joinToString(" / ")
+    }
+}
+
+private fun CategoryType.matches(direction: TransactionDirection): Boolean =
+    when (this) {
+        CategoryType.INCOME -> direction == TransactionDirection.INCOME
+        CategoryType.EXPENSE -> direction == TransactionDirection.EXPENSE
+    }
 
 @Serializable
 enum class ImportStatus {
@@ -108,12 +264,13 @@ private val postedAtPattern = Regex(
 )
 private val currencyPattern = Regex("^[A-Z]{3}$")
 private val cardLast4Pattern = Regex("""^\d{4}$""")
-private val allowedCategoryIds = TRANSACTION_CATEGORY_IDS.toSet()
+private val defaultCategoryCatalog = CategoryCatalog(TRANSACTION_CATEGORIES)
 
 internal fun validateStructuredResponse(
     text: String,
     finishReason: String?,
     reasoningContentLength: Int? = null,
+    categories: List<TransactionCategory> = TRANSACTION_CATEGORIES,
 ): StructuredValidationOutcome {
     val errors = mutableListOf<String>()
     if (finishReason != "stop") {
@@ -159,10 +316,7 @@ internal fun validateStructuredResponse(
     }
 
     validateRoot(decoded, errors)
-    validateTransactions(decoded.transactions, errors)
-    if (decoded.unparsedFragments.any { it.isBlank() }) {
-        errors += "unparsed_fragments не должен содержать пустые строки."
-    }
+    validateTransactions(decoded.transactions, errors, CategoryCatalog(categories))
 
     val valid = errors.isEmpty()
     return StructuredValidationOutcome(
@@ -246,7 +400,10 @@ internal fun localizeIssue(issue: String): String {
     return "$field: ${localizeIssueMessage(issue.substring(separator + 1))}"
 }
 
-internal fun transactionFieldErrors(transaction: StructuredTransaction): Map<String, List<String>> {
+internal fun transactionFieldErrors(
+    transaction: StructuredTransaction,
+    categoryCatalog: CategoryCatalog = defaultCategoryCatalog,
+): Map<String, List<String>> {
     val errors = linkedMapOf<String, MutableList<String>>()
     fun add(field: String, message: String) {
         errors.getOrPut(field, ::mutableListOf).add(message)
@@ -267,10 +424,30 @@ internal fun transactionFieldErrors(transaction: StructuredTransaction): Map<Str
     if (transaction.merchant.isBlank()) {
         add("merchant", "Укажите контрагента.")
     }
-    if (transaction.categoryId == null) {
-        add("category_id", "Выберите категорию.")
-    } else if (transaction.categoryId !in allowedCategoryIds) {
-        add("category_id", "Выбрана неизвестная категория.")
+    val category = transaction.categoryId?.let(categoryCatalog::find)
+    when {
+        transaction.categoryId == null -> add("category_id", "Выберите категорию.")
+        category == null -> add("category_id", "Выбрана неизвестная категория.")
+        category.archived && !category.type.matches(transaction.direction) -> {
+            add(
+                "category_id",
+                "Архивная категория «${categoryCatalog.displayPath(category.id)}» не соответствует типу операции.",
+            )
+        }
+        category.archived -> Unit
+        !categoryCatalog.isLeaf(category.id) -> {
+            add("category_id", "Выберите конечную категорию, а не группу.")
+        }
+        !category.type.matches(transaction.direction) -> {
+            val directionLabel = when (transaction.direction) {
+                TransactionDirection.INCOME -> "доходов"
+                TransactionDirection.EXPENSE -> "расходов"
+            }
+            add(
+                "category_id",
+                "Категория «${categoryCatalog.displayPath(category.id)}» не относится к $directionLabel.",
+            )
+        }
     }
     if (transaction.cardLast4 != null && !cardLast4Pattern.matches(transaction.cardLast4)) {
         add("card_last4", "Номер карты должен содержать последние четыре цифры.")
@@ -332,6 +509,7 @@ private fun validateRoot(
 private fun validateTransactions(
     transactions: List<StructuredTransaction>,
     errors: MutableList<String>,
+    categoryCatalog: CategoryCatalog,
 ) {
     val sourceIndices = mutableSetOf<Int>()
     transactions.forEachIndexed { position, transaction ->
@@ -356,8 +534,22 @@ private fun validateTransactions(
         if (transaction.merchant.isBlank()) {
             errors += "$path.merchant не должен быть пустым."
         }
-        if (transaction.categoryId != null && transaction.categoryId !in allowedCategoryIds) {
-            errors += "$path.category_id отсутствует в синтетическом справочнике."
+        if (transaction.categoryId != null) {
+            val category = categoryCatalog.find(transaction.categoryId)
+            when {
+                category == null -> {
+                    errors += "$path.category_id отсутствует в синтетическом справочнике."
+                }
+                category.archived -> {
+                    errors += "$path.category_id указывает на архивную категорию."
+                }
+                !categoryCatalog.isLeaf(category.id) -> {
+                    errors += "$path.category_id должен указывать на конечную категорию."
+                }
+                !category.type.matches(transaction.direction) -> {
+                    errors += "$path.category_id не соответствует direction."
+                }
+            }
         }
         if (transaction.cardLast4 != null && !cardLast4Pattern.matches(transaction.cardLast4)) {
             errors += "$path.card_last4 должен содержать четыре цифры или null."

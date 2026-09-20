@@ -239,7 +239,7 @@ data class ContextCompressionConfig(
 @Serializable
 data class AgentRuntimeConfig(
     @SerialName("default_provider_id") val defaultProviderId: String = "deepseek",
-    @SerialName("default_model_id") val defaultModelId: String = "deepseek-v4-flash",
+    @SerialName("default_model_id") val defaultModelId: String = "deepseek-flash",
     @SerialName("default_reasoning_mode_id") val defaultReasoningModeId: String = "disabled",
     val temperature: Double? = null,
     @SerialName("max_tokens") val maxTokens: Int = 100_000,

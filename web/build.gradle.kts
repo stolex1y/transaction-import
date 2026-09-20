@@ -46,7 +46,6 @@ dependencies {
     implementation(project(":core"))
     implementation(project(":transport"))
     implementation(project(":persistence"))
-    implementation(project(":d05"))
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.ktor.client.core)

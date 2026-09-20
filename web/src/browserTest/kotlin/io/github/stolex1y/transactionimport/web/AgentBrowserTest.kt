@@ -57,6 +57,10 @@ class AgentBrowserTest {
                             page.locator("tr[data-transaction-id='1'] input[name='occurred_at']").inputValue(),
                         )
                         assertEquals(
+                            "Покупка яблок",
+                            page.locator("tr[data-transaction-id='1'] input[name='description']").inputValue(),
+                        )
+                        assertEquals(
                             "Ответ агента получен. Черновик обновлён.",
                             page.locator("#agent-status").textContent(),
                         )
@@ -81,19 +85,21 @@ class AgentBrowserTest {
                             "light",
                             page.evaluate("() => document.documentElement.dataset.theme").toString(),
                         )
+                        val memoryLayer = page.locator(".memory-layer").first()
+                        memoryLayer.waitFor()
                         val lightStyleProbe = page.evaluate(
                             """
                                 () => {
                                   const body = getComputedStyle(document.body);
                                   const toast = getComputedStyle(document.querySelector("#agent-status"));
-                                  const json = getComputedStyle(document.querySelector("#batch-json"));
+                                  const memory = getComputedStyle(document.querySelector(".memory-layer"));
                                   const checkbox = getComputedStyle(document.querySelector("input[type='checkbox']"));
                                   return [
                                     body.colorScheme,
                                     body.getPropertyValue("--agent-muted").trim(),
                                     toast.backgroundColor,
                                     toast.borderTopColor,
-                                    json.backgroundColor,
+                                    memory.backgroundColor,
                                     checkbox.accentColor,
                                   ].join("|");
                                 }
@@ -106,6 +112,37 @@ class AgentBrowserTest {
                             page.locator("tr[data-transaction-id='1'] td:nth-child(2)")
                                 .boundingBox()
                                 .let { it != null && it.width < 100 },
+                        )
+                        memoryLayer.locator(".memory-layer-toggle").hover()
+                        val lightMemoryHover = page.evaluate(
+                            """
+                                () => {
+                                  const card = getComputedStyle(document.querySelector(".memory-layer"));
+                                  const toggle = getComputedStyle(document.querySelector(".memory-layer-toggle"));
+                                  return card.backgroundColor + "|" + toggle.color;
+                                }
+                            """.trimIndent(),
+                        ).toString()
+                        assertEquals(
+                            "rgb(219, 234, 254)|rgb(23, 32, 51)",
+                            lightMemoryHover,
+                            "Unexpected light memory hover style: $lightMemoryHover",
+                        )
+                        page.locator("#theme-toggle").click()
+                        memoryLayer.locator(".memory-layer-toggle").hover()
+                        val darkMemoryHover = page.evaluate(
+                            """
+                                () => {
+                                  const card = getComputedStyle(document.querySelector(".memory-layer"));
+                                  const toggle = getComputedStyle(document.querySelector(".memory-layer-toggle"));
+                                  return card.backgroundColor + "|" + toggle.color;
+                                }
+                            """.trimIndent(),
+                        ).toString()
+                        assertEquals(
+                            "rgb(23, 37, 84)|rgb(229, 231, 235)",
+                            darkMemoryHover,
+                            "Unexpected dark memory hover style: $darkMemoryHover",
                         )
                         page.waitForFunction(
                             "() => document.querySelector('#agent-status')?.textContent === ''",
@@ -217,10 +254,12 @@ class AgentBrowserTest {
                         )
                         assertFalse(page.locator("#build-batch").isDisabled)
 
-                        page.locator("#build-batch").click()
-                        page.locator("#batch-result:not([hidden])").waitFor()
+                        val download = page.waitForDownload {
+                            page.locator("#build-batch").click()
+                        }
+                        assertTrue(download.suggestedFilename().endsWith(".json"))
                         val transactions = JSON.parseToJsonElement(
-                            page.locator("#batch-json").textContent(),
+                            Files.readString(download.path()),
                         ).jsonObject["transactions"]!!.jsonArray
                         assertEquals(1, transactions.size)
                         assertEquals(
@@ -288,6 +327,121 @@ class AgentBrowserTest {
             database.deleteIfExists()
         }
     }
+    @Test
+    fun showsMemoryRoutingAndConfirmedDecisionInBrowser() {
+        val database = Files.createTempFile("agent-memory-browser-", ".sqlite")
+        val gateway = FakeAgentGateway(
+            ArrayDeque(
+                listOf(
+                    FakeAgentGateway.READY_DRAFT_WITH_MEMORY_CANDIDATE_JSON,
+                    FakeAgentGateway.FOLLOW_UP_NOOP_JSON,
+                ),
+            ),
+        )
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(
+                    BrowserType.LaunchOptions().setHeadless(true),
+                ).use { browser ->
+                    browser.newContext(
+                        Browser.NewContextOptions()
+                            .setPermissions(listOf("clipboard-read", "clipboard-write")),
+                    ).use { context ->
+                        val page = context.newPage()
+                        val baseUrl = "http://127.0.0.1:$port"
+                        page.navigate("$baseUrl/agent")
+                        waitForAgentInitialized(page)
+                        assertEquals(0, page.locator("#download-memory-report").count())
+
+                        page.locator("#open-session-drawer").click()
+                        page.locator("#global-user-prompt").fill("Профиль для memory browser")
+                        page.locator("#save-preferences").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#agent-status')?.textContent === 'Общие инструкции сохранены.'",
+                        )
+
+                        page.locator("#drawer-new-session").click()
+                        page.locator("#agent-workspace").waitFor()
+                        assertEquals(1, page.locator("#memory-layer-list .memory-layer").count())
+                        assertTrue(page.locator("#memory-request-note").textContent().contains("long-term"))
+                        page.locator("#agent-message").fill("Синтетическая browser выписка")
+                        page.locator("#send-message").click()
+                        page.locator("#operation-table").waitFor()
+                        page.waitForFunction(
+                            "() => document.querySelector('#memory-request-note')?.textContent.includes('short-term')",
+                        )
+                        assertEquals(3, page.locator("#memory-layer-list .memory-layer").count())
+                        page.locator(".memory-layer-toggle").nth(1).click()
+                        assertTrue(page.locator(".memory-layer-detail").textContent().contains("Продукты"))
+                        assertFalse(page.locator("#memory-layer-list").textContent().contains("food.groceries"))
+                        assertEquals(2, page.locator(".message-copy-actions button").count())
+                        page.locator("article.message.user .message-copy-actions button").click()
+                        assertEquals(
+                            "Синтетическая browser выписка",
+                            page.evaluate("async () => await navigator.clipboard.readText()").toString(),
+                        )
+                        page.locator("article.message.assistant .message-copy-actions button").click()
+                        assertEquals(
+                            "Черновик готов: 2 операций.",
+                            page.evaluate("async () => await navigator.clipboard.readText()").toString().trim(),
+                        )
+
+                        assertEquals(1, page.locator(".memory-candidate").count())
+                        page.locator(".memory-candidate button").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#agent-status')?.textContent === 'Кандидат добавлен в подтверждённые решения.'",
+                        )
+                        assertEquals(0, page.locator(".memory-candidate button").count())
+                        assertTrue(page.locator(".candidate-status").textContent().contains("Добавлено"))
+
+                        page.locator("#open-session-drawer").click()
+                        val decisionInput = page.locator("#confirmed-decisions-list input.decision-editor")
+                        assertEquals(
+                            "Исключать переводы между своими счетами",
+                            decisionInput.inputValue(),
+                        )
+                        decisionInput.fill("Изменённое browser-решение")
+                        page.locator("#confirmed-decisions-list .confirmed-decision-actions .secondary-button").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#agent-status')?.textContent === 'Подтверждённое решение обновлено.'",
+                        )
+                        assertEquals(
+                            "Изменённое browser-решение",
+                            page.locator("#confirmed-decisions-list input.decision-editor").inputValue(),
+                        )
+                        page.onDialog { dialog -> dialog.accept() }
+                        page.locator("#confirmed-decisions-list .confirmed-decision-actions .danger-button").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#agent-status')?.textContent === 'Подтверждённое решение удалено.'",
+                        )
+                        assertTrue(
+                            page.locator("#confirmed-decisions-list").textContent()
+                                .contains("Подтверждённых решений пока нет."),
+                        )
+
+                        page.locator("#close-session-drawer").click()
+                        page.locator("#agent-message").fill("Уточнение browser draft")
+                        page.locator("#send-message").click()
+                        page.waitForFunction(
+                            "() => document.querySelectorAll('#metrics-table-body tr').length === 2",
+                        )
+                        assertEquals(3, page.locator("#memory-layer-list .memory-layer").count())
+                        assertTrue(page.locator("#memory-request-note").textContent().contains("short-term"))
+                        assertTrue(page.locator("#memory-request-note").textContent().contains("working"))
+                        assertTrue(page.locator("#memory-request-note").textContent().contains("long-term"))
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
 
     @Test
     fun tokenAwareStrategyShowsEffectiveBudgetReadOnly() {
@@ -526,6 +680,83 @@ class AgentBrowserTest {
                         page.locator("#operation-table").waitFor()
                         assertEquals(2, page.locator("#operation-table tbody tr").count())
                         assertEquals(2, page.locator("#metrics-table-body tr").count())
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun exposesReceiptStatusAndSystemInvariantsInBrowser() {
+        val database = Files.createTempFile("agent-browser-stateful-", ".sqlite")
+        val gateway = FakeAgentGateway()
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(
+                    BrowserType.LaunchOptions().setHeadless(true),
+                ).use { browser ->
+                    browser.newContext(
+                        Browser.NewContextOptions().setViewportSize(1_280, 900),
+                    ).use { context ->
+                        val page = context.newPage()
+                        val baseUrl = "http://127.0.0.1:$port"
+                        page.navigate("$baseUrl/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        assertEquals("Не начато", page.locator("#receipt-status").textContent())
+                        assertEquals(0, page.locator("#task-stage").count())
+                        assertEquals(0, page.locator("#task-transition-actions").count())
+
+                        page.locator("#open-session-drawer").click()
+                        page.locator("#system-invariant-list .category-item").first().waitFor()
+                        assertEquals(5, page.locator("#system-invariant-list .category-item").count())
+                        assertEquals(0, page.locator("#profile-name").count())
+                        page.locator("#close-session-drawer").click()
+
+                        page.locator("#agent-message").fill("Синтетическая выписка")
+                        page.locator("#send-message").click()
+                        page.locator("#operation-table").waitFor()
+                        assertEquals("Содержит ошибки", page.locator("#receipt-status").textContent())
+                        assertEquals(0, page.locator("#task-stage").count())
+                        assertEquals(0, page.locator("#task-transition-actions").count())
+
+                        val secondRow = page.locator("tr[data-transaction-id='2']")
+                        secondRow.locator("input[name='included']").uncheck()
+                        secondRow.locator("button[data-action='save-operation']").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#build-batch')?.disabled === false",
+                        )
+                        assertEquals("Готово к экспорту", page.locator("#receipt-status").textContent())
+
+                        val download = page.waitForDownload {
+                            page.locator("#build-batch").click()
+                        }
+                        assertTrue(download.suggestedFilename().endsWith(".json"))
+                        val firstRow = page.locator("tr[data-transaction-id='1']")
+                        firstRow.locator("input[name='merchant']").fill("ПОСЛЕ ЭКСПОРТА")
+                        firstRow.locator("button[data-action='save-operation']").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#receipt-status')?.textContent === 'Готово к экспорту'",
+                        )
+                        val repeatedDownload = page.waitForDownload {
+                            page.locator("#build-batch").click()
+                        }
+                        assertTrue(repeatedDownload.suggestedFilename().endsWith(".json"))
+                        assertEquals(0, page.locator("#batch-result").count())
+                        page.reload()
+                        page.waitForFunction(
+                            "() => document.querySelector('#receipt-status')?.textContent === 'Готово к экспорту'",
+                        )
+                        assertEquals(0, page.locator("#task-stage").count())
+                        assertEquals(0, page.locator("#task-transition-actions").count())
                     }
                 }
             }

@@ -15,11 +15,22 @@ import io.github.stolex1y.transactionimport.core.ImportStatus
 import io.github.stolex1y.transactionimport.core.ModelCallMetric
 import io.github.stolex1y.transactionimport.core.ModelCallStatus
 import io.github.stolex1y.transactionimport.core.ModelCallType
+import io.github.stolex1y.transactionimport.core.ConfirmedDecision
+import io.github.stolex1y.transactionimport.core.MemoryCandidate
+import io.github.stolex1y.transactionimport.core.MemoryCandidateStatus
+import io.github.stolex1y.transactionimport.core.MemoryTrace
 import io.github.stolex1y.transactionimport.core.RevisionConflictException
 import io.github.stolex1y.transactionimport.core.SessionNotFoundException
 import io.github.stolex1y.transactionimport.core.StickyFact
 import io.github.stolex1y.transactionimport.core.StructuredTransaction
+import io.github.stolex1y.transactionimport.core.DEFAULT_AGENT_CATEGORIES
+import io.github.stolex1y.transactionimport.core.TransactionCategory
 import io.github.stolex1y.transactionimport.core.UserPreferences
+import io.github.stolex1y.transactionimport.core.InvariantCheckResult
+import io.github.stolex1y.transactionimport.core.ReceiptState
+import io.github.stolex1y.transactionimport.core.ReceiptStatus
+import io.github.stolex1y.transactionimport.core.defaultReceiptState
+import io.github.stolex1y.transactionimport.core.receiptStateFor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
@@ -65,6 +76,7 @@ class SqliteImportSessionRepository(
             statement.setLong(10, session.updatedAtEpochMs)
             statement.executeUpdate()
         }
+        writeReceiptState(this, session.id, defaultReceiptState())
         requireState(this, session.id)
     }
 
@@ -90,6 +102,100 @@ class SqliteImportSessionRepository(
         readState(this, id)
     }
 
+    override suspend fun listCategories(includeArchived: Boolean): List<TransactionCategory> = database {
+        prepareStatement(
+            """
+            SELECT id, display_name, type, parent_id, hint, archived
+            FROM transaction_categories
+            WHERE ? = 1 OR archived = 0
+            ORDER BY archived ASC, display_name COLLATE NOCASE ASC, id ASC
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setInt(1, if (includeArchived) 1 else 0)
+            statement.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        add(
+                            TransactionCategory(
+                                id = rows.getString("id"),
+                                displayName = rows.getString("display_name"),
+                                type = io.github.stolex1y.transactionimport.core.CategoryType.valueOf(
+                                    rows.getString("type"),
+                                ),
+                                parentId = rows.getString("parent_id"),
+                                hint = rows.getString("hint"),
+                                archived = rows.getInt("archived") != 0,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    override suspend fun insertCategory(category: TransactionCategory): TransactionCategory = transaction {
+        prepareStatement(
+            """
+            INSERT INTO transaction_categories (id, display_name, type, parent_id, hint, archived)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, category.id)
+            statement.setString(2, category.displayName)
+            statement.setString(3, category.type.name)
+            statement.setString(4, category.parentId)
+            statement.setString(5, category.hint)
+            statement.setInt(6, if (category.archived) 1 else 0)
+            statement.executeUpdate()
+        }
+        category
+    }
+
+    override suspend fun updateCategory(category: TransactionCategory): TransactionCategory = transaction {
+        prepareStatement(
+            """
+            UPDATE transaction_categories
+            SET display_name = ?, parent_id = ?, hint = ?
+            WHERE id = ? AND archived = 0
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, category.displayName)
+            statement.setString(2, category.parentId)
+            statement.setString(3, category.hint)
+            statement.setString(4, category.id)
+            require(statement.executeUpdate() == 1) {
+                "Категория не найдена или уже архивирована: ${category.id}"
+            }
+        }
+        category
+    }
+
+    override suspend fun archiveCategory(id: String): TransactionCategory = transaction {
+        prepareStatement(
+            "UPDATE transaction_categories SET archived = 1 WHERE id = ? AND archived = 0",
+        ).use { statement ->
+            statement.setString(1, id)
+            require(statement.executeUpdate() == 1) {
+                "Категория не найдена или уже архивирована: $id"
+            }
+        }
+        readCategory(this, id) ?: error("Архивированная категория не найдена: $id")
+    }
+
+    override suspend fun isCategoryReferenced(id: String): Boolean = database {
+        prepareStatement("SELECT transaction_json FROM draft_transactions").use { statement ->
+            statement.executeQuery().use { rows ->
+                while (rows.next()) {
+                    val transaction = databaseJson.decodeFromString<StructuredTransaction>(
+                        rows.getString("transaction_json"),
+                    )
+                    if (transaction.categoryId == id) return@use true
+                }
+                false
+            }
+        }
+    }
+
     override suspend fun saveExchange(
         sessionId: String,
         expectedRevision: Long,
@@ -100,6 +206,9 @@ class SqliteImportSessionRepository(
         updatedAtEpochMs: Long,
         facts: List<StickyFact>?,
         additionalMetrics: List<ModelCallMetric>,
+        memoryTrace: MemoryTrace?,
+        memoryCandidates: List<MemoryCandidate>,
+        receiptState: ReceiptState?,
     ): ImportSessionState = transaction {
         checkRevision(this, sessionId, expectedRevision)
         require(draft.version == expectedRevision + 1) {
@@ -108,10 +217,41 @@ class SqliteImportSessionRepository(
         val nextSequence = nextMessageSequence(this, sessionId)
         insertMessage(this, sessionId, nextSequence, userMessage)
         insertMessage(this, sessionId, nextSequence + 1, assistantMessage)
+        insertMemoryCandidates(this, sessionId, memoryCandidates)
         additionalMetrics.forEach { insertMetric(this, sessionId, it) }
         insertMetric(this, sessionId, metric)
         if (facts != null) replaceFacts(this, sessionId, facts)
-        replaceDraft(this, sessionId, expectedRevision, draft, updatedAtEpochMs)
+        replaceDraft(
+            connection = this,
+            sessionId = sessionId,
+            expectedRevision = expectedRevision,
+            draft = draft,
+            updatedAtEpochMs = updatedAtEpochMs,
+            memoryTrace = memoryTrace,
+            receiptState = receiptState,
+        )
+        requireState(this, sessionId)
+    }
+    override suspend fun acceptMemoryCandidate(
+        sessionId: String,
+        expectedRevision: Long,
+        candidateId: String,
+        decision: ConfirmedDecision,
+        updatedAtEpochMs: Long,
+    ): ImportSessionState = transaction {
+        checkRevision(this, sessionId, expectedRevision)
+        val candidate = readCandidate(this, sessionId, candidateId)
+            ?: throw IllegalArgumentException("Кандидат решения не найден: $candidateId")
+        require(candidate.status == MemoryCandidateStatus.PENDING) {
+            "Кандидат решения уже был принят."
+        }
+        val preferences = readPreferences(this)
+        writePreferences(
+            this,
+            preferences.copy(confirmedDecisions = preferences.confirmedDecisions + decision),
+        )
+        updateAcceptedCandidate(this, sessionId, candidateId, decision.id, updatedAtEpochMs)
+        bumpSession(this, sessionId, expectedRevision, updatedAtEpochMs)
         requireState(this, sessionId)
     }
     override suspend fun saveSummaryBatch(
@@ -157,14 +297,40 @@ class SqliteImportSessionRepository(
         expectedRevision: Long,
         draft: ImportDraft,
         updatedAtEpochMs: Long,
+        receiptState: ReceiptState?,
     ): ImportSessionState = transaction {
         checkRevision(this, sessionId, expectedRevision)
         require(draft.version == expectedRevision + 1) {
             "Версия черновика должна совпадать со следующей ревизией сессии."
         }
-        replaceDraft(this, sessionId, expectedRevision, draft, updatedAtEpochMs)
+        replaceDraft(
+            connection = this,
+            sessionId = sessionId,
+            expectedRevision = expectedRevision,
+            draft = draft,
+            updatedAtEpochMs = updatedAtEpochMs,
+            receiptState = receiptState,
+        )
         requireState(this, sessionId)
     }
+
+
+    override suspend fun saveInvariantCheck(
+        sessionId: String,
+        expectedRevision: Long,
+        result: InvariantCheckResult,
+        updatedAtEpochMs: Long,
+    ): ImportSessionState = transaction {
+        checkRevision(this, sessionId, expectedRevision)
+        val current = requireState(this, sessionId)
+        writeReceiptState(
+            this,
+            sessionId,
+            receiptStateFor(current.draft, result),
+        )
+        requireState(this, sessionId)
+    }
+
 
     override suspend fun saveConfig(
         sessionId: String,
@@ -239,6 +405,11 @@ class SqliteImportSessionRepository(
             )
             statement.executeUpdate()
         }
+        writeReceiptState(
+            this,
+            forkSession.id,
+            source.receiptState,
+        )
         prepareStatement(
             """
             INSERT INTO conversation_messages (
@@ -246,6 +417,22 @@ class SqliteImportSessionRepository(
             )
             SELECT ?, sequence_number, id, role, content, display_text, created_at_epoch_ms
             FROM conversation_messages
+            WHERE session_id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, forkSession.id)
+            statement.setString(2, sessionId)
+            statement.executeUpdate()
+        }
+        prepareStatement(
+            """
+            INSERT INTO memory_candidates (
+                session_id, candidate_id, text, reason, source_message_id,
+                created_at_epoch_ms, status, accepted_decision_id, accepted_at_epoch_ms
+            )
+            SELECT ?, candidate_id, text, reason, source_message_id,
+                   created_at_epoch_ms, status, accepted_decision_id, accepted_at_epoch_ms
+            FROM memory_candidates
             WHERE session_id = ?
             """.trimIndent(),
         ).use { statement ->
@@ -331,18 +518,10 @@ class SqliteImportSessionRepository(
     }
 
     override suspend fun savePreferences(preferences: UserPreferences): UserPreferences = transaction {
-        prepareStatement(
-            """
-            INSERT INTO user_preferences (singleton_id, user_prompt)
-            VALUES (1, ?)
-            ON CONFLICT(singleton_id) DO UPDATE SET user_prompt = excluded.user_prompt
-            """.trimIndent(),
-        ).use { statement ->
-            statement.setString(1, preferences.userPrompt)
-            statement.executeUpdate()
-        }
+        writePreferences(this, preferences)
         readPreferences(this)
     }
+
 
     private fun initializeSchema(connection: Connection) {
         connection.createStatement().use { statement ->
@@ -364,7 +543,8 @@ class SqliteImportSessionRepository(
                     updated_at_epoch_ms INTEGER NOT NULL,
                     draft_status TEXT,
                     rejection_reason TEXT,
-                    unparsed_fragments_json TEXT
+                    unparsed_fragments_json TEXT,
+                    memory_trace_json TEXT
                 )
                 """.trimIndent(),
             )
@@ -380,6 +560,23 @@ class SqliteImportSessionRepository(
                     created_at_epoch_ms INTEGER NOT NULL,
                     PRIMARY KEY (session_id, sequence_number),
                     UNIQUE (session_id, id),
+                    FOREIGN KEY (session_id) REFERENCES import_sessions(id) ON DELETE CASCADE
+                )
+                """.trimIndent(),
+            )
+            statement.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_candidates (
+                    session_id TEXT NOT NULL,
+                    candidate_id TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    source_message_id TEXT NOT NULL,
+                    created_at_epoch_ms INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    accepted_decision_id TEXT,
+                    accepted_at_epoch_ms INTEGER,
+                    PRIMARY KEY (session_id, candidate_id),
                     FOREIGN KEY (session_id) REFERENCES import_sessions(id) ON DELETE CASCADE
                 )
                 """.trimIndent(),
@@ -454,9 +651,37 @@ class SqliteImportSessionRepository(
                 """
                 CREATE TABLE IF NOT EXISTS user_preferences (
                     singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
-                    user_prompt TEXT NOT NULL
+                    user_prompt TEXT NOT NULL,
+                    confirmed_decisions_json TEXT NOT NULL DEFAULT '[]'
                 )
                 """.trimIndent(),
+            )
+            statement.execute(
+                """
+                CREATE TABLE IF NOT EXISTS receipt_states (
+                    session_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    last_compliance_json TEXT,
+                    FOREIGN KEY (session_id) REFERENCES import_sessions(id) ON DELETE CASCADE
+                )
+                """.trimIndent(),
+            )
+            statement.execute(
+                """
+                CREATE TABLE IF NOT EXISTS transaction_categories (
+                    id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    type TEXT NOT NULL CHECK (type IN ('INCOME', 'EXPENSE')),
+                    parent_id TEXT,
+                    hint TEXT NOT NULL DEFAULT '',
+                    archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+                    FOREIGN KEY (parent_id) REFERENCES transaction_categories(id)
+                )
+                """.trimIndent(),
+            )
+            statement.execute(
+                "CREATE INDEX IF NOT EXISTS transaction_categories_parent_idx " +
+                    "ON transaction_categories(parent_id)",
             )
         }
         ensureColumn(
@@ -516,6 +741,12 @@ class SqliteImportSessionRepository(
         ensureColumn(
             connection,
             table = "import_sessions",
+            column = "memory_trace_json",
+            definition = "memory_trace_json TEXT",
+        )
+        ensureColumn(
+            connection,
+            table = "import_sessions",
             column = "parent_session_id",
             definition = "parent_session_id TEXT",
         )
@@ -531,7 +762,157 @@ class SqliteImportSessionRepository(
             column = "branch_label",
             definition = "branch_label TEXT",
         )
+        ensureColumn(
+            connection,
+            table = "user_preferences",
+            column = "confirmed_decisions_json",
+            definition = "confirmed_decisions_json TEXT NOT NULL DEFAULT '[]'",
+        )
+        migrateRemovedSettings(connection)
+        seedCategories(connection)
+        migrateLegacyModelIds(connection)
         migrateTransactionIds(connection)
+    }
+
+    private fun migrateRemovedSettings(connection: Connection) {
+        if (tableExists(connection, "user_profile")) {
+            val profile = connection.prepareStatement(
+                """
+                SELECT name, addressing, style, output_format, constraints_text, context_text
+                FROM user_profile
+                WHERE singleton_id = 1
+                """.trimIndent(),
+            ).use { statement ->
+                statement.executeQuery().use { rows ->
+                    if (!rows.next()) {
+                        null
+                    } else {
+                        listOf(
+                            "Имя пользователя" to rows.getString("name"),
+                            "Обращение" to rows.getString("addressing"),
+                            "Стиль ответа" to rows.getString("style"),
+                            "Формат результата" to rows.getString("output_format"),
+                            "Ограничения" to rows.getString("constraints_text"),
+                            "Контекст пользователя" to rows.getString("context_text"),
+                        )
+                    }
+                }
+            }
+            if (profile != null) {
+                val migrated = profile
+                    .filter { (_, value) -> value.isNotBlank() }
+                    .joinToString(
+                        prefix = "Перенесённые настройки профиля:\n",
+                        separator = "\n",
+                    ) { (label, value) -> "$label: ${io.github.stolex1y.transactionimport.core.maskExplicitPhoneNumbers(value)}" }
+                if (migrated != "Перенесённые настройки профиля:\n") {
+                    connection.prepareStatement(
+                        "INSERT OR IGNORE INTO user_preferences (singleton_id, user_prompt) VALUES (1, '')",
+                    ).use { it.executeUpdate() }
+                    val preferences = readPreferences(connection)
+                    val combined = listOf(preferences.userPrompt, migrated)
+                        .filter(String::isNotBlank)
+                        .joinToString("\n\n")
+                    writePreferences(connection, preferences.copy(userPrompt = combined))
+                }
+            }
+            connection.createStatement().use { it.execute("DROP TABLE user_profile") }
+        }
+        connection.createStatement().use { it.execute("DROP TABLE IF EXISTS task_invariants") }
+        migrateLegacyTaskState(connection)
+    }
+
+    private fun migrateLegacyTaskState(connection: Connection) {
+        if (!tableExists(connection, "task_states")) return
+        connection.prepareStatement(
+            """
+            INSERT OR IGNORE INTO receipt_states (session_id, status, last_compliance_json)
+            SELECT legacy.session_id,
+                   CASE WHEN sessions.draft_status IS NULL THEN 'NOT_STARTED' ELSE 'HAS_ERRORS' END,
+                   legacy.last_compliance_json
+            FROM task_states legacy
+            JOIN import_sessions sessions ON sessions.id = legacy.session_id
+            """.trimIndent(),
+        ).use { it.executeUpdate() }
+        connection.createStatement().use { it.execute("DROP TABLE task_states") }
+    }
+
+    private fun tableExists(connection: Connection, table: String): Boolean =
+        connection.prepareStatement(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ).use { statement ->
+            statement.setString(1, table)
+            statement.executeQuery().use { it.next() }
+        }
+
+    private fun columnExists(connection: Connection, table: String, column: String): Boolean =
+        connection.createStatement().use { statement ->
+            statement.executeQuery("PRAGMA table_info($table)").use { rows ->
+                generateSequence { if (rows.next()) rows.getString("name") else null }
+                    .any { it == column }
+            }
+        }
+
+    private fun seedCategories(connection: Connection) {
+        connection.prepareStatement(
+            """
+            INSERT OR IGNORE INTO transaction_categories (
+                id, display_name, type, parent_id, hint, archived
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+        ).use { statement ->
+            DEFAULT_AGENT_CATEGORIES.forEach { category ->
+                statement.setString(1, category.id)
+                statement.setString(2, category.displayName)
+                statement.setString(3, category.type.name)
+                statement.setString(4, category.parentId)
+                statement.setString(5, category.hint)
+                statement.setInt(6, if (category.archived) 1 else 0)
+                statement.addBatch()
+            }
+            statement.executeBatch()
+        }
+    }
+
+    private fun migrateLegacyModelIds(connection: Connection) {
+        val migrations = connection.prepareStatement(
+            "SELECT id, config_json FROM import_sessions",
+        ).use { statement ->
+            statement.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        val config = databaseJson.decodeFromString<AgentConfig>(
+                            rows.getString("config_json"),
+                        )
+                        if (config.modelId == "deepseek-v4-flash") {
+                            add(rows.getString("id"))
+                        }
+                    }
+                }
+            }
+        }
+        if (migrations.isEmpty()) return
+        connection.prepareStatement(
+            "UPDATE import_sessions SET config_json = ? WHERE id = ?",
+        ).use { statement ->
+            migrations.forEach { sessionId ->
+                val config = connection.prepareStatement(
+                    "SELECT config_json FROM import_sessions WHERE id = ?",
+                ).use { readStatement ->
+                    readStatement.setString(1, sessionId)
+                    readStatement.executeQuery().use { rows ->
+                        check(rows.next())
+                        databaseJson.decodeFromString<AgentConfig>(rows.getString("config_json"))
+                    }
+                }
+                statement.setString(
+                    1,
+                    databaseJson.encodeToString(config.copy(modelId = "deepseek-flash")),
+                )
+                statement.setString(2, sessionId)
+                require(statement.executeUpdate() == 1)
+            }
+        }
     }
 
     private fun readState(connection: Connection, id: String): ImportSessionState? {
@@ -539,7 +920,8 @@ class SqliteImportSessionRepository(
             """
             SELECT id, title, config_json, context_management_json, parent_session_id,
                    checkpoint_message_count, branch_label, revision, created_at_epoch_ms,
-                   updated_at_epoch_ms, draft_status, rejection_reason, unparsed_fragments_json
+                   updated_at_epoch_ms, draft_status, rejection_reason, unparsed_fragments_json,
+                   memory_trace_json
             FROM import_sessions
             WHERE id = ?
             """.trimIndent(),
@@ -551,6 +933,7 @@ class SqliteImportSessionRepository(
                     draftStatus = rows.getString("draft_status"),
                     rejectionReason = rows.getString("rejection_reason"),
                     unparsedFragmentsJson = rows.getString("unparsed_fragments_json"),
+                    memoryTraceJson = rows.getString("memory_trace_json"),
                 ) else null
             }
         } ?: return null
@@ -574,6 +957,35 @@ class SqliteImportSessionRepository(
                                 content = rows.getString("content"),
                                 displayText = rows.getString("display_text"),
                                 createdAtEpochMs = rows.getLong("created_at_epoch_ms"),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+        val memoryCandidates = connection.prepareStatement(
+            """
+            SELECT candidate_id, text, reason, source_message_id, created_at_epoch_ms,
+                   status, accepted_decision_id, accepted_at_epoch_ms
+            FROM memory_candidates
+            WHERE session_id = ?
+            ORDER BY created_at_epoch_ms ASC, candidate_id ASC
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, id)
+            statement.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        add(
+                            MemoryCandidate(
+                                id = rows.getString("candidate_id"),
+                                text = rows.getString("text"),
+                                reason = rows.getString("reason"),
+                                sourceMessageId = rows.getString("source_message_id"),
+                                createdAtEpochMs = rows.getLong("created_at_epoch_ms"),
+                                status = MemoryCandidateStatus.valueOf(rows.getString("status")),
+                                acceptedDecisionId = rows.getString("accepted_decision_id"),
+                                acceptedAtEpochMs = rows.getLongOrNull("accepted_at_epoch_ms"),
                             ),
                         )
                     }
@@ -705,6 +1117,8 @@ class SqliteImportSessionRepository(
                 version = header.session.revision,
             )
         }
+        val storedReceiptState = readReceiptState(connection, id)
+        val receiptState = receiptStateFor(draft, storedReceiptState.lastCompliance)
         return ImportSessionState(
             session = header.session,
             messages = messages,
@@ -712,8 +1126,86 @@ class SqliteImportSessionRepository(
             facts = facts,
             metrics = metrics,
             summary = summary,
+            memoryTrace = header.memoryTraceJson?.let(databaseJson::decodeFromString),
+            memoryCandidates = memoryCandidates,
+            receiptState = receiptState,
         )
     }
+    private fun readReceiptState(connection: Connection, sessionId: String): ReceiptState =
+        connection.prepareStatement(
+            """
+            SELECT status, last_compliance_json
+            FROM receipt_states
+            WHERE session_id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, sessionId)
+            statement.executeQuery().use { rows ->
+                if (!rows.next()) {
+                    defaultReceiptState()
+                } else {
+                    ReceiptState(
+                        status = ReceiptStatus.valueOf(rows.getString("status")),
+                        lastCompliance = rows.getString("last_compliance_json")
+                            ?.let(databaseJson::decodeFromString),
+                    )
+                }
+            }
+        }
+
+    private fun writeReceiptState(
+        connection: Connection,
+        sessionId: String,
+        receiptState: ReceiptState,
+    ) {
+        connection.prepareStatement(
+            """
+            INSERT INTO receipt_states (
+                session_id, status, last_compliance_json
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                status = excluded.status,
+                last_compliance_json = excluded.last_compliance_json
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, sessionId)
+            statement.setString(2, receiptState.status.name)
+            statement.setString(
+                3,
+                receiptState.lastCompliance?.let(databaseJson::encodeToString),
+            )
+            statement.executeUpdate()
+        }
+    }
+
+
+
+
+
+    private fun readCategory(connection: Connection, id: String): TransactionCategory? =
+        connection.prepareStatement(
+            """
+            SELECT id, display_name, type, parent_id, hint, archived
+            FROM transaction_categories
+            WHERE id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, id)
+            statement.executeQuery().use { rows ->
+                if (!rows.next()) {
+                    null
+                } else {
+                    TransactionCategory(
+                        id = rows.getString("id"),
+                        displayName = rows.getString("display_name"),
+                        type = io.github.stolex1y.transactionimport.core.CategoryType.valueOf(rows.getString("type")),
+                        parentId = rows.getString("parent_id"),
+                        hint = rows.getString("hint"),
+                        archived = rows.getInt("archived") != 0,
+                    )
+                }
+            }
+        }
 
     private fun ensureColumn(
         connection: Connection,
@@ -858,6 +1350,26 @@ class SqliteImportSessionRepository(
         throw RevisionConflictException(expectedRevision, actual)
     }
 
+    private fun bumpSession(
+        connection: Connection,
+        sessionId: String,
+        expectedRevision: Long,
+        updatedAtEpochMs: Long,
+    ) {
+        connection.prepareStatement(
+            """
+            UPDATE import_sessions
+            SET revision = revision + 1, updated_at_epoch_ms = ?
+            WHERE id = ? AND revision = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setLong(1, updatedAtEpochMs)
+            statement.setString(2, sessionId)
+            statement.setLong(3, expectedRevision)
+            requireSingleUpdate(statement.executeUpdate(), sessionId, expectedRevision, connection)
+        }
+    }
+
     private fun nextMessageSequence(connection: Connection, sessionId: String): Int =
         connection.prepareStatement(
             "SELECT COALESCE(MAX(sequence_number), 0) + 1 FROM conversation_messages WHERE session_id = ?",
@@ -890,6 +1402,98 @@ class SqliteImportSessionRepository(
             statement.setString(6, message.displayText)
             statement.setLong(7, message.createdAtEpochMs)
             statement.executeUpdate()
+        }
+    }
+    private fun insertMemoryCandidates(
+        connection: Connection,
+        sessionId: String,
+        candidates: List<MemoryCandidate>,
+    ) {
+        if (candidates.isEmpty()) return
+        connection.prepareStatement(
+            """
+            INSERT INTO memory_candidates (
+                session_id, candidate_id, text, reason, source_message_id,
+                created_at_epoch_ms, status, accepted_decision_id, accepted_at_epoch_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+        ).use { statement ->
+            candidates.forEach { candidate ->
+                statement.setString(1, sessionId)
+                statement.setString(2, candidate.id)
+                statement.setString(3, candidate.text)
+                statement.setString(4, candidate.reason)
+                statement.setString(5, candidate.sourceMessageId)
+                statement.setLong(6, candidate.createdAtEpochMs)
+                statement.setString(7, candidate.status.name)
+                statement.setString(8, candidate.acceptedDecisionId)
+                val acceptedAtEpochMs = candidate.acceptedAtEpochMs
+                if (acceptedAtEpochMs == null) {
+                    statement.setNull(9, java.sql.Types.INTEGER)
+                } else {
+                    statement.setLong(9, acceptedAtEpochMs)
+                }
+                statement.addBatch()
+            }
+            statement.executeBatch()
+        }
+    }
+
+    private fun readCandidate(
+        connection: Connection,
+        sessionId: String,
+        candidateId: String,
+    ): MemoryCandidate? = connection.prepareStatement(
+        """
+        SELECT candidate_id, text, reason, source_message_id, created_at_epoch_ms,
+               status, accepted_decision_id, accepted_at_epoch_ms
+        FROM memory_candidates
+        WHERE session_id = ? AND candidate_id = ?
+        """.trimIndent(),
+    ).use { statement ->
+        statement.setString(1, sessionId)
+        statement.setString(2, candidateId)
+        statement.executeQuery().use { rows ->
+            if (!rows.next()) {
+                null
+            } else {
+                MemoryCandidate(
+                    id = rows.getString("candidate_id"),
+                    text = rows.getString("text"),
+                    reason = rows.getString("reason"),
+                    sourceMessageId = rows.getString("source_message_id"),
+                    createdAtEpochMs = rows.getLong("created_at_epoch_ms"),
+                    status = MemoryCandidateStatus.valueOf(rows.getString("status")),
+                    acceptedDecisionId = rows.getString("accepted_decision_id"),
+                    acceptedAtEpochMs = rows.getLongOrNull("accepted_at_epoch_ms"),
+                )
+            }
+        }
+    }
+
+    private fun updateAcceptedCandidate(
+        connection: Connection,
+        sessionId: String,
+        candidateId: String,
+        decisionId: String,
+        acceptedAtEpochMs: Long,
+    ) {
+        connection.prepareStatement(
+            """
+            UPDATE memory_candidates
+            SET status = ?, accepted_decision_id = ?, accepted_at_epoch_ms = ?
+            WHERE session_id = ? AND candidate_id = ? AND status = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, MemoryCandidateStatus.ACCEPTED.name)
+            statement.setString(2, decisionId)
+            statement.setLong(3, acceptedAtEpochMs)
+            statement.setString(4, sessionId)
+            statement.setString(5, candidateId)
+            statement.setString(6, MemoryCandidateStatus.PENDING.name)
+            require(statement.executeUpdate() == 1) {
+                "Кандидат решения уже был принят или не найден."
+            }
         }
     }
 
@@ -990,6 +1594,9 @@ class SqliteImportSessionRepository(
     private fun ResultSet.getIntOrNull(column: String): Int? =
         getObject(column)?.let { getInt(column) }
 
+    private fun ResultSet.getLongOrNull(column: String): Long? =
+        getObject(column)?.let { getLong(column) }
+
     private fun java.sql.PreparedStatement.setNullableInt(index: Int, value: Int?) {
         if (value == null) setNull(index, java.sql.Types.INTEGER) else setInt(index, value)
     }
@@ -1025,10 +1632,11 @@ class SqliteImportSessionRepository(
     private fun replaceDraft(
         connection: Connection,
         sessionId: String,
-
         expectedRevision: Long,
         draft: ImportDraft,
         updatedAtEpochMs: Long,
+        memoryTrace: MemoryTrace? = null,
+        receiptState: ReceiptState? = null,
     ) {
         connection.prepareStatement("DELETE FROM draft_transactions WHERE session_id = ?").use { statement ->
             statement.setString(1, sessionId)
@@ -1061,7 +1669,8 @@ class SqliteImportSessionRepository(
                 updated_at_epoch_ms = ?,
                 draft_status = ?,
                 rejection_reason = ?,
-                unparsed_fragments_json = ?
+                unparsed_fragments_json = ?,
+                memory_trace_json = COALESCE(?, memory_trace_json)
             WHERE id = ? AND revision = ?
             """.trimIndent(),
         ).use { statement ->
@@ -1069,21 +1678,45 @@ class SqliteImportSessionRepository(
             statement.setString(2, draft.status.name)
             statement.setString(3, draft.rejectionReason)
             statement.setString(4, databaseJson.encodeToString(draft.unparsedFragments))
-            statement.setString(5, sessionId)
-            statement.setLong(6, expectedRevision)
+            statement.setString(5, memoryTrace?.let(databaseJson::encodeToString))
+            statement.setString(6, sessionId)
+            statement.setLong(7, expectedRevision)
             requireSingleUpdate(statement.executeUpdate(), sessionId, expectedRevision, connection)
+        }
+        receiptState?.let { writeReceiptState(connection, sessionId, it) }
+    }
+
+    private fun writePreferences(connection: Connection, preferences: UserPreferences) {
+        connection.prepareStatement(
+            """
+            INSERT INTO user_preferences (singleton_id, user_prompt, confirmed_decisions_json)
+            VALUES (1, ?, ?)
+            ON CONFLICT(singleton_id) DO UPDATE SET
+                user_prompt = excluded.user_prompt,
+                confirmed_decisions_json = excluded.confirmed_decisions_json
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, preferences.userPrompt)
+            statement.setString(2, databaseJson.encodeToString(preferences.confirmedDecisions))
+            statement.executeUpdate()
         }
     }
 
     private fun readPreferences(connection: Connection): UserPreferences =
         connection.prepareStatement(
-            "SELECT user_prompt FROM user_preferences WHERE singleton_id = 1",
+            "SELECT user_prompt, confirmed_decisions_json FROM user_preferences WHERE singleton_id = 1",
         ).use { statement ->
             statement.executeQuery().use { rows ->
                 check(rows.next()) { "Пользовательские настройки не созданы." }
-                UserPreferences(rows.getString("user_prompt"))
+                UserPreferences(
+                    userPrompt = rows.getString("user_prompt"),
+                    confirmedDecisions = databaseJson.decodeFromString(
+                        rows.getString("confirmed_decisions_json") ?: "[]",
+                    ),
+                )
             }
         }
+
 
     private data class TransactionIdMigration(
         val sessionId: String,
@@ -1096,6 +1729,7 @@ class SqliteImportSessionRepository(
         val draftStatus: String?,
         val rejectionReason: String?,
         val unparsedFragmentsJson: String?,
+        val memoryTraceJson: String?,
     )
 
     private companion object {

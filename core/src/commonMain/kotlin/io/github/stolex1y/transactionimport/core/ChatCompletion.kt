@@ -45,38 +45,6 @@ data class ResponseFormat(
     val type: String,
 )
 
-enum class ReasoningLevel(
-    val thinkingType: String,
-    val effort: String?,
-) {
-    DISABLED(thinkingType = "disabled", effort = null),
-    LOW(thinkingType = "enabled", effort = "low"),
-    HIGH(thinkingType = "enabled", effort = "high"),
-    MAX(thinkingType = "enabled", effort = "max"),
-}
-
-enum class ResponseMode {
-    UNRESTRICTED,
-    CONTROLLED_JSON,
-}
-
-enum class TokenBudgetMode {
-    DEFAULT,
-    UNLIMITED,
-}
-
-data class ExtractionOptions(
-    val model: String = DEFAULT_MODEL,
-    val reasoning: ReasoningLevel = ReasoningLevel.DISABLED,
-    val responseMode: ResponseMode = ResponseMode.UNRESTRICTED,
-    val temperature: Double? = null,
-    val maxTokens: Int? = null,
-    val tokenBudgetMode: TokenBudgetMode = TokenBudgetMode.DEFAULT,
-) {
-    fun thinkingOptions(): ThinkingOptions =
-        ThinkingOptions(type = reasoning.thinkingType)
-}
-
 @Serializable
 data class ChatCompletionResponse(
     val choices: List<ChatChoice> = emptyList(),
@@ -103,25 +71,4 @@ data class Usage(
     @SerialName("prompt_tokens") val promptTokens: Int? = null,
     @SerialName("completion_tokens") val completionTokens: Int? = null,
     @SerialName("total_tokens") val totalTokens: Int? = null,
-)
-
-@Serializable
-data class AppliedResponseControls(
-    @SerialName("response_format") val responseFormat: ResponseFormat?,
-    @SerialName("max_tokens") val maxTokens: Int?,
-    @SerialName("completion_condition") val completionCondition: String?,
-    @SerialName("category_ids") val categoryIds: List<String>,
-)
-
-data class ExtractionResult(
-    val text: String,
-    val finishReason: String?,
-    val usage: Usage?,
-    val reasoningContentLength: Int? = null,
-    val responseMode: ResponseMode,
-    val controls: AppliedResponseControls,
-    val structured: StructuredImport?,
-    val validation: StructuredValidation?,
-    @SerialName("token_budget_warning") val tokenBudgetWarning: String? = null,
-    val rawUsage: JsonObject? = null,
 )

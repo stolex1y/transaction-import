@@ -58,6 +58,203 @@ class SmartExpenseAgentTest {
         assertTrue(corrected.draft!!.transactions.single { it.id == "1" }.included)
         assertFalse(corrected.draft!!.transactions.single { it.id == "2" }.included)
     }
+
+    @Test
+    fun derivesReceiptStateFromCurrentDraft() {
+        val transaction = StructuredTransaction(
+            sourceIndex = 1,
+            direction = TransactionDirection.EXPENSE,
+            occurredAt = "2026-01-15T12:10:00",
+            postedAt = null,
+            amountMinor = 100,
+            currency = "RUB",
+            merchant = "Магазин",
+            categoryId = "food.groceries",
+            cardLast4 = null,
+            needsReview = false,
+            issues = emptyList(),
+        )
+        val ready = ImportDraft(
+            status = ImportStatus.READY,
+            rejectionReason = null,
+            transactions = listOf(
+                DraftTransaction(
+                    id = "1",
+                    included = true,
+                    transaction = transaction,
+                ),
+            ),
+            unparsedFragments = emptyList(),
+            version = 0,
+        )
+
+        assertEquals(ReceiptStatus.NOT_STARTED, receiptStateFor(null).status)
+        assertEquals(
+            ReceiptStatus.HAS_ERRORS,
+            receiptStateFor(ready.copy(transactions = ready.transactions.map { it.copy(included = false) })).status,
+        )
+        assertEquals(ReceiptStatus.READY_FOR_EXPORT, receiptStateFor(ready).status)
+        assertEquals(
+            ReceiptStatus.HAS_ERRORS,
+            receiptStateFor(
+                ready,
+                InvariantCheckResult(
+                    status = InvariantCheckStatus.CONFLICT,
+                    checkedInvariantIds = SYSTEM_TASK_INVARIANTS.map(TaskInvariant::id),
+                    nextAction = "Исправьте конфликт.",
+                ),
+            ).status,
+        )
+    }
+
+    @Test
+    fun exportedReceiptRemainsEditableAndExportable() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, QueuedGateway(initialDraftJson))
+        val created = agent.createSession("Экспортируемая выписка", defaultConfig)
+        val extracted = agent.sendMessage(created.session.id, 0, "Выписка")
+
+        val firstBatch = agent.buildImportBatch(created.session.id)
+        assertEquals(2, firstBatch.transactions.size)
+        assertEquals(ReceiptStatus.READY_FOR_EXPORT, extracted.receiptState.status)
+
+        val first = extracted.draft!!.transactions.first()
+        val edited = agent.replaceTransaction(
+            sessionId = created.session.id,
+            expectedRevision = extracted.session.revision,
+            transactionId = first.id,
+            included = true,
+            description = "После экспорта",
+            replacement = first.transaction.copy(merchant = "AFTER EXPORT"),
+        )
+
+        assertEquals(ReceiptStatus.READY_FOR_EXPORT, edited.receiptState.status)
+        assertEquals(
+            "AFTER EXPORT",
+            agent.buildImportBatch(created.session.id).transactions.first().merchant,
+        )
+        assertEquals(
+            ReceiptStatus.READY_FOR_EXPORT,
+            agent.getSession(created.session.id).receiptState.status,
+        )
+    }
+
+    @Test
+    fun exportedReceiptAcceptsAppendedTransactions() = runBlocking {
+        val gateway = QueuedGateway(initialDraftJson, appendStatementJson)
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Добавляемая выписка", defaultConfig)
+        val extracted = agent.sendMessage(created.session.id, 0, "Первая выписка")
+
+        agent.buildImportBatch(created.session.id)
+        val appended = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = extracted.session.revision,
+            text = "Добавь вторую выписку.",
+        )
+
+        assertEquals(3, appended.draft!!.transactions.size)
+        assertEquals(ReceiptStatus.HAS_ERRORS, appended.receiptState.status)
+        val added = appended.draft!!.transactions.last()
+        val repaired = agent.replaceTransaction(
+            sessionId = created.session.id,
+            expectedRevision = appended.session.revision,
+            transactionId = added.id,
+            included = true,
+            description = added.description,
+            replacement = added.transaction.copy(categoryId = "food.cafe"),
+        )
+        assertEquals(ReceiptStatus.READY_FOR_EXPORT, repaired.receiptState.status)
+        assertEquals(3, agent.buildImportBatch(created.session.id).transactions.size)
+    }
+    @Test
+    fun modelDescriptionIsSanitizedAndIncludedInExport() = runBlocking {
+        val agent = testAgent(
+            repository = MemoryImportSessionRepository(),
+            gateway = QueuedGateway(initialDraftWithGeneratedDescriptionsJson),
+        )
+        val created = agent.createSession("Описание операции", defaultConfig)
+
+        val extracted = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "Выписка с дополнительными сведениями.",
+        )
+
+        assertEquals("Яблоки, 2 кг", extracted.draft!!.transactions[0].description)
+        assertEquals("", extracted.draft!!.transactions[1].description)
+        val batch = agent.buildImportBatch(created.session.id)
+        assertEquals("Яблоки, 2 кг", batch.transactions[0].description)
+        assertEquals("", batch.transactions[1].description)
+    }
+
+    @Test
+    fun appendedIncomeGetsDescriptionAndManualDescriptionSurvivesFollowUp() = runBlocking {
+        val agent = testAgent(
+            repository = MemoryImportSessionRepository(),
+            gateway = QueuedGateway(
+                initialDraftWithGeneratedDescriptionsJson,
+                appendIncomeWithDescriptionJson,
+                emptyAppliedPatchJson,
+            ),
+        )
+        val created = agent.createSession("Описание и ручная заметка", defaultConfig)
+        val extracted = agent.sendMessage(created.session.id, 0, "Первая выписка")
+        val first = extracted.draft!!.transactions.first()
+        val manuallyEdited = agent.replaceTransaction(
+            sessionId = created.session.id,
+            expectedRevision = extracted.session.revision,
+            transactionId = first.id,
+            included = true,
+            description = "Моя ручная заметка",
+            replacement = first.transaction,
+        )
+
+        val appended = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = manuallyEdited.session.revision,
+            text = "Добавь доход.",
+        )
+        val added = appended.draft!!.transactions.last()
+        assertEquals("Моя ручная заметка", appended.draft!!.transactions.first().description)
+        assertEquals(TransactionDirection.INCOME, added.transaction.direction)
+        assertEquals("Зарплата за январь", added.description)
+        assertEquals(
+            "Зарплата за январь",
+            agent.buildImportBatch(created.session.id).transactions.last().description,
+        )
+
+        val corrected = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = appended.session.revision,
+            text = "Проверь без изменения заметок.",
+        )
+        assertEquals("Моя ручная заметка", corrected.draft!!.transactions.first().description)
+    }
+
+
+    @Test
+    fun systemInvariantConflictBlocksDraftPersistence() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        val conflictDraftJson = initialDraftJson.replace(
+            "\"merchant\": \"DEMO MARKET\"",
+            "\"merchant\": \"DEMO MARKET +7 (999) 111-22-33\"",
+        )
+        val agent = testAgent(repository, QueuedGateway(conflictDraftJson))
+        val created = agent.createSession("Системный инвариант", defaultConfig)
+
+        val error = assertFailsWith<InvariantViolationException> {
+            agent.sendMessage(created.session.id, created.session.revision, "Выписка")
+        }
+
+        assertEquals(InvariantCheckStatus.CONFLICT, error.result.status)
+        assertEquals("system.mask-explicit-phones", error.result.conflicts.single().invariantId)
+        val stored = repository.get(created.session.id)!!
+        assertNull(stored.draft)
+        assertTrue(stored.messages.isEmpty())
+        assertEquals(ReceiptStatus.HAS_ERRORS, stored.receiptState.status)
+        assertEquals(error.result, stored.receiptState.lastCompliance)
+    }
     @Test
     fun capsRuntimeOutputBudgetToSelectedModelLimit() = runBlocking {
         val gateway = QueuedGateway(initialDraftJson).also { it.maxOutputTokens = 2_048 }
@@ -263,7 +460,7 @@ class SmartExpenseAgentTest {
         )
 
         val systemPrompt = gateway.requests.single().messages.first().content
-        assertFalse(systemPrompt.contains("<user-preference>"))
+        assertFalse(systemPrompt.contains("<general-user-instructions>"))
         assertTrue(systemPrompt.contains("prove who owns a number"))
         assertTrue(systemPrompt.contains("internal or external"))
     }
@@ -551,6 +748,199 @@ class SmartExpenseAgentTest {
         assertTrue(gateway.requests[0].messages.first().content.contains("Не включай переводы"))
         assertTrue(gateway.requests[1].messages.first().content.contains("Не включай переводы"))
         assertTrue(gateway.requests[1].messages.first().content.contains("initial extraction"))
+    }
+    @Test
+    fun routesShortWorkingAndLongTermMemoryWithoutCrossSessionLeakage() = runBlocking {
+        val gateway = QueuedGateway(initialDraftWithMemoryCandidateJson, excludePatchJson, initialDraftJson)
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, gateway)
+        agent.updatePreferences("Профиль для всех сессий")
+        val sessionA = agent.createSession("Сессия A", defaultConfig)
+
+        val extractedA = agent.sendMessage(sessionA.session.id, 0, "A-PRIVATE-CONTEXT")
+        val candidate = extractedA.memoryCandidates.single()
+        assertEquals("Подтверждённое правило импорта", candidate.text)
+        assertEquals(extractedA.messages.last().id, candidate.sourceMessageId)
+        assertEquals(MemoryCandidateStatus.PENDING, candidate.status)
+        assertTrue(gateway.requests[0].messages.first().content.contains("<general-user-instructions>"))
+        assertTrue(agent.getPreferences().confirmedDecisions.isEmpty())
+
+        val accepted = agent.acceptMemoryCandidate(
+            sessionId = extractedA.session.id,
+            expectedRevision = extractedA.session.revision,
+            candidateId = candidate.id,
+        )
+        val decision = agent.getPreferences().confirmedDecisions.single()
+        assertEquals(candidate.text, decision.text)
+        assertEquals(extractedA.session.revision + 1, accepted.session.revision)
+        assertEquals(MemoryCandidateStatus.ACCEPTED, accepted.memoryCandidates.single().status)
+        assertEquals(decision.id, accepted.memoryCandidates.single().acceptedDecisionId)
+
+        val correctedA = agent.sendMessage(
+            sessionId = accepted.session.id,
+            expectedRevision = accepted.session.revision,
+            text = "A follow-up",
+        )
+        assertEquals(
+            listOf(MemoryLayer.SHORT_TERM, MemoryLayer.WORKING, MemoryLayer.LONG_TERM),
+            correctedA.memoryTrace!!.selectedLayers,
+        )
+        assertTrue(gateway.requests[1].messages.any { it.content.contains("A-PRIVATE-CONTEXT") })
+        assertTrue(gateway.requests[1].messages.any { it.content.contains("Current import draft JSON") })
+        assertTrue(gateway.requests[1].messages.first().content.contains(candidate.text))
+        assertEquals(MemoryCandidateStatus.ACCEPTED, correctedA.memoryCandidates.single().status)
+
+        val sessionB = agent.createSession("Сессия B", defaultConfig)
+        val emptyB = agent.getSession(sessionB.session.id)
+        assertTrue(emptyB.messages.isEmpty())
+        assertNull(emptyB.draft)
+
+        val extractedB = agent.sendMessage(sessionB.session.id, 0, "B-ONLY-CONTEXT")
+        assertEquals(
+            listOf(MemoryLayer.LONG_TERM),
+            extractedB.memoryTrace!!.selectedLayers,
+        )
+        assertTrue(gateway.requests[2].messages.first().content.contains("Профиль для всех сессий"))
+        assertTrue(gateway.requests[2].messages.first().content.contains(candidate.text))
+        assertFalse(gateway.requests[2].messages.any { it.content.contains("A-PRIVATE-CONTEXT") })
+        assertFalse(gateway.requests[2].messages.any { it.content.contains("Current import draft JSON") })
+
+        val edited = agent.updateConfirmedDecision(decision.id, "Изменённое правило импорта")
+        assertEquals("Изменённое правило импорта", edited.confirmedDecisions.single().text)
+        assertTrue(agent.deleteConfirmedDecision(decision.id).confirmedDecisions.isEmpty())
+    }
+    @Test
+    fun confirmedDecisionsAreNotReproposedAsMemoryCandidates() = runBlocking {
+        val gateway = QueuedGateway(
+            initialDraftWithTransferMemoryCandidateJson,
+            followUpWithRepeatedAndNewMemoryCandidatesJson,
+        )
+        val agent = testAgent(
+            repository = MemoryImportSessionRepository(),
+            gateway = gateway,
+        )
+        val created = agent.createSession("Повторное решение", defaultConfig)
+
+        val extracted = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = 0,
+            text = "Не включай переводы себе.",
+        )
+        val firstCandidate = extracted.memoryCandidates.single()
+        val accepted = agent.acceptMemoryCandidate(
+            sessionId = extracted.session.id,
+            expectedRevision = extracted.session.revision,
+            candidateId = firstCandidate.id,
+        )
+
+        val followUp = agent.sendMessage(
+            sessionId = accepted.session.id,
+            expectedRevision = accepted.session.revision,
+            text = "И ещё не включать покупки без чека.",
+        )
+        val followUpCandidates = followUp.memoryCandidates.filter {
+            it.sourceMessageId == followUp.messages.last().id
+        }
+
+        assertEquals(
+            listOf("Не включать покупки без чека."),
+            followUpCandidates.map(MemoryCandidate::text),
+        )
+    }
+
+
+    @Test
+    fun memoryProjectionShowsSelectedLayersAndSafeDisplayFields() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, QueuedGateway(initialDraftJson))
+        agent.updatePreferences("Показывай только синтетические операции")
+        val created = agent.createSession("Проекция памяти", defaultConfig)
+
+        val emptyProjection = agent.getMemoryProjection(created.session.id)
+        assertEquals(listOf(MemoryLayer.LONG_TERM), emptyProjection.selectedLayers)
+        assertNull(emptyProjection.shortTerm)
+        assertNull(emptyProjection.working)
+        assertEquals(
+            "Показывай только синтетические операции",
+            emptyProjection.longTerm?.userPrompt,
+        )
+
+        val extracted = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "DEMO MARKET 1250 RUB",
+        )
+        val projection = agent.getMemoryProjection(extracted.session.id)
+        assertEquals(
+            listOf(MemoryLayer.SHORT_TERM, MemoryLayer.WORKING, MemoryLayer.LONG_TERM),
+            projection.selectedLayers,
+        )
+        val shortTerm = projection.shortTerm ?: error("Ожидался short-term слой.")
+        assertTrue(shortTerm.messages.any { it.displayText == "DEMO MARKET 1250 RUB" })
+        val working = projection.working ?: error("Ожидался working слой.")
+        assertTrue(working.hasDraft)
+        assertEquals("Еда / Продукты", working.transactions.first().categoryDisplayName)
+        assertEquals("Показывай только синтетические операции", projection.longTerm?.userPrompt)
+    }
+
+
+
+    @Test
+    fun categoryCatalogEnforcesHierarchyTypesAndArchiveLifecycle() = runBlocking {
+        val agent = testAgent(MemoryImportSessionRepository(), QueuedGateway(initialDraftJson))
+        val root = agent.createCategory(
+            displayName = "Кино",
+            type = CategoryType.EXPENSE,
+            parentId = null,
+            hint = "Билеты и подписки",
+        ).single { it.displayName == "Кино" }
+        val child = agent.createCategory(
+            displayName = "Премьеры",
+            type = null,
+            parentId = root.id,
+            hint = "",
+        ).single { it.displayName == "Премьеры" }
+
+        assertEquals(CategoryType.EXPENSE, child.type)
+        assertEquals(root.id, child.parentId)
+        assertFailsWith<IllegalArgumentException> {
+            agent.createCategory("Доход с проката", CategoryType.INCOME, root.id, "")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            agent.createCategory(" кино ", CategoryType.EXPENSE, null, "")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            agent.archiveCategory(root.id)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            agent.updateCategory(root.id, "Кино", child.id, "")
+        }
+
+        agent.archiveCategory(child.id)
+        val archived = agent.archiveCategory(root.id)
+        assertTrue(archived.single { it.id == root.id }.archived)
+        assertTrue(agent.listCategories().none { it.id == root.id || it.id == child.id })
+        assertFailsWith<IllegalArgumentException> {
+            agent.createCategory("КИНО", CategoryType.EXPENSE, null, "")
+        }
+        Unit
+    }
+
+    @Test
+    fun categoryPromptContainsOnlyActiveLeavesWithMachineIdsAndDisplayPaths() = runBlocking {
+        val gateway = QueuedGateway(initialDraftJson)
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        agent.createCategory("Кино", CategoryType.EXPENSE, null, "Билеты")
+        val session = agent.createSession("Каталог в prompt", defaultConfig)
+
+        agent.sendMessage(session.session.id, session.session.revision, "Синтетическая выписка")
+
+        val systemPrompt = gateway.requests.single().messages.first().content
+        assertTrue(systemPrompt.contains("food.groceries"))
+        assertTrue(systemPrompt.contains("Еда / Продукты"))
+        assertTrue(systemPrompt.contains("Кино"))
+        assertFalse(systemPrompt.contains("category.food"))
+        assertFalse(systemPrompt.contains("Между своими счетами"))
     }
 
     @Test
@@ -840,6 +1230,32 @@ class SmartExpenseAgentTest {
             runtimeConfig = runtimeConfig,
         )
     }
+    private class ProfileAwareGateway : ChatCompletionGateway {
+        val requests = mutableListOf<ChatCompletionRequest>()
+
+        override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+            requests += request
+            val systemPrompt = request.messages.firstOrNull()?.content.orEmpty()
+            val content = if (systemPrompt.contains("You process one follow-up message")) {
+                val message = if (systemPrompt.contains("style: Кратко")) {
+                    "Краткий статус без лишних деталей."
+                } else {
+                    "Подробный статус с контекстом операции."
+                }
+                """{"intent":"needs_clarification","message":"$message","operations":[],"transactions":[],"memory_candidates":[]}"""
+            } else {
+                initialDraftJson
+            }
+            return ChatCompletionResponse(
+                choices = listOf(
+                    ChatChoice(
+                        message = ResponseMessage(content = content),
+                        finishReason = "stop",
+                    ),
+                ),
+            )
+        }
+    }
 
 
     private class QueuedGateway(vararg responseContents: String) : ChatCompletionGateway {
@@ -928,6 +1344,36 @@ class SmartExpenseAgentTest {
 
         override suspend fun get(id: String): ImportSessionState? = states[id]
 
+        private val categories = DEFAULT_AGENT_CATEGORIES.toMutableList()
+
+        override suspend fun listCategories(includeArchived: Boolean): List<TransactionCategory> =
+            categories.filter { includeArchived || !it.archived }
+
+        override suspend fun insertCategory(category: TransactionCategory): TransactionCategory {
+            require(categories.none { it.id == category.id })
+            require(categories.none { it.displayName.equals(category.displayName, ignoreCase = true) })
+            categories += category
+            return category
+        }
+
+        override suspend fun updateCategory(category: TransactionCategory): TransactionCategory {
+            val index = categories.indexOfFirst { it.id == category.id }
+            require(index >= 0)
+            categories[index] = category
+            return category
+        }
+
+        override suspend fun archiveCategory(id: String): TransactionCategory {
+            val index = categories.indexOfFirst { it.id == id }
+            require(index >= 0)
+            return categories[index].copy(archived = true).also { categories[index] = it }
+        }
+
+        override suspend fun isCategoryReferenced(id: String): Boolean =
+            states.values.any { state ->
+                state.draft?.transactions?.any { it.transaction.categoryId == id } == true
+            }
+
         override suspend fun saveExchange(
             sessionId: String,
             expectedRevision: Long,
@@ -938,6 +1384,9 @@ class SmartExpenseAgentTest {
             updatedAtEpochMs: Long,
             facts: List<StickyFact>?,
             additionalMetrics: List<ModelCallMetric>,
+            memoryTrace: MemoryTrace?,
+            memoryCandidates: List<MemoryCandidate>,
+            receiptState: ReceiptState?,
         ): ImportSessionState = update(
             sessionId,
             expectedRevision,
@@ -945,8 +1394,44 @@ class SmartExpenseAgentTest {
             draft,
             metrics = { it.metrics + additionalMetrics + metric },
             facts = facts,
+            memoryTrace = memoryTrace,
+            memoryCandidates = memoryCandidates,
+            receiptState = receiptState,
         ) { state ->
             state.messages + userMessage + assistantMessage
+        }
+
+        override suspend fun acceptMemoryCandidate(
+            sessionId: String,
+            expectedRevision: Long,
+            candidateId: String,
+            decision: ConfirmedDecision,
+            updatedAtEpochMs: Long,
+        ): ImportSessionState {
+            val current = checkedState(sessionId, expectedRevision)
+            val candidate = current.memoryCandidates.singleOrNull { it.id == candidateId }
+                ?: throw IllegalArgumentException("Кандидат решения не найден: $candidateId")
+            require(candidate.status == MemoryCandidateStatus.PENDING)
+            preferences = (preferences ?: UserPreferences("")).copy(
+                confirmedDecisions = (preferences?.confirmedDecisions ?: emptyList()) + decision,
+            )
+            return current.copy(
+                session = current.session.copy(
+                    revision = expectedRevision + 1,
+                    updatedAtEpochMs = updatedAtEpochMs,
+                ),
+                memoryCandidates = current.memoryCandidates.map { stored ->
+                    if (stored.id == candidateId) {
+                        stored.copy(
+                            status = MemoryCandidateStatus.ACCEPTED,
+                            acceptedDecisionId = decision.id,
+                            acceptedAtEpochMs = updatedAtEpochMs,
+                        )
+                    } else {
+                        stored
+                    }
+                },
+            ).also { states[sessionId] = it }
         }
 
         override suspend fun saveSummaryBatch(
@@ -975,7 +1460,14 @@ class SmartExpenseAgentTest {
             expectedRevision: Long,
             draft: ImportDraft,
             updatedAtEpochMs: Long,
-        ): ImportSessionState = update(sessionId, expectedRevision, updatedAtEpochMs, draft) { it.messages }
+            receiptState: ReceiptState?,
+        ): ImportSessionState = update(
+            sessionId = sessionId,
+            expectedRevision = expectedRevision,
+            updatedAtEpochMs = updatedAtEpochMs,
+            draft = draft,
+            receiptState = receiptState,
+        ) { it.messages }
 
         override suspend fun saveConfig(
             sessionId: String,
@@ -1013,6 +1505,9 @@ class SmartExpenseAgentTest {
                 facts = current.facts,
                 metrics = current.metrics.map { it.copy(inherited = true) },
                 summary = current.summary,
+                memoryTrace = current.memoryTrace,
+                receiptState = current.receiptState,
+                memoryCandidates = current.memoryCandidates,
             ).also { states[forkSession.id] = it }
         }
 
@@ -1022,6 +1517,21 @@ class SmartExpenseAgentTest {
         override suspend fun savePreferences(preferences: UserPreferences): UserPreferences =
             preferences.also { this.preferences = it }
 
+
+
+        override suspend fun saveInvariantCheck(
+            sessionId: String,
+            expectedRevision: Long,
+            result: InvariantCheckResult,
+            updatedAtEpochMs: Long,
+        ): ImportSessionState {
+            val current = checkedState(sessionId, expectedRevision)
+            return current.copy(
+                receiptState = receiptStateFor(current.draft, result),
+            ).also { states[sessionId] = it }
+        }
+
+
         private fun update(
             sessionId: String,
             expectedRevision: Long,
@@ -1029,6 +1539,9 @@ class SmartExpenseAgentTest {
             draft: ImportDraft,
             metrics: (ImportSessionState) -> List<ModelCallMetric> = { it.metrics },
             facts: List<StickyFact>? = null,
+            memoryTrace: MemoryTrace? = null,
+            memoryCandidates: List<MemoryCandidate>? = null,
+            receiptState: ReceiptState? = null,
             messages: (ImportSessionState) -> List<ConversationMessage>,
         ): ImportSessionState {
             val current = checkedState(sessionId, expectedRevision)
@@ -1043,6 +1556,9 @@ class SmartExpenseAgentTest {
                 facts = facts ?: current.facts,
                 metrics = metrics(current),
                 summary = current.summary,
+                memoryTrace = memoryTrace ?: current.memoryTrace,
+                receiptState = receiptState ?: receiptStateFor(draft, current.receiptState.lastCompliance),
+                memoryCandidates = current.memoryCandidates + (memoryCandidates ?: emptyList()),
             )
             states[sessionId] = updated
             return updated
@@ -1097,6 +1613,49 @@ class SmartExpenseAgentTest {
               "unparsed_fragments": []
             }
         """.trimIndent()
+        val initialDraftWithMemoryCandidateJson = initialDraftJson.replace(
+            "\"unparsed_fragments\": []",
+            "\"unparsed_fragments\": [],\n  \"memory_candidates\": [{\"text\":\"Подтверждённое правило импорта\",\"reason\":\"Пользователь явно сформулировал повторяющееся правило.\"}]",
+        )
+        val initialDraftWithTransferMemoryCandidateJson = initialDraftJson.replace(
+            "\"unparsed_fragments\": []",
+            "\"unparsed_fragments\": [],\n  \"memory_candidates\": [{\"text\":\"Не включай переводы себе\",\"reason\":\"Пользователь явно сформулировал повторяющееся правило.\"}]",
+        )
+        val initialDraftWithGeneratedDescriptionsJson = initialDraftJson
+            .replace(
+                "\"merchant\": \"DEMO MARKET\",",
+                "\"merchant\": \"DEMO MARKET\",\n                  \"description\": \"Яблоки, 2 кг\",",
+            )
+            .replace(
+                "\"merchant\": \"DEMO TAXI\",",
+                "\"merchant\": \"DEMO TAXI\",\n                  \"description\": \"DEMO TAXI, 16.01.2026, картой, 450,00 RUB\",",
+            )
+        val appendIncomeWithDescriptionJson = """
+            {
+              "intent": "append_statement",
+              "message": "Найден доход.",
+              "operations": [],
+              "transactions": [
+                {
+                  "source_index": 200,
+                  "included": true,
+                  "direction": "income",
+                  "occurred_at": "2026-01-20T09:00:00",
+                  "posted_at": null,
+                  "amount_minor": 250000,
+                  "currency": "RUB",
+                  "merchant": "DEMO EMPLOYER",
+                  "description": "Зарплата за январь",
+                  "category_id": "income.salary",
+                  "card_last4": null,
+                  "needs_review": false,
+                  "issues": []
+                }
+              ]
+            }
+        """.trimIndent()
+
+
 
         val englishIssuesDraftJson = """
             {
@@ -1133,6 +1692,25 @@ class SmartExpenseAgentTest {
               "transactions": []
             }
         """.trimIndent()
+        val followUpWithRepeatedAndNewMemoryCandidatesJson = """
+            {
+              "intent": "needs_clarification",
+              "message": "Уточнение принято.",
+              "operations": [],
+              "transactions": [],
+              "memory_candidates": [
+                {
+                  "text": "Не включать переводы себе.",
+                  "reason": "Пользователь явно указал это правило в подтверждённых решениях."
+                },
+                {
+                  "text": "Не включать покупки без чека.",
+                  "reason": "Пользователь явно сформулировал новое правило в текущем сообщении."
+                }
+              ]
+            }
+        """.trimIndent()
+
 
         val appendStatementJson = """
             {

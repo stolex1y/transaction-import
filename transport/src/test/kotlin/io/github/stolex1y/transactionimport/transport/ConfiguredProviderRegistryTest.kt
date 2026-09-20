@@ -215,7 +215,7 @@ class ConfiguredProviderRegistryTest {
                   "credential_env": "DEEPSEEK_API_KEY",
                   "models": [
                     {
-                      "id": "deepseek-v4-flash",
+                      "id": "deepseek-flash",
                       "reasoning_modes": [
                         { "id": "disabled", "request_fields": {} }
                       ]
@@ -231,7 +231,7 @@ class ConfiguredProviderRegistryTest {
             """
             {
               "default_provider_id": "deepseek",
-              "default_model_id": "deepseek-v4-flash",
+              "default_model_id": "deepseek-flash",
               "default_reasoning_mode_id": "disabled",
               "temperature": null,
               "max_tokens": 100000,
@@ -250,7 +250,7 @@ class ConfiguredProviderRegistryTest {
         assertEquals(4, runtime.contextManagement?.recentMessages)
         assertNull(runtime.temperature)
         assertEquals(
-            AgentConfig("deepseek", "deepseek-v4-flash", "disabled"),
+            AgentConfig("deepseek", "deepseek-flash", "disabled"),
             runtime.defaultAgentConfig(),
         )
     }
