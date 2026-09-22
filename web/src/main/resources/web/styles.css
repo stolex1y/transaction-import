@@ -917,6 +917,36 @@ html[data-theme="light"] .agent-body select {
     white-space: pre-wrap;
 }
 
+.tbank-panel {
+    margin-top: 28px;
+    padding-top: 24px;
+    border-top: 1px solid var(--agent-border);
+}
+
+.tbank-panel h2 {
+    margin-bottom: 0;
+}
+
+.tbank-panel .category-form {
+    margin-top: 16px;
+}
+
+.tbank-panel .category-form-actions button:first-child {
+    flex: 1;
+}
+
+.tbank-result {
+    max-height: 320px;
+    margin: 16px 0 0;
+    padding: 10px;
+    overflow: auto;
+    border: 1px solid var(--agent-border);
+    background: var(--agent-bg);
+    color: var(--agent-text);
+    font-size: 0.72rem;
+    white-space: pre-wrap;
+}
+
 .session-item {
     display: grid;
     width: 100%;

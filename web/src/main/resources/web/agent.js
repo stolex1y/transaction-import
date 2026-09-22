@@ -11,6 +11,20 @@ const elements = {
     mcpRefresh: document.querySelector("#refresh-mcp-catalog"),
     mcpStatus: document.querySelector("#mcp-catalog-status"),
     mcpList: document.querySelector("#mcp-catalog-list"),
+    tbankLoginForm: document.querySelector("#tbank-login-form"),
+    tbankMode: document.querySelector("#tbank-mode"),
+    tbankPhone: document.querySelector("#tbank-phone"),
+    tbankPassword: document.querySelector("#tbank-password"),
+    tbankOtp: document.querySelector("#tbank-otp"),
+    tbankLogout: document.querySelector("#tbank-logout"),
+    tbankSessionStatus: document.querySelector("#tbank-session-status"),
+    tbankLoginStatus: document.querySelector("#tbank-login-status"),
+    tbankQueryForm: document.querySelector("#tbank-query-form"),
+    tbankAccount: document.querySelector("#tbank-account"),
+    tbankFrom: document.querySelector("#tbank-from"),
+    tbankTo: document.querySelector("#tbank-to"),
+    tbankLimit: document.querySelector("#tbank-limit"),
+    tbankResult: document.querySelector("#tbank-result"),
     preferencesForm: document.querySelector("#preferences-form"),
     globalUserPrompt: document.querySelector("#global-user-prompt"),
     savePreferences: document.querySelector("#save-preferences"),
@@ -70,6 +84,7 @@ const VIEW_KEY = "smart-expense-operation-view";
 const MOBILE_VIEW = window.matchMedia("(max-width: 760px)");
 let catalog = { providers: [], categories: [] };
 let mcpCatalog = { servers: [] };
+let tbankSession = { authenticated: false };
 let categoryCatalog = [];
 let sessions = [];
 let activeState = null;
@@ -97,6 +112,7 @@ function ensureMcpElements() {
 }
 
 ensureMcpElements();
+updateTbankMode();
 initializeTheme();
 elements.themeToggle.addEventListener("click", toggleTheme);
 elements.openDrawer.addEventListener("click", openDrawer);
@@ -109,6 +125,10 @@ for (const button of [elements.newSession, elements.drawerNewSession, elements.e
     button.addEventListener("click", createSession);
 }
 elements.mcpRefresh?.addEventListener("click", loadMcpCatalog);
+elements.tbankLoginForm?.addEventListener("submit", handleTbankLogin);
+elements.tbankLogout?.addEventListener("click", handleTbankLogout);
+elements.tbankQueryForm?.addEventListener("submit", handleTbankTransactions);
+elements.tbankMode?.addEventListener("change", updateTbankMode);
 elements.preferencesForm.addEventListener("submit", savePreferences);
 elements.categoryForm.addEventListener("submit", saveCategoryForm);
 elements.cancelCategoryEdit.addEventListener("click", resetCategoryForm);
@@ -142,21 +162,27 @@ initialize();
 async function initialize() {
     setBusy(true);
     try {
-        const [providerCatalog, preferences, storedSessions, storedCategories, loadedMcpCatalog] = await Promise.all([
+        const [providerCatalog, preferences, storedSessions, storedCategories, loadedMcpCatalog, loadedTbankSession] = await Promise.all([
             api("/api/agent/providers"),
             api("/api/agent/preferences"),
             api("/api/agent/sessions"),
             api("/api/agent/categories"),
             api("/api/agent/mcp"),
+            api("/api/agent/tbank/session"),
         ]);
         catalog = providerCatalog;
         mcpCatalog = loadedMcpCatalog;
+        tbankSession = loadedTbankSession;
         categoryCatalog = storedCategories;
         sessions = storedSessions;
         renderMcpCatalog();
+        renderTbankSession();
         renderPreferences(preferences);
         renderCategoryManager();
         renderSessionList();
+        if (tbankSession.authenticated) {
+            await loadTbankAccounts();
+        }
         const remembered = localStorage.getItem(ACTIVE_SESSION_KEY);
         const initial = sessions.find((session) => session.id === remembered) || sessions[0];
         if (initial) {
@@ -270,7 +296,7 @@ function renderMcpCatalog() {
     }
 
     const connected = servers.filter((server) => server.status === "connected").length;
-    elements.mcpStatus.textContent = `Подключено: ${connected} из ${servers.length}. Вызов tools отключён.`;
+    elements.mcpStatus.textContent = `Подключено: ${connected} из ${servers.length}. tools/call доступен через форму Т-Банк.`;
     elements.mcpStatus.className = connected === servers.length
         ? "control-note success"
         : "control-note";
@@ -331,6 +357,143 @@ function renderMcpCatalog() {
         item.append(toolList);
         elements.mcpList.append(item);
     }
+}
+
+async function handleTbankLogin(event) {
+    event.preventDefault();
+    const button = document.querySelector("#tbank-login");
+    button.disabled = true;
+    elements.tbankLoginStatus.textContent = "Выполняем login…";
+    elements.tbankLoginStatus.className = "control-note";
+    try {
+        const response = await api("/api/agent/tbank/login", jsonOptions("POST", {
+            mode: elements.tbankMode.value,
+            phone: elements.tbankPhone.value.trim(),
+            password: elements.tbankPassword.value,
+            otp: elements.tbankOtp.value.trim(),
+        }));
+        tbankSession = response;
+        renderTbankSession();
+        elements.tbankLoginStatus.textContent = response.message;
+        elements.tbankLoginStatus.className = response.authenticated
+            ? "control-note success"
+            : "control-note error";
+        if (response.authenticated) {
+            elements.tbankPassword.value = "";
+            elements.tbankOtp.value = "";
+            await loadTbankAccounts();
+        }
+    } catch (error) {
+        elements.tbankLoginStatus.textContent = `Login не выполнен: ${error.message}`;
+        elements.tbankLoginStatus.className = "control-note error";
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function handleTbankLogout() {
+    elements.tbankLogout.disabled = true;
+    try {
+        tbankSession = await api("/api/agent/tbank/logout", { method: "POST" });
+        elements.tbankAccount.replaceChildren();
+        elements.tbankPassword.value = "";
+        elements.tbankOtp.value = "";
+        elements.tbankQueryForm.hidden = true;
+        elements.tbankResult.hidden = true;
+        elements.tbankResult.textContent = "";
+        elements.tbankLoginStatus.textContent = "Сессия очищена в памяти MCP-сервера.";
+        elements.tbankLoginStatus.className = "control-note";
+        renderTbankSession();
+    } catch (error) {
+        elements.tbankLoginStatus.textContent = `Logout не выполнен: ${error.message}`;
+        elements.tbankLoginStatus.className = "control-note error";
+    } finally {
+        elements.tbankLogout.disabled = false;
+    }
+}
+
+function renderTbankSession() {
+    if (tbankSession.authenticated) {
+        elements.tbankSessionStatus.textContent = `сессия активна (${tbankSession.mode})`;
+        elements.tbankSessionStatus.className = "mcp-server-status connected";
+        return;
+    }
+    elements.tbankSessionStatus.textContent = "login не выполнен";
+    elements.tbankSessionStatus.className = "mcp-server-status";
+    elements.tbankQueryForm.hidden = true;
+}
+
+async function loadTbankAccounts() {
+    try {
+        const accounts = await callTbankTool("list-accounts", {});
+        elements.tbankAccount.replaceChildren();
+        for (const account of Array.isArray(accounts) ? accounts : []) {
+            const option = document.createElement("option");
+            option.value = account.id;
+            const balance = account.balance_minor == null
+                ? ""
+                : ` · ${(account.balance_minor / 100).toFixed(2)} ${account.currency}`;
+            option.textContent = `${account.name} (${account.id})${balance}`;
+            elements.tbankAccount.append(option);
+        }
+        elements.tbankQueryForm.hidden = elements.tbankAccount.options.length === 0;
+        elements.tbankLoginStatus.textContent = `Счета получены через tools/call: ${elements.tbankAccount.options.length}.`;
+        elements.tbankLoginStatus.className = "control-note success";
+    } catch (error) {
+        elements.tbankQueryForm.hidden = true;
+        elements.tbankLoginStatus.textContent = `Не удалось вызвать list-accounts: ${error.message}`;
+        elements.tbankLoginStatus.className = "control-note error";
+    }
+}
+
+async function handleTbankTransactions(event) {
+    event.preventDefault();
+    const button = document.querySelector("#tbank-load-transactions");
+    button.disabled = true;
+    elements.tbankResult.hidden = false;
+    elements.tbankResult.textContent = "Вызываем get-account-transactions…";
+    try {
+        const result = await callTbankTool("get-account-transactions", {
+            account_id: elements.tbankAccount.value,
+            from: elements.tbankFrom.value,
+            to: elements.tbankTo.value,
+            limit: Number(elements.tbankLimit.value),
+        });
+        elements.tbankResult.textContent = JSON.stringify(result, null, 2);
+        elements.tbankLoginStatus.textContent = `Результат tools/call получен: ${result.transactions?.length || 0} операций.`;
+        elements.tbankLoginStatus.className = "control-note success";
+    } catch (error) {
+        elements.tbankResult.textContent = `Ошибка tools/call: ${error.message}`;
+        elements.tbankLoginStatus.textContent = `Операции не получены: ${error.message}`;
+        elements.tbankLoginStatus.className = "control-note error";
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function callTbankTool(tool, argumentsValue) {
+    const response = await api(
+        "/api/agent/tbank/tools/call",
+        jsonOptions("POST", { tool, arguments: argumentsValue }),
+    );
+    if (response.is_error) {
+        throw new ApiError(response.text || "MCP tool вернул ошибку.", 422);
+    }
+    try {
+        return JSON.parse(response.text);
+    } catch (_) {
+        throw new ApiError("MCP tool вернул невалидный JSON.", 502);
+    }
+}
+
+function updateTbankMode() {
+    const fake = elements.tbankMode.value === "fake";
+    elements.tbankOtp.disabled = fake;
+    elements.tbankOtp.placeholder = fake ? "не нужен в fake mode" : "код из SMS";
+    elements.tbankLoginStatus.textContent = fake
+        ? "Синтетические credentials: demo / demo."
+        : "Real mode: private API, read-only, без обхода MFA и антибот-защиты.";
+    elements.tbankLoginStatus.className = "control-note";
 }
 
 function mcpStatusLabel(status) {

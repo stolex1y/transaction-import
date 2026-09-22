@@ -42,6 +42,45 @@
             <p id="mcp-catalog-status" class="control-note">Проверяем подключение…</p>
             <div id="mcp-catalog-list" class="mcp-catalog-list"></div>
         </section>
+        <section class="tbank-panel" aria-labelledby="tbank-title">
+            <div class="section-heading">
+                <h2 id="tbank-title">Т-Банк MCP</h2>
+                <span id="tbank-session-status" class="mcp-server-status">не выполнен login</span>
+            </div>
+            <p class="control-note">Fake mode — синтетические данные для демо. Real mode —
+                opt-in read-only эксперимент для собственного аккаунта; credentials
+                не сохраняются приложением.</p>
+            <form id="tbank-login-form" class="category-form">
+                <label for="tbank-mode">Режим</label>
+                <select id="tbank-mode" name="mode">
+                    <option value="fake">fake — demo</option>
+                    <option value="real">real — private API</option>
+                </select>
+                <label for="tbank-phone">Телефон или demo login</label>
+                <input id="tbank-phone" name="phone" autocomplete="off" value="demo" required>
+                <label for="tbank-password">Пароль</label>
+                <input id="tbank-password" name="password" type="password" autocomplete="off" value="demo">
+                <label for="tbank-otp">Одноразовый код (только real mode)</label>
+                <input id="tbank-otp" name="otp" inputmode="numeric" autocomplete="one-time-code">
+                <div class="category-form-actions">
+                    <button id="tbank-login" type="submit">Войти</button>
+                    <button id="tbank-logout" class="danger-button" type="button">Выйти</button>
+                </div>
+            </form>
+            <p id="tbank-login-status" class="control-note">Синтетические credentials: demo / demo.</p>
+            <form id="tbank-query-form" class="category-form" hidden>
+                <label for="tbank-account">Счёт</label>
+                <select id="tbank-account" required></select>
+                <label for="tbank-from">С</label>
+                <input id="tbank-from" type="date" value="2026-09-01" required>
+                <label for="tbank-to">По</label>
+                <input id="tbank-to" type="date" value="2026-09-30" required>
+                <label for="tbank-limit">Лимит операций</label>
+                <input id="tbank-limit" type="number" min="1" max="100" value="50" required>
+                <button id="tbank-load-transactions" type="submit">Вызвать get-account-transactions</button>
+            </form>
+            <pre id="tbank-result" class="tbank-result" hidden></pre>
+        </section>
 
 
         <form id="preferences-form" class="preferences-form">

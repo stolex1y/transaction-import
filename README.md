@@ -39,8 +39,8 @@ Transaction Import — локальное web-приложение для изв
 - даты операций в UI показываются как `DD-MM-YYYY HH:mm`, а в SQLite и API
   сохраняются в ISO 8601.
 - локальный MCP-каталог в drawer: приложение подключается к настроенным
-  Streamable HTTP endpoints и показывает их статус, tools и входные JSON Schema
-  без вызова tools;
+  Streamable HTTP endpoints, показывает их статус, tools и входные JSON Schema;
+  для T-Банк отдельная форма выполняет безопасные read-only `tools/call`;
 
 Приложение не записывает операции в финансовый ledger. Подготовленный JSON —
 конечный результат текущего сценария.
@@ -132,15 +132,15 @@ Transaction Import — локальное web-приложение для изв
 account/reference ID без телефонных признаков не изменяются. Несмотря на это,
 не отправляйте реальные финансовые данные внешнему LLM-провайдеру.
 
-## Локальный MCP-каталог
+## Локальный MCP и T-Банк flow
 
 Приложение подключает локальные MCP-серверы через Streamable HTTP. Настройки
 серверов находятся в `config/agent.json` в поле `mcp_servers`: приложение
 использует только endpoint URL и не запускает MCP-процессы.
 
-Для текущего локального набора откройте три терминала.
+Для fake demo откройте три терминала.
 
-Терминал 1 — банковский MCP-сервер:
+Терминал 1 — T-Банк MCP-сервер:
 
 ```bash
 cd solutions/bank-transactions-mcp-server
@@ -164,9 +164,30 @@ cd solutions/transaction-import
 ./web/build/install/transaction-import-web/bin/transaction-import-web
 ```
 
-При старте и по кнопке «Обновить» приложение выполняет через HTTP только MCP
-`initialize` и `tools/list`. Вызов `tools/call`, подключение к банкам и
-использование реальных финансовых данных не выполняются.
+Откройте `http://127.0.0.1:8080/agent`, затем в drawer:
+
+1. проверьте каталог `MCP-серверы` и две схемы T-Банк tools;
+2. оставьте `fake`, введите synthetic credentials `demo` / `demo` и нажмите
+   `Войти`;
+3. выберите счёт, период `2026-09-01`—`2026-09-30` и нажмите
+   `Вызвать get-account-transactions`;
+4. проверьте JSON результата: счёт, `amount_minor`, дату, merchant и список
+   операций.
+
+Fake mode детерминирован и не обращается к банку. `real` выбирается явно для
+собственного read-only аккаунта: private API не является официальным публичным
+контрактом, credentials передаются только на loopback во время login и не
+попадают в БД, logs, LLM context или MCP arguments. MFA, certificate pinning
+и anti-bot bypass не выполняются; реальный smoke не является частью обычных
+тестов.
+
+Приложение использует explicit form flow, а не автономный LLM
+tool-calling loop: UI формирует MCP arguments, backend вызывает `tools/call`,
+а ответ показывает в панели результата.
+
+При старте и по кнопке «Обновить» приложение выполняет через HTTP MCP
+`initialize` и `tools/list`. Вызов `tools/call` выполняется только после
+локального login и явного действия пользователя в форме.
 
 ## Конфигурация провайдеров
 

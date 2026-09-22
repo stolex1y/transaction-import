@@ -88,6 +88,7 @@ fun main() {
             runtimeConfig = runtimeConfig,
             availableProviderIds = providerRegistry.availableProviderIds(),
             mcpCatalog = mcpCatalog,
+            tbankMcp = mcpCatalog,
         )
         embeddedServer(Netty, host = "127.0.0.1", port = port) {
             module(agentDependencies = agentDependencies)

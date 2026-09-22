@@ -3,9 +3,18 @@ package io.github.stolex1y.transactionimport.web
 import io.github.stolex1y.transactionimport.core.McpServerConfig
 
 import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import io.ktor.client.request.get
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.request.header
+import io.ktor.http.ContentType
 import io.modelcontextprotocol.kotlin.sdk.client.Client
 import io.modelcontextprotocol.kotlin.sdk.client.StreamableHttpClientTransport
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequest
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequestParams
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
+import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
@@ -14,6 +23,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -23,6 +33,9 @@ private const val MCP_CLIENT_NAME = "smart-expense-agent"
 private const val MCP_CLIENT_VERSION = "0.1.0"
 private const val CONNECT_TIMEOUT_MS = 15_000L
 private const val LIST_TIMEOUT_MS = 5_000L
+private const val CALL_TIMEOUT_MS = 30_000L
+private const val TBANK_SERVER_ID = "tbank-transactions"
+private const val LEGACY_TBANK_SERVER_ID = "bank-transactions"
 
 @Serializable
 data class McpToolCatalog(
@@ -45,16 +58,75 @@ data class McpCatalogResponse(
     val servers: List<McpServerCatalog>,
 )
 
+@Serializable
+data class TbankLoginRequest(
+    val mode: String = "fake",
+    val phone: String = "",
+    val password: String = "",
+    val otp: String = "",
+)
+
+@Serializable
+data class TbankLoginResponse(
+    val mode: String,
+    val status: String,
+    val message: String,
+    @SerialName("requires_otp") val requiresOtp: Boolean = false,
+    @SerialName("requires_password") val requiresPassword: Boolean = false,
+    val authenticated: Boolean = false,
+    @SerialName("account_count") val accountCount: Int = 0,
+)
+
+@Serializable
+data class TbankSessionResponse(
+    val mode: String? = null,
+    val authenticated: Boolean,
+    @SerialName("account_count") val accountCount: Int = 0,
+)
+
+@Serializable
+data class TbankToolCallRequest(
+    val tool: String,
+    val arguments: JsonObject = JsonObject(emptyMap()),
+)
+
+@Serializable
+data class TbankToolCallResponse(
+    val tool: String,
+    @SerialName("is_error") val isError: Boolean = false,
+    val text: String,
+)
+
+interface TbankMcpProvider {
+    suspend fun login(request: TbankLoginRequest): TbankLoginResponse
+    suspend fun logout(): TbankSessionResponse
+    suspend fun session(): TbankSessionResponse
+    suspend fun callTool(request: TbankToolCallRequest): TbankToolCallResponse
+}
+
+object UnavailableTbankMcpProvider : TbankMcpProvider {
+    private const val MESSAGE = "T-Bank MCP server не настроен."
+
+    override suspend fun login(request: TbankLoginRequest) =
+        TbankLoginResponse(mode = request.mode, status = "error", message = MESSAGE)
+
+    override suspend fun logout() = TbankSessionResponse(authenticated = false)
+
+    override suspend fun session() = TbankSessionResponse(authenticated = false)
+
+    override suspend fun callTool(request: TbankToolCallRequest) =
+        TbankToolCallResponse(tool = request.tool, isError = true, text = MESSAGE)
+}
+
 fun interface McpCatalogProvider {
     suspend fun catalog(): McpCatalogResponse
 }
-
 class McpCatalogService private constructor(
     private val httpClient: HttpClient,
     private val configs: List<McpServerConfig>,
     private val states: MutableMap<String, McpServerCatalog>,
     private val connections: MutableMap<String, ActiveMcpConnection>,
-) : McpCatalogProvider, AutoCloseable {
+) : McpCatalogProvider, TbankMcpProvider, AutoCloseable {
     private val mutex = Mutex()
 
     override suspend fun catalog(): McpCatalogResponse = mutex.withLock {
@@ -99,6 +171,89 @@ class McpCatalogService private constructor(
         McpCatalogResponse(servers = current)
     }
 
+    override suspend fun login(request: TbankLoginRequest): TbankLoginResponse = mutex.withLock {
+        val config = tbankConfig()
+            ?: return@withLock TbankLoginResponse(
+                mode = request.mode,
+                status = "error",
+                message = "T-Bанк MCP endpoint не настроен.",
+            )
+        try {
+            httpClient.post(serviceUrl(config, "/tbank/login")) {
+                header(io.ktor.http.HttpHeaders.ContentType, ContentType.Application.Json.toString())
+                setBody(request)
+            }.body()
+        } catch (error: Throwable) {
+            TbankLoginResponse(
+                mode = request.mode,
+                status = "error",
+                message = "Не удалось выполнить login: ${safeError(error)}",
+            )
+        }
+    }
+
+    override suspend fun logout(): TbankSessionResponse = mutex.withLock {
+        val config = tbankConfig() ?: return@withLock TbankSessionResponse(authenticated = false)
+        try {
+            httpClient.post(serviceUrl(config, "/tbank/logout")).body()
+        } catch (_: Throwable) {
+            TbankSessionResponse(authenticated = false)
+        }
+    }
+
+    override suspend fun session(): TbankSessionResponse = mutex.withLock {
+        val config = tbankConfig() ?: return@withLock TbankSessionResponse(authenticated = false)
+        try {
+            httpClient.get(serviceUrl(config, "/tbank/session")).body()
+        } catch (_: Throwable) {
+            TbankSessionResponse(authenticated = false)
+        }
+    }
+
+    override suspend fun callTool(request: TbankToolCallRequest): TbankToolCallResponse = mutex.withLock {
+        val config = tbankConfig()
+            ?: return@withLock TbankToolCallResponse(
+                tool = request.tool,
+                isError = true,
+                text = "T-Банк MCP endpoint не настроен.",
+            )
+        val connection = connections[config.id] ?: run {
+            val result = connect(config, httpClient)
+            result.connection?.let { connections[config.id] = it }
+            states[config.id] = updateState(config, result)
+            result.connection
+        }
+            ?: return@withLock TbankToolCallResponse(
+                tool = request.tool,
+                isError = true,
+                text = states[config.id]?.error ?: "MCP-соединение недоступно.",
+            )
+        try {
+            val result = withTimeout(CALL_TIMEOUT_MS) {
+                connection.client.callTool(
+                    CallToolRequest(
+                        CallToolRequestParams(request.tool, request.arguments),
+                    ),
+                )
+            }
+            val text = result.content
+                .filterIsInstance<TextContent>()
+                .joinToString("\n") { it.text }
+                .ifBlank { result.structuredContent?.toString().orEmpty() }
+            TbankToolCallResponse(
+                tool = request.tool,
+                isError = result.isError == true,
+                text = text,
+            )
+        } catch (error: Throwable) {
+            TbankToolCallResponse(
+                tool = request.tool,
+                isError = true,
+                text = safeError(error),
+            )
+        }
+    }
+
     override fun close() {
         runBlocking {
             mutex.withLock {
@@ -108,6 +263,17 @@ class McpCatalogService private constructor(
                 connections.clear()
             }
         }
+    }
+
+    private fun tbankConfig(): McpServerConfig? =
+        configs.firstOrNull { config ->
+            config.enabled && config.id in setOf(TBANK_SERVER_ID, LEGACY_TBANK_SERVER_ID)
+        }
+
+    private fun serviceUrl(config: McpServerConfig, path: String): String {
+        val endpoint = config.endpoint.trimEnd('/')
+        val base = endpoint.substringBeforeLast('/')
+        return "$base$path"
     }
 
     private suspend fun closeConnection(id: String, connection: ActiveMcpConnection) {

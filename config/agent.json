@@ -13,8 +13,8 @@
   },
   "mcp_servers": [
     {
-      "id": "bank-transactions",
-      "display_name": "Банковские транзакции",
+      "id": "tbank-transactions",
+      "display_name": "Т-Банк: счета и операции",
       "endpoint": "http://127.0.0.1:3001/mcp"
     },
     {

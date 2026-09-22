@@ -35,6 +35,7 @@ class AgentWebDependencies(
     val mcpCatalog: McpCatalogProvider = McpCatalogProvider {
         McpCatalogResponse(emptyList())
     },
+    val tbankMcp: TbankMcpProvider = UnavailableTbankMcpProvider,
 )
 
 @Serializable
@@ -169,6 +170,22 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
 
     get("/api/agent/mcp") {
         call.respond(dependencies.requireAgentRuntime().mcpCatalog.catalog())
+    }
+
+    post("/api/agent/tbank/login") {
+        val runtime = dependencies.requireAgentRuntime()
+        call.respond(runtime.tbankMcp.login(call.receive()))
+    }
+    post("/api/agent/tbank/logout") {
+        call.respond(dependencies.requireAgentRuntime().tbankMcp.logout())
+    }
+    get("/api/agent/tbank/session") {
+        call.respond(dependencies.requireAgentRuntime().tbankMcp.session())
+    }
+    post("/api/agent/tbank/tools/call") {
+        call.respond(
+            dependencies.requireAgentRuntime().tbankMcp.callTool(call.receive()),
+        )
     }
 
 
