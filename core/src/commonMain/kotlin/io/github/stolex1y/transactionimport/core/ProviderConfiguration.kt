@@ -240,9 +240,7 @@ data class ContextCompressionConfig(
 data class McpServerConfig(
     val id: String,
     @SerialName("display_name") val displayName: String,
-    val command: String,
-    val arguments: List<String> = emptyList(),
-    @SerialName("working_directory") val workingDirectory: String? = null,
+    val endpoint: String,
     val enabled: Boolean = true,
 )
 

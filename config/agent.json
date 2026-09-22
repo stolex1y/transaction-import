@@ -15,14 +15,12 @@
     {
       "id": "bank-transactions",
       "display_name": "Банковские транзакции",
-      "command": "build/install/bank-transactions-mcp-server/bin/bank-transactions-mcp-server",
-      "working_directory": "../bank-transactions-mcp-server"
+      "endpoint": "http://127.0.0.1:3001/mcp"
     },
     {
       "id": "receipts",
       "display_name": "Чеки",
-      "command": "build/install/receipts-mcp-server/bin/receipts-mcp-server",
-      "working_directory": "../receipts-mcp-server"
+      "endpoint": "http://127.0.0.1:3002/mcp"
     }
   ]
 }

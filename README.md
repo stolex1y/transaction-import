@@ -38,7 +38,9 @@ Transaction Import — локальное web-приложение для изв
   сохраняет консервативную локальную оценку occupancy и effective reserve;
 - даты операций в UI показываются как `DD-MM-YYYY HH:mm`, а в SQLite и API
   сохраняются в ISO 8601.
-- локальный MCP-каталог в drawer: приложение подключается к настроенным stdio-серверам и показывает их статус, tools и входные JSON Schema без вызова tools;
+- локальный MCP-каталог в drawer: приложение подключается к настроенным
+  Streamable HTTP endpoints и показывает их статус, tools и входные JSON Schema
+  без вызова tools;
 
 Приложение не записывает операции в финансовый ledger. Подготовленный JSON —
 конечный результат текущего сценария.
@@ -132,29 +134,37 @@ account/reference ID без телефонных признаков не изм�
 
 ## Локальный MCP-каталог
 
-Приложение может подключать локальные MCP-серверы через `stdio`. Настройки
-серверов находятся в `config/agent.json` в поле `mcp_servers`: команда и
-аргументы передаются в `ProcessBuilder` без shell-интерпретации, а
-`working_directory` задаёт рабочий каталог процесса.
+Приложение подключает локальные MCP-серверы через Streamable HTTP. Настройки
+серверов находятся в `config/agent.json` в поле `mcp_servers`: приложение
+использует только endpoint URL и не запускает MCP-процессы.
 
-Для текущего локального набора сначала соберите соседние серверы:
+Для текущего локального набора откройте три терминала.
+
+Терминал 1 — банковский MCP-сервер:
 
 ```bash
-cd ../bank-transactions-mcp-server
+cd solutions/bank-transactions-mcp-server
 ./gradlew installDist
-cd ../receipts-mcp-server
-./gradlew installDist
-cd ../transaction-import
-./gradlew :web:installDist
+MCP_PORT=3001 ./build/install/bank-transactions-mcp-server/bin/bank-transactions-mcp-server
 ```
 
-Затем запускайте приложение из `solutions/transaction-import`:
+Терминал 2 — MCP-сервер чеков:
 
 ```bash
+cd solutions/receipts-mcp-server
+./gradlew installDist
+MCP_PORT=3002 ./build/install/receipts-mcp-server/bin/receipts-mcp-server
+```
+
+Терминал 3 — приложение:
+
+```bash
+cd solutions/transaction-import
+./gradlew :web:installDist
 ./web/build/install/transaction-import-web/bin/transaction-import-web
 ```
 
-При старте и по кнопке «Обновить» приложение выполняет только MCP
+При старте и по кнопке «Обновить» приложение выполняет через HTTP только MCP
 `initialize` и `tools/list`. Вызов `tools/call`, подключение к банкам и
 использование реальных финансовых данных не выполняются.
 
@@ -222,7 +232,7 @@ cd ../transaction-import
 | `max_tokens` | положительное целое | Максимум output tokens обычного agent-вызова. Фактическое значение ограничивается `max_output_tokens` модели, если оно задано. Для summary и facts используются отдельные поля `summary_max_tokens` и `facts_max_tokens`. |
 | `default_user_prompt` | строка, максимум 8000 символов | Начальные общие инструкции пользователя. Они записываются в SQLite при первом создании настроек; изменение файла не перезаписывает уже сохранённое значение. |
 | `context_management` | объект или `null` | Выбирает одну стратегию контекста для новых сессий. |
-| `mcp_servers` | массив объектов | Локальные stdio-серверы для каталога MCP; по умолчанию пустой список. |
+| `mcp_servers` | массив объектов | HTTP endpoints локальных MCP-серверов для каталога; по умолчанию пустой список. |
 
 `default_*` и `context_management` фиксируются в snapshot сессии при её
 создании. Поэтому после изменения `agent.json` нужно перезапустить приложение и
@@ -235,12 +245,12 @@ cd ../transaction-import
 Каждый объект содержит:
 
 - `id` и `display_name` — стабильный идентификатор и название в drawer;
-- `command` и необязательный `arguments` — исполняемый файл и аргументы;
-- `working_directory` — рабочий каталог процесса, необязательный;
+- `endpoint` — URL Streamable HTTP MCP endpoint;
 - `enabled` — признак включения, по умолчанию `true`.
 
-Приложение сохраняет соединение с успешно запущенным сервером до остановки
-процесса и повторно запрашивает `tools/list` по кнопке «Обновить».
+Приложение не запускает и не останавливает MCP-серверы. Оно сохраняет
+MCP-соединение до остановки приложения и повторно запрашивает `tools/list` по
+кнопке «Обновить».
 
 ### Поля `context_management`
 

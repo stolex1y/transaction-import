@@ -65,7 +65,7 @@ fun main() {
     }
 
     val mcpCatalog = runBlocking {
-        McpCatalogService.connect(runtimeConfig.mcpServers)
+        McpCatalogService.connect(runtimeConfig.mcpServers, httpClient)
     }
 
     try {
