@@ -181,6 +181,9 @@ Fake mode детерминирован и не обращается к банк�
 и anti-bot bypass не выполняются; реальный smoke не является частью обычных
 тестов.
 
+Сетевые ошибки и HTTP non-2xx от T-Банк server показываются как понятный
+login error; HTML или сырой response body не десериализуются как credentials.
+
 Приложение использует explicit form flow, а не автономный LLM
 tool-calling loop: UI формирует MCP arguments, backend вызывает `tools/call`,
 а ответ показывает в панели результата.

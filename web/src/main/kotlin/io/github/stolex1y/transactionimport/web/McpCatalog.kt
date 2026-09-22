@@ -9,6 +9,7 @@ import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.request.header
 import io.ktor.http.ContentType
+import io.ktor.http.isSuccess
 import io.modelcontextprotocol.kotlin.sdk.client.Client
 import io.modelcontextprotocol.kotlin.sdk.client.StreamableHttpClientTransport
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequest
@@ -179,10 +180,19 @@ class McpCatalogService private constructor(
                 message = "T-Bанк MCP endpoint не настроен.",
             )
         try {
-            httpClient.post(serviceUrl(config, "/tbank/login")) {
+            val response = httpClient.post(serviceUrl(config, "/tbank/login")) {
                 header(io.ktor.http.HttpHeaders.ContentType, ContentType.Application.Json.toString())
                 setBody(request)
-            }.body()
+            }
+            if (!response.status.isSuccess()) {
+                TbankLoginResponse(
+                    mode = request.mode,
+                    status = "error",
+                    message = "Т-Банк MCP server вернул HTTP ${response.status.value}. Проверьте актуальность server и его logs.",
+                )
+            } else {
+                response.body()
+            }
         } catch (error: Throwable) {
             TbankLoginResponse(
                 mode = request.mode,
