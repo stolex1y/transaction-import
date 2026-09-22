@@ -10,5 +10,19 @@
     "recent_messages": 5,
     "summary_batch_messages": 5,
     "summary_max_tokens": 1024
-  }
+  },
+  "mcp_servers": [
+    {
+      "id": "bank-transactions",
+      "display_name": "Банковские транзакции",
+      "command": "build/install/bank-transactions-mcp-server/bin/bank-transactions-mcp-server",
+      "working_directory": "../bank-transactions-mcp-server"
+    },
+    {
+      "id": "receipts",
+      "display_name": "Чеки",
+      "command": "build/install/receipts-mcp-server/bin/receipts-mcp-server",
+      "working_directory": "../receipts-mcp-server"
+    }
+  ]
 }

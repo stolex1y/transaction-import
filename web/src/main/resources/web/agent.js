@@ -8,6 +8,9 @@ const elements = {
     drawerNewSession: document.querySelector("#drawer-new-session"),
     emptyNewSession: document.querySelector("#empty-new-session"),
     sessionList: document.querySelector("#session-list"),
+    mcpRefresh: document.querySelector("#refresh-mcp-catalog"),
+    mcpStatus: document.querySelector("#mcp-catalog-status"),
+    mcpList: document.querySelector("#mcp-catalog-list"),
     preferencesForm: document.querySelector("#preferences-form"),
     globalUserPrompt: document.querySelector("#global-user-prompt"),
     savePreferences: document.querySelector("#save-preferences"),
@@ -66,6 +69,7 @@ const ACTIVE_SESSION_KEY = "smart-expense-active-session";
 const VIEW_KEY = "smart-expense-operation-view";
 const MOBILE_VIEW = window.matchMedia("(max-width: 760px)");
 let catalog = { providers: [], categories: [] };
+let mcpCatalog = { servers: [] };
 let categoryCatalog = [];
 let sessions = [];
 let activeState = null;
@@ -86,6 +90,13 @@ class ApiError extends Error {
     }
 }
 
+function ensureMcpElements() {
+    elements.mcpRefresh ||= document.querySelector("#refresh-mcp-catalog");
+    elements.mcpStatus ||= document.querySelector("#mcp-catalog-status");
+    elements.mcpList ||= document.querySelector("#mcp-catalog-list");
+}
+
+ensureMcpElements();
 initializeTheme();
 elements.themeToggle.addEventListener("click", toggleTheme);
 elements.openDrawer.addEventListener("click", openDrawer);
@@ -97,6 +108,7 @@ document.addEventListener("keydown", (event) => {
 for (const button of [elements.newSession, elements.drawerNewSession, elements.emptyNewSession]) {
     button.addEventListener("click", createSession);
 }
+elements.mcpRefresh?.addEventListener("click", loadMcpCatalog);
 elements.preferencesForm.addEventListener("submit", savePreferences);
 elements.categoryForm.addEventListener("submit", saveCategoryForm);
 elements.cancelCategoryEdit.addEventListener("click", resetCategoryForm);
@@ -130,15 +142,18 @@ initialize();
 async function initialize() {
     setBusy(true);
     try {
-        const [providerCatalog, preferences, storedSessions, storedCategories] = await Promise.all([
+        const [providerCatalog, preferences, storedSessions, storedCategories, loadedMcpCatalog] = await Promise.all([
             api("/api/agent/providers"),
             api("/api/agent/preferences"),
             api("/api/agent/sessions"),
             api("/api/agent/categories"),
+            api("/api/agent/mcp"),
         ]);
         catalog = providerCatalog;
+        mcpCatalog = loadedMcpCatalog;
         categoryCatalog = storedCategories;
         sessions = storedSessions;
+        renderMcpCatalog();
         renderPreferences(preferences);
         renderCategoryManager();
         renderSessionList();
@@ -226,6 +241,105 @@ function applyTheme(theme) {
 async function loadSessions() {
     sessions = await api("/api/agent/sessions");
     renderSessionList();
+}
+
+async function loadMcpCatalog() {
+    ensureMcpElements();
+    elements.mcpRefresh.disabled = true;
+    elements.mcpStatus.textContent = "Обновляем каталог…";
+    elements.mcpStatus.className = "control-note";
+    try {
+        mcpCatalog = await api("/api/agent/mcp");
+        renderMcpCatalog();
+    } catch (error) {
+        elements.mcpStatus.textContent = `Не удалось обновить MCP: ${error.message}`;
+        elements.mcpStatus.className = "control-note error";
+    } finally {
+        elements.mcpRefresh.disabled = false;
+    }
+}
+
+function renderMcpCatalog() {
+    const servers = Array.isArray(mcpCatalog.servers) ? mcpCatalog.servers : [];
+    ensureMcpElements();
+    elements.mcpList.replaceChildren();
+    if (servers.length === 0) {
+        elements.mcpStatus.textContent = "MCP-серверы не настроены.";
+        elements.mcpStatus.className = "control-note";
+        return;
+    }
+
+    const connected = servers.filter((server) => server.status === "connected").length;
+    elements.mcpStatus.textContent = `Подключено: ${connected} из ${servers.length}. Вызов tools отключён.`;
+    elements.mcpStatus.className = connected === servers.length
+        ? "control-note success"
+        : "control-note";
+
+    for (const server of servers) {
+        const item = document.createElement("article");
+        item.className = "mcp-server-item";
+
+        const heading = document.createElement("div");
+        heading.className = "section-heading";
+        const title = document.createElement("strong");
+        title.textContent = server.display_name;
+        const status = document.createElement("span");
+        status.className = `mcp-server-status ${server.status}`;
+        status.textContent = mcpStatusLabel(server.status);
+        heading.append(title, status);
+        item.append(heading);
+
+        if (server.error) {
+            const error = document.createElement("p");
+            error.className = "mcp-server-error";
+            error.textContent = server.error;
+            item.append(error);
+        }
+
+        const tools = Array.isArray(server.tools) ? server.tools : [];
+        const toolList = document.createElement("div");
+        toolList.className = "mcp-tool-list";
+        if (tools.length === 0) {
+            const empty = document.createElement("p");
+            empty.className = "muted";
+            empty.textContent = "Tools не обнаружены.";
+            toolList.append(empty);
+        } else {
+            for (const tool of tools) {
+                const toolItem = document.createElement("article");
+                toolItem.className = "mcp-tool-item";
+                const toolName = document.createElement("strong");
+                toolName.textContent = tool.name;
+                toolItem.append(toolName);
+
+                if (tool.description) {
+                    const description = document.createElement("p");
+                    description.textContent = tool.description;
+                    toolItem.append(description);
+                }
+
+                const schemaDetails = document.createElement("details");
+                const schemaSummary = document.createElement("summary");
+                schemaSummary.textContent = "Входная схема";
+                const schema = document.createElement("pre");
+                schema.textContent = JSON.stringify(tool.input_schema || {}, null, 2);
+                schemaDetails.append(schemaSummary, schema);
+                toolItem.append(schemaDetails);
+                toolList.append(toolItem);
+            }
+        }
+        item.append(toolList);
+        elements.mcpList.append(item);
+    }
+}
+
+function mcpStatusLabel(status) {
+    return {
+        connected: "подключён",
+        disabled: "отключён",
+        unavailable: "недоступен",
+        protocol_error: "ошибка протокола",
+    }[status] || status;
 }
 
 function renderPreferences(preferences) {

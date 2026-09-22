@@ -32,6 +32,9 @@ class AgentWebDependencies(
     val runtimeConfig: AgentRuntimeConfig,
     val availableProviderIds: Set<String>,
     val newSessionTitle: () -> String = ::defaultSessionTitle,
+    val mcpCatalog: McpCatalogProvider = McpCatalogProvider {
+        McpCatalogResponse(emptyList())
+    },
 )
 
 @Serializable
@@ -162,6 +165,10 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
                 categories = CategoryCatalog(runtime.agent.listCategories()).activeLeafCategories(),
             ),
         )
+    }
+
+    get("/api/agent/mcp") {
+        call.respond(dependencies.requireAgentRuntime().mcpCatalog.catalog())
     }
 
 

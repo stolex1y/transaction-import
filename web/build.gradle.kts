@@ -57,6 +57,7 @@ dependencies {
     implementation(libs.ktor.server.content.negotiation)
     implementation(libs.ktor.server.status.pages)
     runtimeOnly(libs.slf4j.nop)
+    implementation("io.modelcontextprotocol:kotlin-sdk-client:0.10.0")
 
     testImplementation(kotlin("test"))
     testImplementation(libs.ktor.server.test.host)

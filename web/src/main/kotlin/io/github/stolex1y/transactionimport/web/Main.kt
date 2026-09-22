@@ -13,6 +13,7 @@ import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import kotlinx.serialization.json.Json
+import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
@@ -63,6 +64,10 @@ fun main() {
         }
     }
 
+    val mcpCatalog = runBlocking {
+        McpCatalogService.connect(runtimeConfig.mcpServers)
+    }
+
     try {
         val providerRegistry = ConfiguredProviderRegistry(httpClient, catalog)
         val repository = SqliteImportSessionRepository(
@@ -82,11 +87,13 @@ fun main() {
             catalog = catalog,
             runtimeConfig = runtimeConfig,
             availableProviderIds = providerRegistry.availableProviderIds(),
+            mcpCatalog = mcpCatalog,
         )
         embeddedServer(Netty, host = "127.0.0.1", port = port) {
             module(agentDependencies = agentDependencies)
         }.start(wait = true)
     } finally {
+        mcpCatalog.close()
         httpClient.close()
     }
 }

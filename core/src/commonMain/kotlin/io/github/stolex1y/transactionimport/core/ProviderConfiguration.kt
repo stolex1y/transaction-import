@@ -237,6 +237,16 @@ data class ContextCompressionConfig(
 }
 
 @Serializable
+data class McpServerConfig(
+    val id: String,
+    @SerialName("display_name") val displayName: String,
+    val command: String,
+    val arguments: List<String> = emptyList(),
+    @SerialName("working_directory") val workingDirectory: String? = null,
+    val enabled: Boolean = true,
+)
+
+@Serializable
 data class AgentRuntimeConfig(
     @SerialName("default_provider_id") val defaultProviderId: String = "deepseek",
     @SerialName("default_model_id") val defaultModelId: String = "deepseek-flash",
@@ -248,6 +258,7 @@ data class AgentRuntimeConfig(
     val contextCompression: ContextCompressionConfig = ContextCompressionConfig(),
     @SerialName("context_management")
     val contextManagement: ContextManagementConfig? = null,
+    @SerialName("mcp_servers") val mcpServers: List<McpServerConfig> = emptyList(),
 ) {
     fun defaultAgentConfig(): AgentConfig = AgentConfig(
         providerId = defaultProviderId,

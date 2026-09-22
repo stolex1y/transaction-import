@@ -34,6 +34,14 @@
             <p class="muted">Загружаем сессии…</p>
         </div>
         <button id="delete-session" class="danger-button" type="button" hidden>Удалить выбранную сессию</button>
+        <section class="mcp-catalog" aria-labelledby="mcp-catalog-title">
+            <div class="section-heading">
+                <h2 id="mcp-catalog-title">MCP-серверы</h2>
+                <button id="refresh-mcp-catalog" class="compact-button" type="button">Обновить</button>
+            </div>
+            <p id="mcp-catalog-status" class="control-note">Проверяем подключение…</p>
+            <div id="mcp-catalog-list" class="mcp-catalog-list"></div>
+        </section>
 
 
         <form id="preferences-form" class="preferences-form">
