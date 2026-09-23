@@ -492,7 +492,7 @@ function updateTbankMode() {
     elements.tbankOtp.placeholder = fake ? "не нужен в fake mode" : "код из SMS";
     elements.tbankLoginStatus.textContent = fake
         ? "Синтетические credentials: demo / demo."
-        : "Real mode: private API, read-only, без обхода MFA и антибот-защиты.";
+        : "Real mode: введите телефон +79991234567; после SMS повторите login с OTP.";
     elements.tbankLoginStatus.className = "control-note";
 }
 
