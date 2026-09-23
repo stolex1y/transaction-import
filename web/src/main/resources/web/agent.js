@@ -11,11 +11,16 @@ const elements = {
     mcpRefresh: document.querySelector("#refresh-mcp-catalog"),
     mcpStatus: document.querySelector("#mcp-catalog-status"),
     mcpList: document.querySelector("#mcp-catalog-list"),
-    tbankLoginForm: document.querySelector("#tbank-login-form"),
-    tbankMode: document.querySelector("#tbank-mode"),
-    tbankPhone: document.querySelector("#tbank-phone"),
-    tbankPassword: document.querySelector("#tbank-password"),
-    tbankOtp: document.querySelector("#tbank-otp"),
+    tbankFakeLoginForm: document.querySelector("#tbank-fake-login-form"),
+    tbankFakeLogin: document.querySelector("#tbank-fake-login"),
+    tbankFakePassword: document.querySelector("#tbank-fake-password"),
+    tbankRealLoginForm: document.querySelector("#tbank-real-login-form"),
+    tbankRealPhone: document.querySelector("#tbank-real-phone"),
+    tbankRealPasswordField: document.querySelector("#tbank-real-password-field"),
+    tbankRealPassword: document.querySelector("#tbank-real-password"),
+    tbankRealOtp: document.querySelector("#tbank-real-otp"),
+    tbankShowFake: document.querySelector("#tbank-show-fake"),
+    tbankShowReal: document.querySelector("#tbank-show-real"),
     tbankLogout: document.querySelector("#tbank-logout"),
     tbankSessionStatus: document.querySelector("#tbank-session-status"),
     tbankLoginStatus: document.querySelector("#tbank-login-status"),
@@ -112,7 +117,7 @@ function ensureMcpElements() {
 }
 
 ensureMcpElements();
-updateTbankMode();
+showTbankLoginMode("fake");
 initializeTheme();
 elements.themeToggle.addEventListener("click", toggleTheme);
 elements.openDrawer.addEventListener("click", openDrawer);
@@ -125,10 +130,12 @@ for (const button of [elements.newSession, elements.drawerNewSession, elements.e
     button.addEventListener("click", createSession);
 }
 elements.mcpRefresh?.addEventListener("click", loadMcpCatalog);
-elements.tbankLoginForm?.addEventListener("submit", handleTbankLogin);
+elements.tbankFakeLoginForm?.addEventListener("submit", handleTbankLogin);
+elements.tbankRealLoginForm?.addEventListener("submit", handleTbankLogin);
+elements.tbankShowFake?.addEventListener("click", () => showTbankLoginMode("fake"));
+elements.tbankShowReal?.addEventListener("click", () => showTbankLoginMode("real"));
 elements.tbankLogout?.addEventListener("click", handleTbankLogout);
 elements.tbankQueryForm?.addEventListener("submit", handleTbankTransactions);
-elements.tbankMode?.addEventListener("change", updateTbankMode);
 elements.preferencesForm.addEventListener("submit", savePreferences);
 elements.categoryForm.addEventListener("submit", saveCategoryForm);
 elements.cancelCategoryEdit.addEventListener("click", resetCategoryForm);
@@ -361,26 +368,35 @@ function renderMcpCatalog() {
 
 async function handleTbankLogin(event) {
     event.preventDefault();
-    const button = document.querySelector("#tbank-login");
+    const form = event.currentTarget;
+    const real = form === elements.tbankRealLoginForm;
+    const button = form.querySelector("button[type='submit']");
     button.disabled = true;
     elements.tbankLoginStatus.textContent = "Выполняем login…";
     elements.tbankLoginStatus.className = "control-note";
     try {
         const response = await api("/api/agent/tbank/login", jsonOptions("POST", {
-            mode: elements.tbankMode.value,
-            phone: elements.tbankPhone.value.trim(),
-            password: elements.tbankPassword.value,
-            otp: elements.tbankOtp.value.trim(),
+            mode: real ? "real" : "fake",
+            phone: real ? elements.tbankRealPhone.value.trim() : elements.tbankFakeLogin.value.trim(),
+            password: real ? elements.tbankRealPassword.value : elements.tbankFakePassword.value,
+            otp: real ? elements.tbankRealOtp.value.trim() : "",
         }));
         tbankSession = response;
         renderTbankSession();
+        if (response.requiresPassword) {
+            setRealPasswordVisibility(true);
+            elements.tbankRealPassword.focus();
+        }
         elements.tbankLoginStatus.textContent = response.message;
         elements.tbankLoginStatus.className = response.authenticated
             ? "control-note success"
-            : "control-note error";
+            : response.status === "requires_otp" || response.status === "requires_password"
+                ? "control-note"
+                : "control-note error";
         if (response.authenticated) {
-            elements.tbankPassword.value = "";
-            elements.tbankOtp.value = "";
+            elements.tbankFakePassword.value = "";
+            elements.tbankRealPassword.value = "";
+            elements.tbankRealOtp.value = "";
             await loadTbankAccounts();
         }
     } catch (error) {
@@ -396,12 +412,17 @@ async function handleTbankLogout() {
     try {
         tbankSession = await api("/api/agent/tbank/logout", { method: "POST" });
         elements.tbankAccount.replaceChildren();
-        elements.tbankPassword.value = "";
-        elements.tbankOtp.value = "";
+        elements.tbankFakePassword.value = "";
+        elements.tbankRealPhone.value = "";
+        elements.tbankRealPassword.value = "";
+        elements.tbankRealOtp.value = "";
+        setRealPasswordVisibility(false);
         elements.tbankQueryForm.hidden = true;
         elements.tbankResult.hidden = true;
         elements.tbankResult.textContent = "";
-        elements.tbankLoginStatus.textContent = "Сессия очищена в памяти MCP-сервера.";
+        elements.tbankLoginStatus.textContent = tbankSession.persistence_status === "unavailable"
+            ? "Сессия очищена в памяти; OS credential store недоступен."
+            : "Сессия очищена в памяти и OS credential store.";
         elements.tbankLoginStatus.className = "control-note";
         renderTbankSession();
     } catch (error) {
@@ -413,8 +434,12 @@ async function handleTbankLogout() {
 }
 
 function renderTbankSession() {
+    elements.tbankLogout.hidden = !tbankSession.authenticated;
     if (tbankSession.authenticated) {
-        elements.tbankSessionStatus.textContent = `сессия активна (${tbankSession.mode})`;
+        const persistenceNote = tbankSession.persistence_message
+            ? ` · ${tbankSession.persistence_message}`
+            : "";
+        elements.tbankSessionStatus.textContent = `сессия активна (${tbankSession.mode})${persistenceNote}`;
         elements.tbankSessionStatus.className = "mcp-server-status connected";
         return;
     }
@@ -486,14 +511,31 @@ async function callTbankTool(tool, argumentsValue) {
     }
 }
 
-function updateTbankMode() {
-    const fake = elements.tbankMode.value === "fake";
-    elements.tbankOtp.disabled = fake;
-    elements.tbankOtp.placeholder = fake ? "не нужен в fake mode" : "код из SMS";
-    elements.tbankLoginStatus.textContent = fake
-        ? "Синтетические credentials: demo / demo."
-        : "Real mode: введите телефон +79991234567; после SMS повторите login с OTP.";
+function showTbankLoginMode(mode) {
+    const fake = mode === "fake";
+    elements.tbankFakeLoginForm.hidden = !fake;
+    elements.tbankRealLoginForm.hidden = fake;
+    elements.tbankShowFake.setAttribute("aria-selected", String(fake));
+    elements.tbankShowReal.setAttribute("aria-selected", String(!fake));
+    if (fake) {
+        elements.tbankRealPhone.value = "";
+        elements.tbankRealPassword.value = "";
+        elements.tbankRealOtp.value = "";
+        setRealPasswordVisibility(false);
+        elements.tbankLoginStatus.textContent = "Синтетические credentials: demo / demo.";
+    } else {
+        elements.tbankFakeLogin.value = "";
+        elements.tbankFakePassword.value = "";
+        elements.tbankLoginStatus.textContent =
+            "Real mode: введите телефон; после SMS повторите login с OTP.";
+    }
     elements.tbankLoginStatus.className = "control-note";
+}
+
+function setRealPasswordVisibility(visible) {
+    elements.tbankRealPasswordField.hidden = !visible;
+    elements.tbankRealPassword.disabled = !visible;
+    if (!visible) elements.tbankRealPassword.value = "";
 }
 
 function mcpStatusLabel(status) {

@@ -174,10 +174,19 @@ cd solutions/transaction-import
 4. проверьте JSON результата: счёт, `amount_minor`, дату, merchant и список
    операций.
 
-Fake mode детерминирован и не обращается к банку. `real` выбирается явно для
-собственного read-only аккаунта: private API не является официальным публичным
-контрактом, credentials передаются только на loopback во время login и
-session. Phone, password, OTP, access/refresh tokens, session IDs, auth cookies,
+Fake mode детерминирован и не обращается к банку. Fake и real используют
+раздельные login формы: fake показывает только synthetic demo login/password,
+real — phone и SMS OTP; поле password появляется только после
+`requires_password=true`.
+
+`real` выбирается явно для собственного read-only аккаунта: private API не
+является официальным публичным контрактом, credentials передаются только на
+loopback во время login. После успешного login session envelope сохраняется
+MCP-сервером в OS credential store; при недоступном store session живёт только
+до restart и это явно показывается пользователю. Logout и отказ банка удаляют
+сохранённый envelope.
+
+Phone, password, OTP, access/refresh tokens, session IDs, auth cookies,
 fingerprints и raw private API responses не попадают в БД, logs, LLM context или
 MCP arguments. Наружу выходят только безопасные статусы, количества, коды
 ошибок без payload и нормализованные read-only операции. MFA, certificate

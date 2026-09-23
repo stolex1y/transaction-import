@@ -76,6 +76,8 @@ data class TbankLoginResponse(
     @SerialName("requires_password") val requiresPassword: Boolean = false,
     val authenticated: Boolean = false,
     @SerialName("account_count") val accountCount: Int = 0,
+    @SerialName("persistence_status") val persistenceStatus: String = "not_configured",
+    @SerialName("persistence_message") val persistenceMessage: String? = null,
 )
 
 @Serializable
@@ -83,6 +85,8 @@ data class TbankSessionResponse(
     val mode: String? = null,
     val authenticated: Boolean,
     @SerialName("account_count") val accountCount: Int = 0,
+    @SerialName("persistence_status") val persistenceStatus: String = "not_configured",
+    @SerialName("persistence_message") val persistenceMessage: String? = null,
 )
 
 @Serializable
@@ -425,7 +429,14 @@ class McpCatalogService private constructor(
     }
 }
 
+private val sensitiveErrorPattern = Regex(
+    """(?i)\b(access[_-]?token|refresh[_-]?token|session[_-]?id|sessionid|auth[_-]?cookie|cookie|password|otp|device[_-]?id|token)\b\s*[:=]\s*["']?[^,;\s"'})]+""",
+)
+private val bearerErrorPattern = Regex("""(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+""")
+
 private fun safeError(error: Throwable): String =
     (error.message?.takeIf(String::isNotBlank) ?: error::class.simpleName.orEmpty())
         .replace(Regex("\\s+"), " ")
+        .replace(bearerErrorPattern, "Bearer [скрыт]")
+        .replace(sensitiveErrorPattern, "$1=[скрыт]")
         .take(240)

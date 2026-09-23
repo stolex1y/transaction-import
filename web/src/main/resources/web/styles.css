@@ -931,6 +931,25 @@ html[data-theme="light"] .agent-body select {
     margin-top: 16px;
 }
 
+.tbank-login-switch {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.tbank-login-switch button {
+    border: 1px solid var(--agent-border);
+    background: var(--agent-surface-soft);
+    color: var(--agent-text);
+}
+
+.tbank-login-switch button[aria-selected="true"] {
+    border-color: var(--agent-accent);
+    background: var(--agent-accent);
+    color: #ffffff;
+}
+
 .tbank-panel .category-form-actions button:first-child {
     flex: 1;
 }
