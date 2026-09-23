@@ -178,8 +178,9 @@ Fake mode детерминирован и не обращается к банк�
 раздельные login формы: fake показывает только synthetic demo login/password.
 Real — пошаговый flow: сначала видны только phone и `Получить SMS-код`; после
 `requires_otp=true` телефон становится read-only, появляются OTP, `Войти`,
-`Повторить код` и `Изменить номер`. Resend запускает новый challenge, не
-передаёт OTP/password и блокируется на 30 секунд. После `requires_password=true`
+`Повторить код` отправляет только текущий phone, запускает новый challenge и
+может восстановить локальный challenge после restart MCP; OTP/password не
+передаются и кнопка блокируется на 30 секунд. После `requires_password=true`
 появляется password, resend скрывается до смены номера. `Изменить номер`
 очищает challenge и возвращает первый шаг.
 Ошибки остаются на текущем шаге и очищают введённые OTP/password.

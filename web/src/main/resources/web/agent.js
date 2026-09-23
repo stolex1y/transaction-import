@@ -450,7 +450,10 @@ async function handleTbankResend() {
     elements.tbankLoginStatus.textContent = "Отправляем новый SMS-код…";
     elements.tbankLoginStatus.className = "control-note";
     try {
-        const response = await api("/api/agent/tbank/otp/resend", { method: "POST" });
+        const response = await api(
+            "/api/agent/tbank/otp/resend",
+            jsonOptions("POST", { phone: elements.tbankRealPhone.value.trim() }),
+        );
         tbankSession = response;
         renderTbankSession();
         if (response.authenticated) {

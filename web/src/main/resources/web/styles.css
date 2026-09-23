@@ -931,6 +931,19 @@ html[data-theme="light"] .agent-body select {
     margin-top: 16px;
 }
 
+#tbank-real-otp-step {
+    display: grid;
+    gap: 8px;
+}
+
+#tbank-real-otp-step[hidden] {
+    display: none;
+}
+
+#tbank-real-otp-step label {
+    margin-bottom: 0;
+}
+
 .tbank-login-switch {
     display: flex;
     flex-wrap: wrap;

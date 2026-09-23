@@ -68,6 +68,11 @@ data class TbankLoginRequest(
 )
 
 @Serializable
+data class TbankOtpResendRequest(
+    val phone: String = "",
+)
+
+@Serializable
 data class TbankLoginResponse(
     val mode: String,
     val status: String,
@@ -104,7 +109,7 @@ data class TbankToolCallResponse(
 
 interface TbankMcpProvider {
     suspend fun login(request: TbankLoginRequest): TbankLoginResponse
-    suspend fun resendOtp(): TbankLoginResponse
+    suspend fun resendOtp(phone: String): TbankLoginResponse
     suspend fun logout(): TbankSessionResponse
     suspend fun session(): TbankSessionResponse
     suspend fun callTool(request: TbankToolCallRequest): TbankToolCallResponse
@@ -116,7 +121,7 @@ object UnavailableTbankMcpProvider : TbankMcpProvider {
     override suspend fun login(request: TbankLoginRequest) =
         TbankLoginResponse(mode = request.mode, status = "error", message = MESSAGE)
 
-    override suspend fun resendOtp() =
+    override suspend fun resendOtp(phone: String) =
         TbankLoginResponse(mode = "real", status = "error", message = MESSAGE)
 
     override suspend fun logout() = TbankSessionResponse(authenticated = false)
@@ -210,7 +215,7 @@ class McpCatalogService private constructor(
         }
     }
 
-    override suspend fun resendOtp(): TbankLoginResponse = mutex.withLock {
+    override suspend fun resendOtp(phone: String): TbankLoginResponse = mutex.withLock {
         val config = tbankConfig()
             ?: return@withLock TbankLoginResponse(
                 mode = "real",
@@ -218,7 +223,10 @@ class McpCatalogService private constructor(
                 message = "Т-Банк MCP endpoint не настроен.",
             )
         try {
-            val response = httpClient.post(serviceUrl(config, "/tbank/otp/resend"))
+            val response = httpClient.post(serviceUrl(config, "/tbank/otp/resend")) {
+                header(io.ktor.http.HttpHeaders.ContentType, ContentType.Application.Json.toString())
+                setBody(TbankOtpResendRequest(phone))
+            }
             if (!response.status.isSuccess()) {
                 TbankLoginResponse(
                     mode = "real",

@@ -177,7 +177,8 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
         call.respond(runtime.tbankMcp.login(call.receive()))
     }
     post("/api/agent/tbank/otp/resend") {
-        call.respond(dependencies.requireAgentRuntime().tbankMcp.resendOtp())
+        val request = call.receive<TbankOtpResendRequest>()
+        call.respond(dependencies.requireAgentRuntime().tbankMcp.resendOtp(request.phone))
     }
     post("/api/agent/tbank/logout") {
         call.respond(dependencies.requireAgentRuntime().tbankMcp.logout())
