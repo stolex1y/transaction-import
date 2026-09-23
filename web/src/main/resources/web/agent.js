@@ -566,26 +566,6 @@ async function loadTbankAccounts() {
     }
 }
 
-function parseTbankDate(value, fieldLabel) {
-    const trimmed = value.trim();
-    const match = trimmed.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
-    if (!match) {
-        throw new ApiError(`${fieldLabel}: используйте формат ДД.ММ.ГГГГ.`, 400);
-    }
-    const day = Number(match[1]);
-    const month = Number(match[2]);
-    const year = Number(match[3]);
-    const date = new Date(Date.UTC(year, month - 1, day));
-    if (
-        date.getUTCFullYear() !== year
-        || date.getUTCMonth() !== month - 1
-        || date.getUTCDate() !== day
-    ) {
-        throw new ApiError(`${fieldLabel}: указана некорректная дата.`, 400);
-    }
-    return `${match[3]}-${match[2]}-${match[1]}`;
-}
-
 async function handleTbankTransactions(event) {
     event.preventDefault();
     const button = document.querySelector("#tbank-load-transactions");
@@ -595,8 +575,8 @@ async function handleTbankTransactions(event) {
     try {
         const result = await callTbankTool("get-account-transactions", {
             account_id: elements.tbankAccount.value,
-            from: parseTbankDate(elements.tbankFrom.value, "Дата начала"),
-            to: parseTbankDate(elements.tbankTo.value, "Дата окончания"),
+            from: elements.tbankFrom.value,
+            to: elements.tbankTo.value,
             limit: Number(elements.tbankLimit.value),
         });
         elements.tbankResult.textContent = JSON.stringify(result, null, 2);
