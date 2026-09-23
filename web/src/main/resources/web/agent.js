@@ -16,9 +16,13 @@ const elements = {
     tbankFakePassword: document.querySelector("#tbank-fake-password"),
     tbankRealLoginForm: document.querySelector("#tbank-real-login-form"),
     tbankRealPhone: document.querySelector("#tbank-real-phone"),
+    tbankRealOtpStep: document.querySelector("#tbank-real-otp-step"),
     tbankRealPasswordField: document.querySelector("#tbank-real-password-field"),
     tbankRealPassword: document.querySelector("#tbank-real-password"),
     tbankRealOtp: document.querySelector("#tbank-real-otp"),
+    tbankRealSubmit: document.querySelector("#tbank-real-submit"),
+    tbankRealResend: document.querySelector("#tbank-real-resend"),
+    tbankRealChangePhone: document.querySelector("#tbank-real-change-phone"),
     tbankShowFake: document.querySelector("#tbank-show-fake"),
     tbankShowReal: document.querySelector("#tbank-show-real"),
     tbankLogout: document.querySelector("#tbank-logout"),
@@ -101,6 +105,8 @@ let busy = false;
 let preferredView = localStorage.getItem(VIEW_KEY) === "cards" ? "cards" : "table";
 let workingDraft = new Map();
 let dirtyFields = new Map();
+let realLoginStage = "phone";
+let resendCooldownTimer = null;
 let toastTimer = null;
 
 class ApiError extends Error {
@@ -132,6 +138,8 @@ for (const button of [elements.newSession, elements.drawerNewSession, elements.e
 elements.mcpRefresh?.addEventListener("click", loadMcpCatalog);
 elements.tbankFakeLoginForm?.addEventListener("submit", handleTbankLogin);
 elements.tbankRealLoginForm?.addEventListener("submit", handleTbankLogin);
+elements.tbankRealResend?.addEventListener("click", handleTbankResend);
+elements.tbankRealChangePhone?.addEventListener("click", handleTbankChangePhone);
 elements.tbankShowFake?.addEventListener("click", () => showTbankLoginMode("fake"));
 elements.tbankShowReal?.addEventListener("click", () => showTbankLoginMode("real"));
 elements.tbankLogout?.addEventListener("click", handleTbankLogout);
@@ -370,7 +378,8 @@ async function handleTbankLogin(event) {
     event.preventDefault();
     const form = event.currentTarget;
     const real = form === elements.tbankRealLoginForm;
-    const button = form.querySelector("button[type='submit']");
+    const stageBeforeRequest = real ? realLoginStage : "fake";
+    const button = real ? elements.tbankRealSubmit : form.querySelector("button[type='submit']");
     button.disabled = true;
     elements.tbankLoginStatus.textContent = "Выполняем login…";
     elements.tbankLoginStatus.className = "control-note";
@@ -378,14 +387,31 @@ async function handleTbankLogin(event) {
         const response = await api("/api/agent/tbank/login", jsonOptions("POST", {
             mode: real ? "real" : "fake",
             phone: real ? elements.tbankRealPhone.value.trim() : elements.tbankFakeLogin.value.trim(),
-            password: real ? elements.tbankRealPassword.value : elements.tbankFakePassword.value,
-            otp: real ? elements.tbankRealOtp.value.trim() : "",
+            password: real
+                ? stageBeforeRequest === "password" ? elements.tbankRealPassword.value : ""
+                : elements.tbankFakePassword.value,
+            otp: real && stageBeforeRequest !== "phone" ? elements.tbankRealOtp.value.trim() : "",
         }));
         tbankSession = response;
         renderTbankSession();
-        if (response.requiresPassword) {
-            setRealPasswordVisibility(true);
-            elements.tbankRealPassword.focus();
+        if (real) {
+            if (response.authenticated) {
+                resetRealLoginForm(true);
+            } else if (response.requires_password) {
+                setRealLoginStage("password");
+                elements.tbankRealPassword.focus();
+            } else if (response.requires_otp) {
+                setRealLoginStage("otp");
+                elements.tbankRealOtp.focus();
+            } else if (stageBeforeRequest === "otp") {
+                setRealLoginStage("otp");
+                elements.tbankRealOtp.value = "";
+            } else if (stageBeforeRequest === "password") {
+                setRealLoginStage("password");
+                elements.tbankRealPassword.value = "";
+            } else {
+                setRealLoginStage("phone");
+            }
         }
         elements.tbankLoginStatus.textContent = response.message;
         elements.tbankLoginStatus.className = response.authenticated
@@ -400,11 +426,69 @@ async function handleTbankLogin(event) {
             await loadTbankAccounts();
         }
     } catch (error) {
+        if (real) {
+            if (stageBeforeRequest === "otp") {
+                setRealLoginStage("otp");
+                elements.tbankRealOtp.value = "";
+            } else if (stageBeforeRequest === "password") {
+                setRealLoginStage("password");
+                elements.tbankRealPassword.value = "";
+            } else {
+                setRealLoginStage("phone");
+            }
+        }
         elements.tbankLoginStatus.textContent = `Login не выполнен: ${error.message}`;
         elements.tbankLoginStatus.className = "control-note error";
     } finally {
         button.disabled = false;
     }
+}
+
+async function handleTbankResend() {
+    if (realLoginStage !== "otp") return;
+    elements.tbankRealResend.disabled = true;
+    elements.tbankLoginStatus.textContent = "Отправляем новый SMS-код…";
+    elements.tbankLoginStatus.className = "control-note";
+    try {
+        const response = await api("/api/agent/tbank/otp/resend", { method: "POST" });
+        tbankSession = response;
+        renderTbankSession();
+        if (response.authenticated) {
+            resetRealLoginForm(true);
+            await loadTbankAccounts();
+        } else if (response.requires_password) {
+            setRealLoginStage("password");
+            elements.tbankRealPassword.focus();
+        } else if (response.requires_otp) {
+            setRealLoginStage("otp");
+            elements.tbankRealOtp.value = "";
+            startResendCooldown();
+            elements.tbankRealOtp.focus();
+        } else {
+            setRealLoginStage("otp");
+        }
+        elements.tbankLoginStatus.textContent = response.message;
+        elements.tbankLoginStatus.className = response.authenticated
+            ? "control-note success"
+            : response.status === "requires_otp" || response.status === "requires_password"
+                ? "control-note"
+                : "control-note error";
+    } catch (error) {
+        setRealLoginStage("otp");
+        elements.tbankLoginStatus.textContent = `SMS-код не отправлен повторно: ${error.message}`;
+        elements.tbankLoginStatus.className = "control-note error";
+    } finally {
+        if (!resendCooldownTimer && realLoginStage === "otp") {
+            elements.tbankRealResend.disabled = false;
+        }
+    }
+}
+
+function handleTbankChangePhone() {
+    resetRealLoginForm(false);
+    elements.tbankLoginStatus.textContent = "Введите номер телефона и запросите SMS-код.";
+    elements.tbankLoginStatus.className = "control-note";
+    elements.tbankRealPhone.focus();
 }
 
 async function handleTbankLogout() {
@@ -413,10 +497,7 @@ async function handleTbankLogout() {
         tbankSession = await api("/api/agent/tbank/logout", { method: "POST" });
         elements.tbankAccount.replaceChildren();
         elements.tbankFakePassword.value = "";
-        elements.tbankRealPhone.value = "";
-        elements.tbankRealPassword.value = "";
-        elements.tbankRealOtp.value = "";
-        setRealPasswordVisibility(false);
+        resetRealLoginForm(true);
         elements.tbankQueryForm.hidden = true;
         elements.tbankResult.hidden = true;
         elements.tbankResult.textContent = "";
@@ -518,18 +599,74 @@ function showTbankLoginMode(mode) {
     elements.tbankShowFake.setAttribute("aria-selected", String(fake));
     elements.tbankShowReal.setAttribute("aria-selected", String(!fake));
     if (fake) {
-        elements.tbankRealPhone.value = "";
-        elements.tbankRealPassword.value = "";
-        elements.tbankRealOtp.value = "";
-        setRealPasswordVisibility(false);
+        resetRealLoginForm(true);
         elements.tbankLoginStatus.textContent = "Синтетические credentials: demo / demo.";
     } else {
         elements.tbankFakeLogin.value = "";
         elements.tbankFakePassword.value = "";
+        resetRealLoginForm(true);
         elements.tbankLoginStatus.textContent =
-            "Real mode: введите телефон; после SMS повторите login с OTP.";
+            "Real mode: введите телефон и запросите SMS-код.";
     }
     elements.tbankLoginStatus.className = "control-note";
+}
+
+function setRealLoginStage(stage) {
+    realLoginStage = stage;
+    const hasChallenge = stage !== "phone";
+    elements.tbankRealOtpStep.hidden = !hasChallenge;
+    elements.tbankRealPhone.readOnly = hasChallenge;
+    elements.tbankRealResend.hidden = stage !== "otp";
+    elements.tbankRealChangePhone.hidden = stage === "phone";
+    elements.tbankRealSubmit.textContent = stage === "phone"
+        ? "Получить SMS-код"
+        : "Войти";
+    setRealPasswordVisibility(stage === "password");
+    if (stage !== "otp") {
+        stopResendCooldown();
+    } else if (!resendCooldownTimer) {
+        elements.tbankRealResend.disabled = false;
+        elements.tbankRealResend.textContent = "Повторить код";
+    }
+}
+
+function resetRealLoginForm(clearPhone) {
+    stopResendCooldown();
+    if (clearPhone) elements.tbankRealPhone.value = "";
+    elements.tbankRealOtp.value = "";
+    elements.tbankRealPassword.value = "";
+    setRealLoginStage("phone");
+}
+
+function startResendCooldown() {
+    stopResendCooldown();
+    const deadline = Date.now() + 30_000;
+    const update = () => {
+        if (realLoginStage !== "otp") {
+            stopResendCooldown();
+            return;
+        }
+        const seconds = Math.ceil(Math.max(0, deadline - Date.now()) / 1_000);
+        if (seconds === 0) {
+            stopResendCooldown();
+            return;
+        }
+        elements.tbankRealResend.disabled = true;
+        elements.tbankRealResend.textContent = `Повторить код (${seconds})`;
+    };
+    resendCooldownTimer = window.setInterval(update, 250);
+    update();
+}
+
+function stopResendCooldown() {
+    if (resendCooldownTimer) {
+        window.clearInterval(resendCooldownTimer);
+        resendCooldownTimer = null;
+    }
+    if (elements.tbankRealResend) {
+        elements.tbankRealResend.disabled = false;
+        elements.tbankRealResend.textContent = "Повторить код";
+    }
 }
 
 function setRealPasswordVisibility(visible) {

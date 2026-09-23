@@ -71,16 +71,24 @@
                 <label for="tbank-real-phone">Телефон</label>
                 <input id="tbank-real-phone" name="real-phone" autocomplete="off"
                        placeholder="+79991234567" required>
+                <div id="tbank-real-otp-step" hidden>
+                    <label for="tbank-real-otp">Одноразовый код из SMS</label>
+                    <input id="tbank-real-otp" name="real-otp" inputmode="numeric"
+                           autocomplete="one-time-code">
+                    <div class="category-form-actions">
+                        <button id="tbank-real-resend" class="secondary-button compact-button"
+                                type="button">Повторить код</button>
+                        <button id="tbank-real-change-phone" class="secondary-button compact-button"
+                                type="button">Изменить номер</button>
+                    </div>
+                </div>
                 <div id="tbank-real-password-field" hidden>
                     <label for="tbank-real-password">Пароль (если запросил банк)</label>
                     <input id="tbank-real-password" name="real-password" type="password"
                            autocomplete="off" disabled>
                 </div>
-                <label for="tbank-real-otp">Одноразовый код из SMS</label>
-                <input id="tbank-real-otp" name="real-otp" inputmode="numeric"
-                       autocomplete="one-time-code">
                 <div class="category-form-actions">
-                    <button id="tbank-real-submit" type="submit">Войти в real mode</button>
+                    <button id="tbank-real-submit" type="submit">Получить SMS-код</button>
                 </div>
             </form>
             <div class="category-form-actions">

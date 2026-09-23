@@ -175,9 +175,14 @@ cd solutions/transaction-import
    операций.
 
 Fake mode детерминирован и не обращается к банку. Fake и real используют
-раздельные login формы: fake показывает только synthetic demo login/password,
-real — phone и SMS OTP; поле password появляется только после
-`requires_password=true`.
+раздельные login формы: fake показывает только synthetic demo login/password.
+Real — пошаговый flow: сначала видны только phone и `Получить SMS-код`; после
+`requires_otp=true` телефон становится read-only, появляются OTP, `Войти`,
+`Повторить код` и `Изменить номер`. Resend запускает новый challenge, не
+передаёт OTP/password и блокируется на 30 секунд. После `requires_password=true`
+появляется password, resend скрывается до смены номера. `Изменить номер`
+очищает challenge и возвращает первый шаг.
+Ошибки остаются на текущем шаге и очищают введённые OTP/password.
 
 `real` выбирается явно для собственного read-only аккаунта: private API не
 является официальным публичным контрактом, credentials передаются только на
@@ -195,6 +200,12 @@ pinning и anti-bot bypass не выполняются; реальный smoke �
 
 Сетевые ошибки и HTTP non-2xx от T-Банк server показываются как понятный
 login error; HTML или сырой response body не десериализуются как credentials.
+
+Обычная проверка этого real UI не обращается к upstream: browser smoke
+перехватывает локальные `/api/agent/tbank/*` fixture-ответы, а backend state
+machine проверяется `MockEngine`. Реальные credentials и SMS в тестах не
+используются; real smoke выполняется отдельно только пользователем на своём
+аккаунте.
 
 Приложение использует explicit form flow, а не автономный LLM
 tool-calling loop: UI формирует MCP arguments, backend вызывает `tools/call`,

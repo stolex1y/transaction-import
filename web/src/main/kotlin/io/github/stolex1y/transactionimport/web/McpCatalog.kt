@@ -104,6 +104,7 @@ data class TbankToolCallResponse(
 
 interface TbankMcpProvider {
     suspend fun login(request: TbankLoginRequest): TbankLoginResponse
+    suspend fun resendOtp(): TbankLoginResponse
     suspend fun logout(): TbankSessionResponse
     suspend fun session(): TbankSessionResponse
     suspend fun callTool(request: TbankToolCallRequest): TbankToolCallResponse
@@ -114,6 +115,9 @@ object UnavailableTbankMcpProvider : TbankMcpProvider {
 
     override suspend fun login(request: TbankLoginRequest) =
         TbankLoginResponse(mode = request.mode, status = "error", message = MESSAGE)
+
+    override suspend fun resendOtp() =
+        TbankLoginResponse(mode = "real", status = "error", message = MESSAGE)
 
     override suspend fun logout() = TbankSessionResponse(authenticated = false)
 
@@ -202,6 +206,33 @@ class McpCatalogService private constructor(
                 mode = request.mode,
                 status = "error",
                 message = "Не удалось выполнить login: ${safeError(error)}",
+            )
+        }
+    }
+
+    override suspend fun resendOtp(): TbankLoginResponse = mutex.withLock {
+        val config = tbankConfig()
+            ?: return@withLock TbankLoginResponse(
+                mode = "real",
+                status = "error",
+                message = "Т-Банк MCP endpoint не настроен.",
+            )
+        try {
+            val response = httpClient.post(serviceUrl(config, "/tbank/otp/resend"))
+            if (!response.status.isSuccess()) {
+                TbankLoginResponse(
+                    mode = "real",
+                    status = "error",
+                    message = "Т-Банк MCP server вернул HTTP ${response.status.value}. Проверьте актуальность server и его logs.",
+                )
+            } else {
+                response.body()
+            }
+        } catch (error: Throwable) {
+            TbankLoginResponse(
+                mode = "real",
+                status = "error",
+                message = "Не удалось повторно отправить SMS-код: ${safeError(error)}",
             )
         }
     }
