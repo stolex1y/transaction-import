@@ -176,10 +176,13 @@ cd solutions/transaction-import
 
 Fake mode детерминирован и не обращается к банку. `real` выбирается явно для
 собственного read-only аккаунта: private API не является официальным публичным
-контрактом, credentials передаются только на loopback во время login и не
-попадают в БД, logs, LLM context или MCP arguments. MFA, certificate pinning
-и anti-bot bypass не выполняются; реальный smoke не является частью обычных
-тестов.
+контрактом, credentials передаются только на loopback во время login и
+session. Phone, password, OTP, access/refresh tokens, session IDs, auth cookies,
+fingerprints и raw private API responses не попадают в БД, logs, LLM context или
+MCP arguments. Наружу выходят только безопасные статусы, количества, коды
+ошибок без payload и нормализованные read-only операции. MFA, certificate
+pinning и anti-bot bypass не выполняются; реальный smoke не является частью
+обычных тестов.
 
 Сетевые ошибки и HTTP non-2xx от T-Банк server показываются как понятный
 login error; HTML или сырой response body не десериализуются как credentials.
