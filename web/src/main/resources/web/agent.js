@@ -25,6 +25,7 @@ const elements = {
     tbankRealChangePhone: document.querySelector("#tbank-real-change-phone"),
     tbankShowFake: document.querySelector("#tbank-show-fake"),
     tbankShowReal: document.querySelector("#tbank-show-real"),
+    tbankLoginSwitch: document.querySelector(".tbank-login-switch"),
     tbankLogout: document.querySelector("#tbank-logout"),
     tbankSessionStatus: document.querySelector("#tbank-session-status"),
     tbankLoginStatus: document.querySelector("#tbank-login-status"),
@@ -106,6 +107,7 @@ let preferredView = localStorage.getItem(VIEW_KEY) === "cards" ? "cards" : "tabl
 let workingDraft = new Map();
 let dirtyFields = new Map();
 let realLoginStage = "phone";
+let tbankLoginMode = "fake";
 let resendCooldownTimer = null;
 let toastTimer = null;
 
@@ -501,6 +503,7 @@ async function handleTbankLogout() {
         elements.tbankAccount.replaceChildren();
         elements.tbankFakePassword.value = "";
         resetRealLoginForm(true);
+        showTbankLoginMode("fake");
         elements.tbankQueryForm.hidden = true;
         elements.tbankResult.hidden = true;
         elements.tbankResult.textContent = "";
@@ -518,15 +521,23 @@ async function handleTbankLogout() {
 }
 
 function renderTbankSession() {
-    elements.tbankLogout.hidden = !tbankSession.authenticated;
-    if (tbankSession.authenticated) {
+    const authenticated = Boolean(tbankSession.authenticated);
+    elements.tbankLogout.hidden = !authenticated;
+    elements.tbankLoginSwitch.hidden = authenticated;
+    if (authenticated) {
+        elements.tbankFakeLoginForm.hidden = true;
+        elements.tbankRealLoginForm.hidden = true;
         const persistenceNote = tbankSession.persistence_message
             ? ` · ${tbankSession.persistence_message}`
             : "";
         elements.tbankSessionStatus.textContent = `сессия активна (${tbankSession.mode})${persistenceNote}`;
         elements.tbankSessionStatus.className = "mcp-server-status connected";
+        elements.tbankLoginStatus.textContent = "Сессия активна; повторный login не требуется.";
+        elements.tbankLoginStatus.className = "control-note success";
         return;
     }
+    elements.tbankFakeLoginForm.hidden = tbankLoginMode !== "fake";
+    elements.tbankRealLoginForm.hidden = tbankLoginMode !== "real";
     elements.tbankSessionStatus.textContent = "login не выполнен";
     elements.tbankSessionStatus.className = "mcp-server-status";
     elements.tbankQueryForm.hidden = true;
@@ -555,6 +566,26 @@ async function loadTbankAccounts() {
     }
 }
 
+function parseTbankDate(value, fieldLabel) {
+    const trimmed = value.trim();
+    const match = trimmed.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+    if (!match) {
+        throw new ApiError(`${fieldLabel}: используйте формат ДД.ММ.ГГГГ.`, 400);
+    }
+    const day = Number(match[1]);
+    const month = Number(match[2]);
+    const year = Number(match[3]);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (
+        date.getUTCFullYear() !== year
+        || date.getUTCMonth() !== month - 1
+        || date.getUTCDate() !== day
+    ) {
+        throw new ApiError(`${fieldLabel}: указана некорректная дата.`, 400);
+    }
+    return `${match[3]}-${match[2]}-${match[1]}`;
+}
+
 async function handleTbankTransactions(event) {
     event.preventDefault();
     const button = document.querySelector("#tbank-load-transactions");
@@ -564,8 +595,8 @@ async function handleTbankTransactions(event) {
     try {
         const result = await callTbankTool("get-account-transactions", {
             account_id: elements.tbankAccount.value,
-            from: elements.tbankFrom.value,
-            to: elements.tbankTo.value,
+            from: parseTbankDate(elements.tbankFrom.value, "Дата начала"),
+            to: parseTbankDate(elements.tbankTo.value, "Дата окончания"),
             limit: Number(elements.tbankLimit.value),
         });
         elements.tbankResult.textContent = JSON.stringify(result, null, 2);
@@ -597,6 +628,7 @@ async function callTbankTool(tool, argumentsValue) {
 
 function showTbankLoginMode(mode) {
     const fake = mode === "fake";
+    tbankLoginMode = fake ? "fake" : "real";
     elements.tbankFakeLoginForm.hidden = !fake;
     elements.tbankRealLoginForm.hidden = fake;
     elements.tbankShowFake.setAttribute("aria-selected", String(fake));

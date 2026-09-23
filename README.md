@@ -169,7 +169,7 @@ cd solutions/transaction-import
 1. проверьте каталог `MCP-серверы` и две схемы T-Банк tools;
 2. оставьте `fake`, введите synthetic credentials `demo` / `demo` и нажмите
    `Войти`;
-3. выберите счёт, период `2026-09-01`—`2026-09-30` и нажмите
+3. выберите счёт, период `01.09.2026`—`30.09.2026` и нажмите
    `Вызвать get-account-transactions`;
 4. проверьте JSON результата: счёт, `amount_minor`, дату, merchant и список
    операций.
@@ -191,6 +191,11 @@ loopback во время login. После успешного login session enve
 MCP-сервером в OS credential store; при недоступном store session живёт только
 до restart и это явно показывается пользователю. Logout и отказ банка удаляют
 сохранённый envelope.
+
+После обновления страницы сохранённая session проверяется сервером; при успехе
+показываются статус активной session и только кнопка `Выйти`, login-формы
+скрыты. Поля периода в UI используют русский формат `ДД.ММ.ГГГГ`, затем
+преобразуются в контракт MCP `YYYY-MM-DD`.
 
 Phone, password, OTP, access/refresh tokens, session IDs, auth cookies,
 fingerprints и raw private API responses не попадают в БД, logs, LLM context или

@@ -95,9 +95,13 @@
                 <label for="tbank-account">Счёт</label>
                 <select id="tbank-account" required></select>
                 <label for="tbank-from">С</label>
-                <input id="tbank-from" type="date" value="2026-09-01" required>
+                <input id="tbank-from" type="text" inputmode="numeric" autocomplete="off"
+                       placeholder="ДД.ММ.ГГГГ" pattern="[0-9]{2}\.[0-9]{2}\.[0-9]{4}"
+                       value="01.09.2026" maxlength="10" title="Формат: ДД.ММ.ГГГГ" required>
                 <label for="tbank-to">По</label>
-                <input id="tbank-to" type="date" value="2026-09-30" required>
+                <input id="tbank-to" type="text" inputmode="numeric" autocomplete="off"
+                       placeholder="ДД.ММ.ГГГГ" pattern="[0-9]{2}\.[0-9]{2}\.[0-9]{4}"
+                       value="30.09.2026" maxlength="10" title="Формат: ДД.ММ.ГГГГ" required>
                 <label for="tbank-limit">Лимит операций</label>
                 <input id="tbank-limit" type="number" min="1" max="100" value="50" required>
                 <button id="tbank-load-transactions" type="submit">Вызвать get-account-transactions</button>
