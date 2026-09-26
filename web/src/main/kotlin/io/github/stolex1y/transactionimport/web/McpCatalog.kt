@@ -80,6 +80,7 @@ data class McpCatalogResponse(
 
 @Serializable
 data class TbankLoginRequest(
+    val mode: String = "fake",
     val phone: String = "",
     val password: String = "",
     val otp: String = "",
@@ -92,6 +93,7 @@ data class TbankOtpResendRequest(
 
 @Serializable
 data class TbankLoginResponse(
+    val mode: String = "fake",
     val status: String,
     val message: String,
     @SerialName("requires_otp") val requiresOtp: Boolean = false,
@@ -104,6 +106,7 @@ data class TbankLoginResponse(
 
 @Serializable
 data class TbankSessionResponse(
+    val mode: String? = "fake",
     val authenticated: Boolean,
     val status: String = "login_required",
     val retryable: Boolean = false,
@@ -139,10 +142,10 @@ object UnavailableTbankMcpProvider : TbankMcpProvider {
     private const val MESSAGE = "T-Bank MCP server не настроен."
 
     override suspend fun login(request: TbankLoginRequest) =
-        TbankLoginResponse(status = "error", message = MESSAGE)
+        TbankLoginResponse(mode = request.mode, status = "error", message = MESSAGE)
 
     override suspend fun resendOtp(phone: String) =
-        TbankLoginResponse(status = "error", message = MESSAGE)
+        TbankLoginResponse(mode = "real", status = "error", message = MESSAGE)
 
     override suspend fun logout() = TbankSessionResponse(authenticated = false)
 
