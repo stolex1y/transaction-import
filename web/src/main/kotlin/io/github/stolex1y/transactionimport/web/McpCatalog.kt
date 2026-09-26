@@ -112,8 +112,8 @@ data class TbankSessionResponse(
     val retryable: Boolean = false,
     @SerialName("retry_after_seconds") val retryAfterSeconds: Long = 0,
     @SerialName("account_count") val accountCount: Int = 0,
-    val persistenceStatus: String = "not_configured",
-    val persistenceMessage: String? = null,
+    @SerialName("persistence_status") val persistenceStatus: String = "not_configured",
+    @SerialName("persistence_message") val persistenceMessage: String? = null,
 )
 
 @Serializable
@@ -145,7 +145,7 @@ object UnavailableTbankMcpProvider : TbankMcpProvider {
         TbankLoginResponse(mode = request.mode, status = "error", message = MESSAGE)
 
     override suspend fun resendOtp(phone: String) =
-        TbankLoginResponse(mode = "real", status = "error", message = MESSAGE)
+        TbankLoginResponse(mode = "fake", status = "error", message = MESSAGE)
 
     override suspend fun logout() = TbankSessionResponse(authenticated = false)
 
@@ -167,6 +167,8 @@ class McpCatalogService private constructor(
     private val connections: MutableMap<String, ActiveMcpConnection>,
 ) : McpCatalogProvider, TbankMcpProvider, McpToolProvider, AutoCloseable {
     private val mutex = Mutex()
+
+    private var tbankMode = "fake"
 
     override suspend fun catalog(): McpCatalogResponse = mutex.withLock {
         val current = configs.map { config ->
@@ -211,8 +213,10 @@ class McpCatalogService private constructor(
     }
 
     override suspend fun login(request: TbankLoginRequest): TbankLoginResponse = mutex.withLock {
+        tbankMode = request.mode
         val config = tbankConfig()
             ?: return@withLock TbankLoginResponse(
+                mode = request.mode,
                 status = "error",
                 message = "Т-Банк MCP endpoint не настроен.",
             )
@@ -223,14 +227,16 @@ class McpCatalogService private constructor(
             }
             if (!response.status.isSuccess()) {
                 TbankLoginResponse(
+                    mode = request.mode,
                     status = "error",
                     message = "Т-Банк MCP server вернул HTTP ${response.status.value}. Проверьте актуальность server и его logs.",
                 )
             } else {
-                response.body()
+                response.body<TbankLoginResponse>().copy(mode = request.mode)
             }
         } catch (error: Throwable) {
             TbankLoginResponse(
+                mode = request.mode,
                 status = "error",
                 message = "Не удалось выполнить login: ${safeError(error)}",
             )
@@ -240,6 +246,7 @@ class McpCatalogService private constructor(
     override suspend fun resendOtp(phone: String): TbankLoginResponse = mutex.withLock {
         val config = tbankConfig()
             ?: return@withLock TbankLoginResponse(
+                mode = tbankMode,
                 status = "error",
                 message = "Т-Банк MCP endpoint не настроен.",
             )
@@ -250,43 +257,51 @@ class McpCatalogService private constructor(
             }
             if (!response.status.isSuccess()) {
                 TbankLoginResponse(
+                    mode = tbankMode,
                     status = "error",
                     message = "Т-Банк MCP server вернул HTTP ${response.status.value}. Проверьте актуальность server и его logs.",
                 )
             } else {
-                response.body()
+                response.body<TbankLoginResponse>().copy(mode = tbankMode)
             }
         } catch (error: Throwable) {
             TbankLoginResponse(
+                mode = tbankMode,
                 status = "error",
                 message = "Не удалось повторно отправить SMS-код: ${safeError(error)}",
             )
         }
     }
     override suspend fun logout(): TbankSessionResponse = mutex.withLock {
-        val config = tbankConfig() ?: return@withLock TbankSessionResponse(authenticated = false)
+        val config = tbankConfig() ?: return@withLock TbankSessionResponse(authenticated = false, mode = tbankMode)
         try {
-            httpClient.post(serviceUrl(config, "/tbank/logout")).body()
+            httpClient.post(serviceUrl(config, "/tbank/logout"))
+                .body<TbankSessionResponse>()
+                .copy(mode = tbankMode)
         } catch (_: Throwable) {
-            TbankSessionResponse(authenticated = false)
+            TbankSessionResponse(authenticated = false, mode = tbankMode)
         }
     }
 
     override suspend fun session(): TbankSessionResponse = mutex.withLock {
-        val config = tbankConfig() ?: return@withLock TbankSessionResponse(authenticated = false)
+        val config = tbankConfig() ?: return@withLock TbankSessionResponse(authenticated = false, mode = tbankMode)
         try {
-            httpClient.get(serviceUrl(config, "/tbank/session")).body()
+            httpClient.get(serviceUrl(config, "/tbank/session"))
+                .body<TbankSessionResponse>()
+                .copy(mode = tbankMode)
         } catch (_: Throwable) {
-            TbankSessionResponse(authenticated = false)
+            TbankSessionResponse(authenticated = false, mode = tbankMode)
         }
     }
 
     override suspend fun retrySession(): TbankSessionResponse = mutex.withLock {
-        val config = tbankConfig() ?: return@withLock TbankSessionResponse(authenticated = false)
+        val config = tbankConfig() ?: return@withLock TbankSessionResponse(authenticated = false, mode = tbankMode)
         try {
-            httpClient.get(serviceUrl(config, "/tbank/session/retry")).body()
+            httpClient.get(serviceUrl(config, "/tbank/session/retry"))
+                .body<TbankSessionResponse>()
+                .copy(mode = tbankMode)
         } catch (_: Throwable) {
-            TbankSessionResponse(authenticated = false)
+            TbankSessionResponse(authenticated = false, mode = tbankMode)
         }
     }
 
