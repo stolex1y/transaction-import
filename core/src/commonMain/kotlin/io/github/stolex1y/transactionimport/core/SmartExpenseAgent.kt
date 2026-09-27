@@ -149,6 +149,13 @@ data class ImportDraft(
     val version: Long,
 )
 
+
+private fun ImportDraft.forModelPrompt(): ImportDraft =
+    copy(
+        transactions = transactions.map { row ->
+            row.copy(transaction = row.transaction.copy(sourceRef = null))
+        },
+    )
 @Serializable
 data class ImportSessionState(
     val session: ImportSession,
@@ -1328,7 +1335,7 @@ class SmartExpenseAgent(
                     RequestMessage(
                         role = "system",
                         content = "Текущий draft (trusted application state):\n" +
-                            agentJson.encodeToString(draft),
+                            promptJson.encodeToString(draft.forModelPrompt()),
                     ),
                 )
             }
@@ -1756,7 +1763,7 @@ class SmartExpenseAgent(
             RequestMessage(
                 role = "system",
                 content = "Current import draft (trusted application state):\n" +
-                    agentJson.encodeToString(draft),
+                    promptJson.encodeToString(draft.forModelPrompt()),
             ),
             RequestMessage(
                 role = "user",
@@ -1858,7 +1865,7 @@ class SmartExpenseAgent(
                         RequestMessage(
                             role = "system",
                             content = "Current import draft JSON (trusted application state):\n" +
-                                agentJson.encodeToString(canonicalDraft),
+                                promptJson.encodeToString(canonicalDraft.forModelPrompt()),
                         ),
                     )
                     add(RequestMessage(role = "user", content = userText))
@@ -2206,7 +2213,7 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
         add(
             RequestMessage(
                 "system",
-                "Current import draft JSON (trusted application state):\n${agentJson.encodeToString(draft)}",
+                "Current import draft JSON (trusted application state):\n${promptJson.encodeToString(draft.forModelPrompt())}",
             ),
         )
         facts.message?.let(::add)
@@ -3977,6 +3984,13 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
             coerceInputValues = false
             encodeDefaults = true
             explicitNulls = true
+        }
+        val promptJson = Json {
+            ignoreUnknownKeys = false
+            isLenient = false
+            coerceInputValues = false
+            encodeDefaults = true
+            explicitNulls = false
         }
 
         val INITIAL_DRAFT_PREFIX = "Return exactly one JSON object with exactly these required root fields:"

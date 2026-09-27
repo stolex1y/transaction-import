@@ -34,6 +34,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+private const val MAX_SCHEDULER_ACCOUNT_RESPONSE_CHARS = 1_000_000
 
 class AgentWebDependencies(
     val agent: SmartExpenseAgent,
@@ -223,6 +224,15 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
         if (response.isError) {
             call.respond(SchedulerAccountsResponse(emptyList(), response.text.take(240)))
         } else {
+            if (response.text.length > MAX_SCHEDULER_ACCOUNT_RESPONSE_CHARS) {
+                call.respond(
+                    SchedulerAccountsResponse(
+                        accounts = emptyList(),
+                        error = "Список счетов временно недоступен: ответ источника слишком большой.",
+                    ),
+                )
+                return@get
+            }
             val accounts = runCatching { parseSchedulerAccounts(response.text) }.getOrElse {
                 call.respond(
                     SchedulerAccountsResponse(
@@ -406,7 +416,7 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
             config = runtime.runtimeConfig.defaultAgentConfig(),
             contextManagement = runtime.runtimeConfig.sessionContextManagement(),
         )
-        call.respond(HttpStatusCode.Created, state)
+        call.respond(HttpStatusCode.Created, state.withoutOpaqueSourceRefs())
     }
 
     post("/api/agent/sessions/{id}/fork") {
@@ -417,13 +427,13 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
             dependencies.requireAgentRuntime().agent.forkSession(
                 sessionId = id,
                 expectedRevision = request.revision,
-            ),
+            ).withoutOpaqueSourceRefs(),
         )
     }
 
     get("/api/agent/sessions/{id}") {
         val id = call.parameters["id"].requiredPathParameter("id")
-        call.respond(dependencies.requireAgentRuntime().agent.getSession(id))
+        call.respond(dependencies.requireAgentRuntime().agent.getSession(id).withoutOpaqueSourceRefs())
     }
     get("/api/agent/sessions/{id}/memory") {
         val id = call.parameters["id"].requiredPathParameter("id")
@@ -442,7 +452,7 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
                 sessionId = id,
                 expectedRevision = request.revision,
                 candidateId = candidateId,
-            ),
+            ).withoutOpaqueSourceRefs(),
         )
     }
     post("/api/agent/sessions/{id}/merchant-canonical-candidates/{candidateId}/accept") {
@@ -450,21 +460,24 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
         val candidateId = call.parameters["candidateId"].requiredPathParameter("candidateId")
         val request = call.receive<AcceptMerchantCanonicalCandidateRequest>()
         val runtime = dependencies.requireAgentRuntime()
-        val response = if (request.previewId != null && runtime.nativeMcpAgent != null) {
-            runtime.nativeMcpAgent.acceptMerchantCanonicalCandidate(
-                sessionId = id,
-                expectedRevision = request.revision,
-                candidateId = candidateId,
-                previewId = request.previewId,
+        if (request.previewId != null && runtime.nativeMcpAgent != null) {
+            call.respond(
+                runtime.nativeMcpAgent.acceptMerchantCanonicalCandidate(
+                    sessionId = id,
+                    expectedRevision = request.revision,
+                    candidateId = candidateId,
+                    previewId = request.previewId,
+                ).withoutOpaqueSourceRefs(),
             )
         } else {
-            runtime.agent.acceptMerchantCanonicalCandidate(
-                sessionId = id,
-                expectedRevision = request.revision,
-                candidateId = candidateId,
+            call.respond(
+                runtime.agent.acceptMerchantCanonicalCandidate(
+                    sessionId = id,
+                    expectedRevision = request.revision,
+                    candidateId = candidateId,
+                ).withoutOpaqueSourceRefs(),
             )
         }
-        call.respond(response)
     }
 
     put("/api/agent/sessions/{id}/config") {
@@ -475,7 +488,7 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
                 sessionId = id,
                 expectedRevision = request.revision,
                 config = request.config,
-            ),
+            ).withoutOpaqueSourceRefs(),
         )
     }
 
@@ -490,7 +503,7 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
                 text = request.text,
             )
         ) {
-            is NativeMcpHandlingResult.Handled -> call.respond(nativeResult.response)
+            is NativeMcpHandlingResult.Handled -> call.respond(nativeResult.response.withoutOpaqueSourceRefs())
             NativeMcpHandlingResult.NotHandled,
             null,
             -> call.respond(
@@ -498,7 +511,7 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
                     sessionId = id,
                     expectedRevision = request.revision,
                     text = request.text,
-                ),
+                ).withoutOpaqueSourceRefs(),
             )
         }
     }
@@ -509,7 +522,7 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
         val request = call.receive<ConfirmMcpPreviewRequest>()
         val native = dependencies.requireAgentRuntime().nativeMcpAgent
             ?: throw ProviderUnavailableException("Native MCP loop не настроен.")
-        call.respond(native.confirm(id, request.revision, previewId))
+        call.respond(native.confirm(id, request.revision, previewId).withoutOpaqueSourceRefs())
     }
 
     delete("/api/agent/sessions/{id}/mcp-previews/{previewId}") {
@@ -554,7 +567,7 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
                     items = existing.items,
                     sourceRef = existing.sourceRef,
                 ),
-            ),
+            ).withoutOpaqueSourceRefs(),
         )
     }
 
@@ -566,7 +579,7 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
                 sessionId = id,
                 expectedRevision = request.revision,
                 included = request.included,
-            ),
+            ).withoutOpaqueSourceRefs(),
         )
     }
 
@@ -579,13 +592,30 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
 
     get("/api/agent/sessions/{id}/batch") {
         val id = call.parameters["id"].requiredPathParameter("id")
-        call.respond(dependencies.requireAgentRuntime().agent.buildImportBatch(id))
+        call.respond(dependencies.requireAgentRuntime().agent.buildImportBatch(id).withoutOpaqueSourceRefs())
     }
 }
 
 private fun AgentWebDependencies?.requireAgentRuntime(): AgentWebDependencies =
     this ?: throw ProviderUnavailableException("Сервис временно недоступен.")
 
+private fun io.github.stolex1y.transactionimport.core.ImportSessionState.withoutOpaqueSourceRefs() =
+    copy(
+        draft = draft?.let { currentDraft ->
+            currentDraft.copy(
+                transactions = currentDraft.transactions.map { row ->
+                    row.copy(transaction = row.transaction.copy(sourceRef = null))
+                },
+            )
+        },
+    )
+
+private fun io.github.stolex1y.transactionimport.core.ImportBatch.withoutOpaqueSourceRefs() =
+    copy(transactions = transactions.map { it.copy(sourceRef = null) })
+private fun NativeMcpMessageResponse.withoutOpaqueSourceRefs() =
+    copy(state = state.withoutOpaqueSourceRefs())
+private fun MerchantCanonicalCandidateAcceptanceResponse.withoutOpaqueSourceRefs() =
+    copy(state = state.withoutOpaqueSourceRefs())
 private fun AgentWebDependencies.requireScheduler(): SchedulerService =
     scheduler ?: throw ProviderUnavailableException("Scheduler service не настроен.")
 
@@ -600,11 +630,11 @@ private fun parseSchedulerAccounts(text: String): List<SchedulerAccountResponse>
         (root?.get("payload") as? JsonObject)?.get("accounts"),
     ).firstNotNullOfOrNull { it as? JsonArray }
         ?: throw IllegalStateException("Источник не вернул список счетов.")
+    require(array.size <= 20) { "Источник вернул слишком много счетов." }
     return array.mapNotNull { element ->
         val item = element as? JsonObject ?: return@mapNotNull null
-        val ref = sequenceOf("account_ref", "ref", "id")
-            .mapNotNull { item[it]?.jsonPrimitive?.contentOrNull?.trim() }
-            .firstOrNull(String::isNotBlank)
+        val ref = item["account_ref"]?.jsonPrimitive?.contentOrNull?.trim()
+            ?.takeIf { it.isNotBlank() && it.length <= 200 }
             ?: return@mapNotNull null
         val name = sequenceOf("name", "account_name", "display_name", "title")
             .mapNotNull { item[it]?.jsonPrimitive?.contentOrNull?.trim() }

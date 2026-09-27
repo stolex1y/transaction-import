@@ -47,10 +47,17 @@ private const val LEGACY_TBANK_SERVER_ID = "bank-transactions"
 private const val TBANK_LIST_ACCOUNTS = "list-accounts"
 private const val TBANK_GET_TRANSACTIONS = "get-account-transactions"
 private const val RECEIPTS_SERVER_ID = "receipts"
+private const val SCHEDULER_SERVER_ID = "scheduler"
+private const val SCHEDULER_RUN = "run-scheduled-task"
+private const val SCHEDULER_HISTORY = "get-scheduler-history"
 private const val RECEIPTS_SEARCH = "search-receipts"
 private const val RECEIPTS_GET = "get-receipt"
 private const val MAX_HISTORY_MESSAGES = 8
-
+private const val MAX_NATIVE_RESULT_CHARS = 200_000
+private const val MAX_NATIVE_RESULT_ITEMS = 200
+private const val MAX_NATIVE_CANDIDATES = 500
+private const val MAX_NATIVE_JSON_DEPTH = 8
+private val NATIVE_CURRENCY_PATTERN = Regex("^[A-Z]{3}$")
 @Serializable
 data class McpPreviewTransaction(
     @SerialName("occurred_at") val occurredAt: String,
@@ -146,6 +153,7 @@ class NativeMcpAgent(
         }
         val aliases = linkedMapOf<String, String>()
         val receiptAliases = linkedMapOf<String, String>()
+        val schedulerAliases = linkedMapOf<String, String>()
         val candidates = mutableListOf<ExternalTransactionCandidate>()
         val redactedValues = mutableSetOf<String>()
         var response: ChatCompletionResponse
@@ -160,14 +168,16 @@ class NativeMcpAgent(
                         "операции не импортированы.",
                 )
             }
-            response = gateway.complete(
-                request(
-                    config = state.session.config,
-                    gateway = gateway,
-                    messages = messages,
-                    tools = functionDefinitions,
-                ),
-            )
+            response = withTimeout(loopConfig.callTimeoutMs) {
+                gateway.complete(
+                    request(
+                        config = state.session.config,
+                        gateway = gateway,
+                        messages = messages,
+                        tools = functionDefinitions,
+                    ),
+                )
+            }
             iterations += 1
             val message = response.choices.firstOrNull()?.message
                 ?: throw AgentResponseException("Провайдер не вернул сообщение для MCP-цикла.")
@@ -236,13 +246,31 @@ class NativeMcpAgent(
                 ) {
                     lastFetchArguments = rawArguments
                 }
-                val sourceArguments = prepareArguments(binding, rawArguments, aliases, receiptAliases)
-                val result = withTimeout(loopConfig.callTimeoutMs) {
-                    mcpTools.callConfiguredTool(
-                        serverId = binding.serverId,
+                val sourceArguments = prepareArguments(
+                    binding = binding,
+                    arguments = rawArguments,
+                    aliases = aliases,
+                    receiptAliases = receiptAliases,
+                    schedulerAliases = schedulerAliases,
+                )
+                val result = if (
+                    binding.serverId == SCHEDULER_SERVER_ID &&
+                    binding.name == SCHEDULER_RUN &&
+                    !hasExplicitSchedulerRunIntent(text)
+                ) {
+                    TbankToolCallResponse(
                         tool = binding.name,
-                        arguments = sourceArguments,
+                        isError = true,
+                        text = "Явно запросите запуск scheduler task.",
                     )
+                } else {
+                    withTimeout(loopConfig.callTimeoutMs) {
+                        mcpTools.callConfiguredTool(
+                            serverId = binding.serverId,
+                            tool = binding.name,
+                            arguments = sourceArguments,
+                        )
+                    }
                 }
                 val normalized = normalizeResult(
                     binding = binding,
@@ -250,7 +278,14 @@ class NativeMcpAgent(
                     result = result,
                     aliases = aliases,
                     receiptAliases = receiptAliases,
+                    schedulerAliases = schedulerAliases,
                 )
+                require(normalized.text.length <= MAX_NATIVE_RESULT_CHARS) {
+                    "MCP tool вернул слишком большой нормализованный ответ."
+                }
+                require(candidates.size + normalized.candidates.size <= MAX_NATIVE_CANDIDATES) {
+                    "MCP tool вернул слишком много операций."
+                }
                 candidates += normalized.candidates
                 redactedValues += normalized.redactedValues
                 messages += RequestMessage(
@@ -512,7 +547,6 @@ class NativeMcpAgent(
         contextWindowTokens = null,
         createdAtEpochMs = System.currentTimeMillis(),
     )
-
     private fun parseArguments(call: ChatFunctionCall): JsonObject = runCatching {
         json.parseToJsonElement(call.arguments.ifBlank { "{}" }).jsonObject
     }.getOrElse {
@@ -524,7 +558,24 @@ class NativeMcpAgent(
         arguments: JsonObject,
         aliases: Map<String, String>,
         receiptAliases: Map<String, String>,
+        schedulerAliases: Map<String, String>,
     ): JsonObject {
+        if (binding.serverId == SCHEDULER_SERVER_ID) {
+            require(
+                arguments.keys.all { it == "task_alias" || it == "limit" },
+            ) { "Scheduler tool получил недопустимые аргументы." }
+            if (binding.name == "list-scheduled-tasks") return JsonObject(emptyMap())
+            val alias = arguments["task_alias"]?.jsonPrimitive?.contentOrNull
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
+                ?: throw AgentResponseException("Для scheduler нужен task_alias из списка задач.")
+            val taskId = schedulerAliases[alias]
+                ?: throw AgentResponseException("Неизвестный task_alias; сначала запросите список задач.")
+            return buildJsonObject {
+                put("task_id", taskId)
+                arguments["limit"]?.let { put("limit", it) }
+            }
+        }
         if (binding.serverId == RECEIPTS_SERVER_ID && binding.name == RECEIPTS_GET) {
             require("receipt_key" !in arguments) {
                 "MCP tool должен использовать receipt_alias, а не ключ чека."
@@ -557,23 +608,32 @@ class NativeMcpAgent(
         sanitized["account_ref"] = JsonPrimitive(accountRef)
         return JsonObject(sanitized)
     }
+
     private fun normalizeResult(
         binding: McpCallableTool,
         arguments: JsonObject,
         result: TbankToolCallResponse,
         aliases: MutableMap<String, String>,
         receiptAliases: MutableMap<String, String>,
+        schedulerAliases: MutableMap<String, String>,
     ): NormalizedToolResult {
         if (result.isError) {
             return NormalizedToolResult(
-                text = "MCP tool завершился ошибкой: ${redactText(result.text)}",
+                text = "MCP tool завершился ошибкой.",
                 candidates = emptyList(),
             )
         }
+        if (result.text.length > MAX_NATIVE_RESULT_CHARS) {
+            return NormalizedToolResult("MCP tool вернул слишком большой ответ.", emptyList())
+        }
         val element = runCatching { json.parseToJsonElement(result.text) }.getOrElse {
-            return NormalizedToolResult(redactText(result.text), emptyList())
+            return NormalizedToolResult("MCP tool вернул некорректный ответ.", emptyList())
         }
         val redactedValues = sensitiveValues(element)
+        if (binding.serverId == SCHEDULER_SERVER_ID) {
+            return normalizeSchedulerResult(element, binding.name, schedulerAliases)
+                .copy(redactedValues = redactedValues)
+        }
         if (binding.serverId == RECEIPTS_SERVER_ID) {
             val normalized = when (binding.name) {
                 RECEIPTS_SEARCH -> normalizeReceiptSearch(element, receiptAliases)
@@ -594,6 +654,97 @@ class NativeMcpAgent(
             else -> NormalizedToolResult(redactJson(element).toString(), emptyList())
         }.copy(redactedValues = redactedValues)
     }
+    private fun normalizeSchedulerResult(
+        element: JsonElement,
+        tool: String,
+        schedulerAliases: MutableMap<String, String>,
+    ): NormalizedToolResult {
+        if (tool == "list-scheduled-tasks") {
+            val tasks = (element as? JsonArray)
+                ?: (element as? JsonObject)?.get("tasks") as? JsonArray
+                ?: return NormalizedToolResult("""{"tasks":[]}""", emptyList())
+            if (tasks.size > MAX_NATIVE_RESULT_ITEMS) {
+                return NormalizedToolResult("MCP scheduler вернул слишком много задач.", emptyList())
+            }
+            val normalized = buildJsonArray {
+                tasks.forEach { value ->
+                    val task = value as? JsonObject ?: return@forEach
+                    val id = task["id"]?.jsonPrimitive?.contentOrNull
+                        ?.trim()
+                        ?.takeIf(String::isNotBlank)
+                        ?: return@forEach
+                    val alias = "task-${schedulerAliases.size + 1}"
+                    schedulerAliases[alias] = id
+                    add(
+                        buildJsonObject {
+                            put("task_alias", alias)
+                            task["name"]?.let { put("name", it) }
+                            task["status"]?.let { put("status", it) }
+                            task["start_date"]?.let { put("start_date", it) }
+                            task["interval_minutes"]?.let { put("interval_minutes", it) }
+                            task["time_zone"]?.let { put("time_zone", it) }
+                            task["cursor_date"]?.let { put("cursor_date", it) }
+                            task["next_run_at_epoch_ms"]?.let { put("next_run_at_epoch_ms", it) }
+                            (task["account_refs"] as? JsonArray)?.let {
+                                put("account_count", JsonPrimitive(it.size))
+                            }
+                        },
+                    )
+                }
+            }
+            return NormalizedToolResult(
+                text = buildJsonObject { put("tasks", normalized) }.toString(),
+                candidates = emptyList(),
+            )
+        }
+        if (tool == SCHEDULER_HISTORY) {
+            val runs = (element as? JsonArray)
+                ?: (element as? JsonObject)?.get("runs") as? JsonArray
+                ?: return NormalizedToolResult("""{"runs":[]}""", emptyList())
+            if (runs.size > MAX_NATIVE_RESULT_ITEMS) {
+                return NormalizedToolResult("MCP scheduler вернул слишком много запусков.", emptyList())
+            }
+            val normalized = buildJsonArray {
+                runs.forEach { value ->
+                    val run = value as? JsonObject ?: return@forEach
+                    add(
+                        buildJsonObject {
+                            run["status"]?.let { put("status", it) }
+                            run["started_at_epoch_ms"]?.let { put("started_at_epoch_ms", it) }
+                            run["finished_at_epoch_ms"]?.let { put("finished_at_epoch_ms", it) }
+                            run["error"]?.let { put("error", it) }
+                            val result = run["result"] as? JsonObject
+                            result?.let {
+                                listOf(
+                                    "transaction_count",
+                                    "receipt_candidate_count",
+                                    "receipt_detail_count",
+                                    "enriched_item_count",
+                                    "unmatched_count",
+                                    "ambiguous_count",
+                                ).forEach { key -> it[key]?.let { valueForKey -> put(key, valueForKey) } }
+                            }
+                        },
+                    )
+                }
+            }
+            return NormalizedToolResult(
+                text = buildJsonObject { put("runs", normalized) }.toString(),
+                candidates = emptyList(),
+            )
+        }
+        val task = element as? JsonObject
+            ?: return NormalizedToolResult("{}", emptyList())
+        return NormalizedToolResult(
+            text = buildJsonObject {
+                task["name"]?.let { put("name", it) }
+                task["status"]?.let { put("status", it) }
+                task["cursor_date"]?.let { put("cursor_date", it) }
+                task["last_error"]?.let { put("last_error", it) }
+            }.toString(),
+            candidates = emptyList(),
+        )
+    }
     private fun normalizeReceiptSearch(
         element: JsonElement,
         receiptAliases: MutableMap<String, String>,
@@ -603,6 +754,9 @@ class NativeMcpAgent(
             text = buildJsonObject { putJsonArray("receipts") {} }.toString(),
             candidates = emptyList(),
         )
+        if (receipts.size > MAX_NATIVE_RESULT_ITEMS) {
+            return NormalizedToolResult("MCP tool вернул слишком много чеков.", emptyList())
+        }
         val normalized = buildJsonArray {
             receipts.forEach { value ->
                 val receipt = value as? JsonObject ?: return@forEach
@@ -643,6 +797,9 @@ class NativeMcpAgent(
         aliases: MutableMap<String, String>,
     ): NormalizedToolResult {
         val accounts = accountObjects(element)
+        if (accounts.size > MAX_NATIVE_RESULT_ITEMS) {
+            return NormalizedToolResult("MCP tool вернул слишком много счетов.", emptyList())
+        }
         val used = aliases.keys.toMutableSet()
         val normalized = accounts.mapNotNull { account ->
             val ref = accountReference(account) ?: return@mapNotNull null
@@ -677,42 +834,49 @@ class NativeMcpAgent(
     private fun formatMinorAmount(amountMinor: Long, currency: String): String =
         "${BigDecimal.valueOf(amountMinor, 2).toPlainString()} $currency"
 
-    private fun accountObjects(element: JsonElement): List<JsonObject> = when (element) {
-        is JsonArray -> element.flatMap(::accountObjects)
-        is JsonObject -> {
-            if (accountReference(element) != null) {
-                listOf(element)
-            } else {
-                listOf(
-                    "accounts",
-                    "account_list",
-                    "items",
-                    "payload",
-                    "data",
-                    "result",
-                    "response",
-                    "content",
-                    "text",
-                    "structuredContent",
-                    "structured_content",
-                ).asSequence()
-                    .mapNotNull(element::get)
-                    .flatMap { accountObjects(it).asSequence() }
-                    .toList()
+    private fun accountObjects(element: JsonElement, depth: Int = 0): List<JsonObject> {
+        require(depth <= MAX_NATIVE_JSON_DEPTH) { "MCP tool вернул слишком глубокий ответ." }
+        return when (element) {
+            is JsonArray -> {
+                require(element.size <= MAX_NATIVE_RESULT_ITEMS) {
+                    "MCP tool вернул слишком много счетов."
+                }
+                element.flatMap { accountObjects(it, depth + 1) }
             }
+            is JsonObject -> {
+                if (accountReference(element) != null) {
+                    listOf(element)
+                } else {
+                    listOf(
+                        "accounts",
+                        "account_list",
+                        "items",
+                        "payload",
+                        "data",
+                        "result",
+                        "response",
+                        "content",
+                        "text",
+                        "structuredContent",
+                        "structured_content",
+                    ).asSequence()
+                        .mapNotNull(element::get)
+                        .flatMap { accountObjects(it, depth + 1).asSequence() }
+                        .toList()
+                }
+            }
+            is JsonPrimitive -> element.contentOrNull
+                ?.let { encoded -> runCatching { json.parseToJsonElement(encoded) }.getOrNull() }
+                ?.let { accountObjects(it, depth + 1) }
+                .orEmpty()
+            else -> emptyList()
         }
-        is JsonPrimitive -> element.contentOrNull
-            ?.let { encoded -> runCatching { json.parseToJsonElement(encoded) }.getOrNull() }
-            ?.let(::accountObjects)
-            .orEmpty()
-        else -> emptyList()
     }
 
     private fun accountReference(account: JsonObject): String? =
-        sequenceOf("account_ref", "account_id", "accountId", "ref", "id")
-            .mapNotNull { key -> account[key]?.jsonPrimitive?.contentOrNull }
-            .firstOrNull(String::isNotBlank)
-
+        sequenceOf("account_ref", "account_id", "accountId", "id", "ref")
+            .mapNotNull { key -> account[key]?.jsonPrimitive?.contentOrNull?.trim() }
+            .firstOrNull { it.isNotBlank() && it.length <= 200 }
     private fun accountName(account: JsonObject): String =
         sequenceOf("name", "account_name", "accountName", "display_name", "displayName", "title", "alias")
             .mapNotNull { key -> account[key]?.jsonPrimitive?.contentOrNull?.trim() }
@@ -729,21 +893,39 @@ class NativeMcpAgent(
             element is JsonArray -> element
             else -> JsonArray(emptyList())
         }
+        if (transactions.size > MAX_NATIVE_RESULT_ITEMS) {
+            return NormalizedToolResult("MCP tool вернул слишком много операций.", emptyList())
+        }
         val alias = arguments["account_alias"]?.jsonPrimitive?.contentOrNull.orEmpty()
         val sourceLabel = accountLabel(root, alias)
-        val candidates = transactions.mapNotNull { item ->
-            val transaction = item as? JsonObject ?: return@mapNotNull null
-            val amount = transaction["amount_minor"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
+        val candidates = transactions.map { item ->
+            val transaction = item as? JsonObject
+                ?: throw AgentResponseException("MCP tool вернул некорректную операцию.")
+            val amount = transaction["amount_minor"]?.jsonPrimitive?.longOrNull
+                ?.takeIf { it != Long.MIN_VALUE }
+                ?: throw AgentResponseException("MCP tool вернул операцию без корректной суммы.")
             val date = transaction["date"]?.jsonPrimitive?.contentOrNull
                 ?: transaction["occurred_at"]?.jsonPrimitive?.contentOrNull
-                ?: return@mapNotNull null
+                ?: throw AgentResponseException("MCP tool вернул операцию без даты.")
+            validateNativeDate(date)
+            val postedAt = transaction["posted_at"]?.jsonPrimitive?.contentOrNull
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
+                ?.also(::validateNativeDate)
+            val currency = normalizeCurrencyCode(
+                transaction["currency"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            )
+            require(NATIVE_CURRENCY_PATTERN.matches(currency)) {
+                "MCP tool вернул операцию с некорректной валютой."
+            }
             val description = transactionDescription(transaction)
+            val merchant = transactionMerchant(transaction)
             ExternalTransactionCandidate(
                 occurredAt = date,
-                postedAt = transaction["posted_at"]?.jsonPrimitive?.contentOrNull,
+                postedAt = postedAt,
                 amountMinor = amount,
-                currency = normalizeCurrencyCode(transaction["currency"]?.jsonPrimitive?.contentOrNull.orEmpty()),
-                merchant = transactionMerchant(transaction),
+                currency = currency,
+                merchant = merchant,
                 description = description,
                 sourceLabel = sourceLabel,
                 sourceRef = transaction["transaction_ref"]?.jsonPrimitive?.contentOrNull
@@ -752,13 +934,17 @@ class NativeMcpAgent(
             )
         }
         val normalizedTransactions = transactions.map { item ->
-            val transaction = item as? JsonObject ?: return@map redactJson(item)
+            val transaction = item as? JsonObject
+                ?: return@map JsonObject(emptyMap())
             val description = transactionDescription(transaction)
             val merchant = transactionMerchant(transaction)
             buildJsonObject {
                 transaction.forEach { (key, value) ->
-                    if (key !in FORBIDDEN_KEYS && key !in setOf("account_ref", "account_id", "id")) {
-                        when (key) {
+                    val normalizedKey = key.lowercase(java.util.Locale.ROOT)
+                    if (normalizedKey !in FORBIDDEN_KEYS &&
+                        normalizedKey !in setOf("account_ref", "account_id", "id")
+                    ) {
+                        when (normalizedKey) {
                             "merchant", "merchant_name", "shop_name" ->
                                 put(key, JsonPrimitive(merchant))
                             "currency", "currency_code" ->
@@ -774,7 +960,11 @@ class NativeMcpAgent(
         val normalizedRoot = buildJsonObject {
             if (root != null) {
                 root.forEach { (key, value) ->
-                    if (key != "transactions" && key !in FORBIDDEN_KEYS && key !in setOf("account_ref", "account_id")) {
+                    val normalizedKey = key.lowercase(java.util.Locale.ROOT)
+                    if (normalizedKey != "transactions" &&
+                        normalizedKey !in FORBIDDEN_KEYS &&
+                        normalizedKey !in setOf("account_ref", "account_id")
+                    ) {
                         put(key, redactJson(value))
                     }
                 }
@@ -818,9 +1008,32 @@ class NativeMcpAgent(
         "156" -> "CNY"
         else -> value.trim().uppercase()
     }
+    private fun validateNativeDate(value: String) {
+        val normalized = value.trim()
+        require(normalized.length in 1..80) { "MCP tool вернул слишком длинную дату." }
+        runCatching { LocalDate.parse(normalized) }
+            .recoverCatching { java.time.OffsetDateTime.parse(normalized).toLocalDate() }
+            .recoverCatching { java.time.LocalDateTime.parse(normalized).toLocalDate() }
+            .getOrElse { throw AgentResponseException("MCP tool вернул некорректную дату.") }
+    }
 
 
     private fun modelSchema(tool: McpCallableTool): JsonObject {
+        if (tool.serverId == SCHEDULER_SERVER_ID) {
+            if (tool.name == SCHEDULER_RUN || tool.name == SCHEDULER_HISTORY) {
+                val schema = tool.inputSchema.toMutableMap()
+                val properties = (schema["properties"] as? JsonObject)?.toMutableMap() ?: mutableMapOf()
+                properties.remove("task_id")
+                properties["task_alias"] = buildJsonObject {
+                    put("type", "string")
+                    put("description", "Непрозрачный alias из результата list-scheduled-tasks")
+                }
+                schema["properties"] = JsonObject(properties)
+                schema["required"] = JsonArray(listOf(JsonPrimitive("task_alias")))
+                return JsonObject(schema)
+            }
+            return JsonObject(tool.inputSchema)
+        }
         if (tool.serverId == RECEIPTS_SERVER_ID && tool.name == RECEIPTS_GET) {
             val schema = tool.inputSchema.toMutableMap()
             val properties = (schema["properties"] as? JsonObject)?.toMutableMap() ?: mutableMapOf()
@@ -978,6 +1191,18 @@ class NativeMcpAgent(
         return editRequest && !fetchRequest
     }
 
+    private fun hasExplicitSchedulerRunIntent(text: String): Boolean {
+        val normalized = text.trim().lowercase()
+        return listOf(
+            "запусти",
+            "запустить",
+            "выполни",
+            "run scheduled",
+            "run-scheduled-task",
+            "start scheduled",
+        ).any(normalized::contains)
+    }
+
     private fun isPendingFetchCorrection(
         normalized: String,
         hasBankSource: Boolean,
@@ -1040,6 +1265,20 @@ class NativeMcpAgent(
             "accountid",
             "account_ref",
             "accountref",
+            "account_refs",
+            "accountrefs",
+            "target_session_id",
+            "targetsessionid",
+            "task_id",
+            "taskid",
+            "run_id",
+            "runid",
+            "cursor_date",
+            "cursordate",
+            "next_cursor",
+            "nextcursor",
+            "source_ref",
+            "sourceref",
             "session_id",
             "sessionid",
             "access_token",

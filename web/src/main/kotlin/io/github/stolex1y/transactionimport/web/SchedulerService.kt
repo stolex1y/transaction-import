@@ -23,11 +23,15 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.SerialName
@@ -58,6 +62,7 @@ import kotlin.math.abs
 
 private const val SCHEDULER_SERVER_ID = "scheduler"
 private const val TBANK_SERVER_ID = "tbank-transactions"
+private const val TBANK_LIST_ACCOUNTS_TOOL = "list-accounts"
 private const val RECEIPTS_SERVER_ID = "receipts"
 private const val TBANK_TRANSACTIONS_TOOL = "get-account-transactions"
 private const val RECEIPTS_SEARCH_TOOL = "search-receipts"
@@ -66,10 +71,19 @@ private const val LIST_TASKS_TOOL = "list-scheduled-tasks"
 private const val HISTORY_TOOL = "get-scheduler-history"
 private const val RUN_TOOL = "run-scheduled-task"
 private const val MAX_RECEIPT_CANDIDATES = 20
+private const val MAX_RECEIPT_ITEMS = 200
+private const val MAX_TOTAL_RECEIPT_CANDIDATES = 2_000
+private const val MAX_TOTAL_RECEIPT_DETAILS = 2_000
 private const val MAX_ACCOUNTS = 20
 private const val MAX_BANK_PAGES = 100
 private const val BANK_PAGE_SIZE = 100
+private const val MAX_TRANSACTIONS_PER_RUN = MAX_BANK_PAGES * BANK_PAGE_SIZE
+private const val MAX_SOURCE_RESPONSE_CHARS = 1_000_000
 private const val MAX_WORKER_DELAY_MS = 30_000L
+private val CURRENCY_PATTERN = Regex("^[A-Z]{3}$")
+private const val MATCH_TIMEOUT_MS = 15_000L
+private const val SOURCE_CALL_TIMEOUT_MS = 30_000L
+private const val RUN_LEASE_REFRESH_MS = 5 * 60_000L
 
 @Serializable
 private data class ReceiptSelectionResponse(
@@ -151,7 +165,11 @@ class LlmReceiptMatchSelector(
             stream = false,
             useConfiguredReasoning = true,
         )
-        val response = gateway.complete(request)
+        val response = try {
+            withTimeout(MATCH_TIMEOUT_MS) { gateway.complete(request) }
+        } catch (_: TimeoutCancellationException) {
+            return null
+        }
         val content = response.choices.firstOrNull()?.message?.content.orEmpty()
         val parsed = runCatching { json.decodeFromString<ReceiptSelectionResponse>(content) }.getOrNull()
             ?: return null
@@ -203,6 +221,10 @@ class SchedulerService(
         intervalMinutes: Long,
         timeZone: String,
     ): SchedulerTask {
+        val normalizedAccounts = accountRefs.map(String::trim).filter(String::isNotBlank).distinct()
+        require(normalizedAccounts.isNotEmpty()) { "Нужно выбрать хотя бы один счёт." }
+        require(normalizedAccounts.size <= MAX_ACCOUNTS) { "Выбрано слишком много счетов." }
+        validateAccountRefs(normalizedAccounts)
         val normalizedDate = try {
             LocalDate.parse(startDate.trim()).toString()
         } catch (_: DateTimeException) {
@@ -219,7 +241,7 @@ class SchedulerService(
             SchedulerTask(
                 id = idGenerator(),
                 name = name.trim(),
-                accountRefs = accountRefs.map(String::trim).distinct(),
+                accountRefs = normalizedAccounts,
                 startDate = normalizedDate,
                 intervalMinutes = intervalMinutes,
                 timeZone = zone.id,
@@ -227,8 +249,55 @@ class SchedulerService(
             ),
         )
     }
+    private suspend fun validateAccountRefs(accountRefs: List<String>) {
+        val response = try {
+            withTimeout(SOURCE_CALL_TIMEOUT_MS) {
+                mcpTools.callConfiguredTool(
+                    serverId = TBANK_SERVER_ID,
+                    tool = TBANK_LIST_ACCOUNTS_TOOL,
+                    arguments = JsonObject(emptyMap()),
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            throw IllegalArgumentException("Не удалось проверить выбранные счета.")
+        }
+        if (response.isError || response.text.length > MAX_SOURCE_RESPONSE_CHARS) {
+            throw IllegalArgumentException("Не удалось проверить выбранные счета.")
+        }
+        val payload = runCatching { json.parseToJsonElement(response.text) }.getOrElse {
+            throw IllegalArgumentException("Источник счетов вернул некорректный JSON.")
+        }
+        val accounts = when (payload) {
+            is JsonArray -> payload
+            is JsonObject -> listOf(
+                payload["accounts"],
+                (payload["data"] as? JsonObject)?.get("accounts"),
+                (payload["payload"] as? JsonObject)?.get("accounts"),
+            ).firstNotNullOfOrNull { it as? JsonArray }
+            else -> null
+        } ?: throw IllegalArgumentException("Источник счетов не вернул список.")
+        require(accounts.size <= MAX_ACCOUNTS) { "Источник счетов вернул слишком много счетов." }
+        val available = accounts.mapNotNull { item ->
+            (item as? JsonObject)
+                ?.get("account_ref")
+                ?.jsonPrimitive
+                ?.contentOrNull
+                ?.trim()
+                ?.takeIf { it.isNotBlank() && it.length <= 200 }
+        }.toSet()
+        require(available.isNotEmpty()) { "Источник счетов не вернул безопасных ссылок." }
+        require(accountRefs.all(available::contains)) { "Один из выбранных счетов недоступен." }
+    }
 
-    suspend fun updateTask(task: SchedulerTask): SchedulerTask = repository.update(task)
+    suspend fun updateTask(task: SchedulerTask): SchedulerTask = runMutex.withLock {
+        val normalizedAccounts = task.accountRefs.map(String::trim).filter(String::isNotBlank).distinct()
+        require(normalizedAccounts.isNotEmpty()) { "Нужно выбрать хотя бы один счёт." }
+        require(normalizedAccounts.size <= MAX_ACCOUNTS) { "Выбрано слишком много счетов." }
+        validateAccountRefs(normalizedAccounts)
+        repository.update(task.copy(accountRefs = normalizedAccounts))
+    }
 
     suspend fun pause(taskId: String): SchedulerTask = runMutex.withLock {
         updateStatus(taskId, SchedulerTaskStatus.PAUSED)
@@ -246,9 +315,15 @@ class SchedulerService(
     private suspend fun runTaskLocked(task: SchedulerTask): SchedulerTask {
         val zone = ZoneId.of(task.timeZone)
         val today = java.time.Instant.ofEpochMilli(nowEpochMs()).atZone(zone).toLocalDate()
-        val nextWindowDate = task.cursorDate?.let(LocalDate::parse) ?: LocalDate.parse(task.startDate)
-        if (nextWindowDate.isAfter(today)) {
-            val nextWindowAt = nextWindowDate.atStartOfDay(zone).toInstant().toEpochMilli()
+        val cursorDate = task.cursorDate?.let(LocalDate::parse)
+        val initialDate = cursorDate ?: LocalDate.parse(task.startDate)
+        val futureWindowDate = when {
+            cursorDate == null && initialDate.isAfter(today) -> initialDate
+            cursorDate != null && cursorDate.isAfter(today.plusDays(1)) -> cursorDate
+            else -> null
+        }
+        if (futureWindowDate != null) {
+            val nextWindowAt = futureWindowDate.atStartOfDay(zone).toInstant().toEpochMilli()
             return if ((task.nextRunAtEpochMs ?: Long.MIN_VALUE) >= nextWindowAt) {
                 task
             } else {
@@ -339,14 +414,37 @@ class SchedulerService(
         runTaskLocked(task)
     }
 
-    private suspend fun execute(task: SchedulerTask): SchedulerTask {
+    private suspend fun execute(requestedTask: SchedulerTask): SchedulerTask {
         val startedAt = nowEpochMs()
         val runId = idGenerator()
+        val task = repository.claimRun(
+            taskId = requestedTask.id,
+            expectedCursorDate = requestedTask.cursorDate,
+            runId = runId,
+            claimedAtEpochMs = startedAt,
+        ) ?: return repository.get(requestedTask.id) ?: requestedTask
         val trace = mutableListOf<SchedulerTraceEvent>()
+        val leaseHeartbeat = scope.launch {
+            while (isActive) {
+                delay(RUN_LEASE_REFRESH_MS)
+                val renewed = runCatching {
+                    repository.renewRunClaim(
+                        taskId = task.id,
+                        expectedCursorDate = task.cursorDate,
+                        runId = runId,
+                        claimedAtEpochMs = nowEpochMs(),
+                    )
+                }.getOrDefault(false)
+                if (!renewed) break
+            }
+        }
         return try {
             val zone = ZoneId.of(task.timeZone)
             val windowTo = java.time.Instant.ofEpochMilli(startedAt).atZone(zone).toLocalDate()
-            val windowFrom = task.cursorDate?.let(LocalDate::parse) ?: LocalDate.parse(task.startDate)
+            val cursorDate = task.cursorDate?.let(LocalDate::parse)
+            val requestedWindowFrom = cursorDate ?: LocalDate.parse(task.startDate)
+            val sameDayPoll = cursorDate != null && cursorDate.isAfter(windowTo)
+            val windowFrom = if (sameDayPoll) windowTo else requestedWindowFrom
             require(!windowFrom.isAfter(windowTo)) {
                 "Инкрементальное окно scheduler ещё не наступило."
             }
@@ -366,6 +464,7 @@ class SchedulerService(
                 repository.bindTargetSession(
                     taskId = task.id,
                     expectedCursorDate = task.cursorDate,
+                    runId = runId,
                     sessionId = targetState.session.id,
                 )
                 trace += SchedulerTraceEvent(
@@ -418,12 +517,34 @@ class SchedulerService(
                 taskId = task.id,
                 expectedCursorDate = task.cursorDate,
                 result = result.copy(trace = trace.toList()),
-                nextCursorDate = windowTo.plusDays(1).toString(),
+                nextCursorDate = if (sameDayPoll) {
+                    cursorDate!!.toString()
+                } else {
+                    windowTo.plusDays(1).toString()
+                },
                 startedAtEpochMs = startedAt,
                 finishedAtEpochMs = finishedAt,
                 nextRunAtEpochMs = finishedAt + task.intervalMinutes * 60_000L,
             )
         } catch (error: CancellationException) {
+            withContext(NonCancellable) {
+                try {
+                    repository.recordFailure(
+                        taskId = task.id,
+                        expectedCursorDate = task.cursorDate,
+                        run = SchedulerRunHistory(
+                            taskId = task.id,
+                            runId = runId,
+                            status = SchedulerRunStatus.FAILED,
+                            startedAtEpochMs = startedAt,
+                            finishedAtEpochMs = nowEpochMs(),
+                            error = "Scheduler run cancelled.",
+                        ),
+                    )
+                } catch (_: Throwable) {
+                    // Cancellation must remain the caller-visible outcome.
+                }
+            }
             throw error
         } catch (error: Throwable) {
             val finishedAt = nowEpochMs()
@@ -441,6 +562,8 @@ class SchedulerService(
                 ),
             )
             throw error
+        } finally {
+            leaseHeartbeat.cancel()
         }
     }
 
@@ -451,6 +574,7 @@ class SchedulerService(
         trace: MutableList<SchedulerTraceEvent>,
     ): List<ExternalTransactionCandidate> {
         require(task.accountRefs.size <= MAX_ACCOUNTS)
+        var totalTransactions = 0
         return task.accountRefs.flatMap { accountRef ->
             val allTransactions = mutableListOf<ExternalTransactionCandidate>()
             val seenCursors = mutableSetOf<String>()
@@ -471,7 +595,14 @@ class SchedulerService(
                     stage = "bank-transactions",
                 )
                 val parsed = parseTransactions(response)
+                require(allTransactions.size + parsed.transactions.size <= MAX_TRANSACTIONS_PER_RUN) {
+                    "Источник банка вернул слишком много операций за один запуск."
+                }
                 allTransactions += parsed.transactions
+                totalTransactions += parsed.transactions.size
+                require(totalTransactions <= MAX_TRANSACTIONS_PER_RUN) {
+                    "Источник банка вернул слишком много операций за один запуск."
+                }
                 val next = parsed.nextCursor?.trim()?.takeIf(String::isNotBlank)
                 if (next == null) {
                     completed = true
@@ -515,7 +646,12 @@ class SchedulerService(
                 stage = "receipts-candidates",
             )
             val summaries = parseReceiptSummaries(search)
-            receiptCandidateCount += summaries.size
+            require(receiptCandidateCount + summaries.size <= MAX_TOTAL_RECEIPT_CANDIDATES) {
+                "Источник чеков вернул слишком много кандидатов за один запуск."
+            }
+            require(receiptDetailCount + summaries.size <= MAX_TOTAL_RECEIPT_DETAILS) {
+                "Источник чеков вернул слишком много деталей за один запуск."
+            }
             val details = summaries.mapIndexed { index, summary ->
                 val detail = sourceCall(
                     serverId = RECEIPTS_SERVER_ID,
@@ -527,6 +663,7 @@ class SchedulerService(
                 parseReceiptDetail(detail, summary, "receipt_${index + 1}")
                     ?: throw IllegalStateException("Источник чеков вернул неполные реквизиты.")
             }
+            receiptCandidateCount += summaries.size
             receiptDetailCount += details.size
             val eligible = details.filter { receipt ->
                 receipt.amountMinor == abs(transaction.amountMinor) &&
@@ -588,15 +725,27 @@ class SchedulerService(
             tool = tool,
             status = "started",
         )
-        val response = mcpTools.callConfiguredTool(serverId, tool, arguments)
-        if (response.isError) {
+        return try {
+            val response = withTimeout(SOURCE_CALL_TIMEOUT_MS) {
+                mcpTools.callConfiguredTool(serverId, tool, arguments)
+            }
+            if (response.isError || response.text.length > MAX_SOURCE_RESPONSE_CHARS) {
+                throw IllegalStateException("Источник $serverId/$tool временно недоступен.")
+            }
+            val element = runCatching { json.parseToJsonElement(response.text) }
+                .getOrElse { throw IllegalStateException("$serverId/$tool вернул некорректный JSON.") }
+            trace += SchedulerTraceEvent(stage = stage, serverId = serverId, tool = tool, status = "succeeded")
+            element
+        } catch (_: TimeoutCancellationException) {
             trace += SchedulerTraceEvent(stage = stage, serverId = serverId, tool = tool, status = "failed")
-            throw IllegalStateException("Источник $serverId/$tool временно недоступен.")
+            throw IllegalStateException("Источник $serverId/$tool не ответил вовремя.")
+        } catch (error: CancellationException) {
+            trace += SchedulerTraceEvent(stage = stage, serverId = serverId, tool = tool, status = "failed")
+            throw error
+        } catch (error: Throwable) {
+            trace += SchedulerTraceEvent(stage = stage, serverId = serverId, tool = tool, status = "failed")
+            throw error
         }
-        val element = runCatching { json.parseToJsonElement(response.text) }
-            .getOrElse { throw IllegalStateException("$serverId/$tool вернул некорректный JSON.") }
-        trace += SchedulerTraceEvent(stage = stage, serverId = serverId, tool = tool, status = "succeeded")
-        return element
     }
 
     private fun parseTransactions(element: JsonElement): ParsedTransactions {
@@ -607,57 +756,98 @@ class SchedulerService(
             ?: "Счёт / карта"
         val transactions = root["transactions"] as? JsonArray
             ?: throw IllegalStateException("Банк вернул ответ без списка операций.")
+        require(transactions.size <= BANK_PAGE_SIZE) {
+            "Банк вернул слишком большую страницу операций."
+        }
         val parsed = transactions.mapIndexed { index, item ->
             val objectValue = item as? JsonObject
                 ?: throw IllegalStateException("Банк вернул некорректную операцию #${index + 1}.")
             val occurredAt = objectValue["date"]?.jsonPrimitive?.contentOrNull
                 ?: objectValue["occurred_at"]?.jsonPrimitive?.contentOrNull
                 ?: throw IllegalStateException("Банк вернул операцию без даты.")
+            require(occurredAt.length <= 80) { "Банк вернул слишком длинную дату операции." }
+            parseDate(occurredAt)
             val amount = objectValue["amount_minor"]?.jsonPrimitive?.longOrNull
-                ?: throw IllegalStateException("Банк вернул операцию без суммы.")
+                ?.takeIf { it != Long.MIN_VALUE }
+                ?: throw IllegalStateException("Банк вернул операцию без корректной суммы.")
             val merchant = objectValue["merchant"]?.jsonPrimitive?.contentOrNull?.trim()
                 ?.takeIf(String::isNotBlank)
                 ?: objectValue["description"]?.jsonPrimitive?.contentOrNull?.trim()
                     ?.takeIf(String::isNotBlank)
-                ?: "Операция"
+                ?: throw IllegalStateException("Банк вернул операцию без продавца.")
+            require(merchant.length <= 200) { "Банк вернул слишком длинное имя продавца." }
             val ref = objectValue["transaction_ref"]?.jsonPrimitive?.contentOrNull
+                ?.trim()
                 ?.takeIf(String::isNotBlank)
                 ?: throw IllegalStateException("Банк вернул операцию без opaque transaction_ref.")
+            require(ref.length <= 200) { "Банк вернул слишком длинный transaction_ref." }
+            val currency = objectValue["currency"]?.jsonPrimitive?.contentOrNull
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
+                ?.let(::normalizeCurrencyCode)
+                ?: throw IllegalStateException("Банк вернул операцию без валюты.")
+            require(CURRENCY_PATTERN.matches(currency)) { "Банк вернул некорректную валюту." }
+            val postedAt = objectValue["posted_at"]?.jsonPrimitive?.contentOrNull
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
+                ?.also {
+                    require(it.length <= 80) { "Банк вернул слишком длинную дату проводки." }
+                    parseDate(it)
+                }
             ExternalTransactionCandidate(
                 occurredAt = occurredAt,
-                postedAt = objectValue["posted_at"]?.jsonPrimitive?.contentOrNull,
+                postedAt = postedAt,
                 amountMinor = amount,
-                currency = normalizeCurrencyCode(objectValue["currency"]?.jsonPrimitive?.contentOrNull.orEmpty()),
+                currency = currency,
                 merchant = merchant,
-                description = objectValue["description"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                sourceLabel = accountName,
+                description = objectValue["description"]?.jsonPrimitive?.contentOrNull.orEmpty().take(1_000),
+                sourceLabel = accountName.take(200),
                 sourceRef = ref,
             )
         }
         return ParsedTransactions(
             transactions = parsed,
             nextCursor = root["next_cursor"]?.jsonPrimitive?.contentOrNull
-                ?: root["nextCursor"]?.jsonPrimitive?.contentOrNull,
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
+                ?: root["nextCursor"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotBlank),
         )
     }
 
     private fun parseReceiptSummaries(element: JsonElement): List<ReceiptSummaryView> {
         val array = (element as? JsonObject)?.get("receipts") as? JsonArray
             ?: throw IllegalStateException("Источник чеков вернул ответ без списка чеков.")
+        require(array.size <= MAX_RECEIPT_CANDIDATES) {
+            "Источник чеков вернул слишком много кандидатов."
+        }
         return array.mapIndexed { index, value ->
             val objectValue = value as? JsonObject
                 ?: throw IllegalStateException("Источник чеков вернул некорректный чек #${index + 1}.")
             val key = objectValue["receipt_key"]?.jsonPrimitive?.contentOrNull
+                ?.trim()
                 ?.takeIf(String::isNotBlank)
                 ?: throw IllegalStateException("Источник чеков вернул чек без ключа.")
+            require(key.length <= 200) { "Источник чеков вернул слишком длинный ключ чека." }
             val amount = objectValue["amount_minor"]?.jsonPrimitive?.longOrNull
-                ?: throw IllegalStateException("Источник чеков вернул чек без суммы.")
+                ?.takeIf { it >= 0L }
+                ?: throw IllegalStateException("Источник чеков вернул некорректную сумму чека.")
+            val currency = objectValue["currency"]?.jsonPrimitive?.contentOrNull
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
+                ?.let(::normalizeCurrencyCode)
+                ?: throw IllegalStateException("Источник чеков вернул чек без валюты.")
+            require(CURRENCY_PATTERN.matches(currency)) { "Источник чеков вернул некорректную валюту чека." }
+            val receivedAt = objectValue["received_at"]?.jsonPrimitive?.contentOrNull
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
+                ?: throw IllegalStateException("Источник чеков вернул чек без даты.")
+            require(receivedAt.length <= 80) { "Источник чеков вернул слишком длинную дату чека." }
             ReceiptSummaryView(
                 key = key,
-                merchant = objectValue["merchant"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                date = parseDate(objectValue["received_at"]?.jsonPrimitive?.contentOrNull.orEmpty()),
+                merchant = objectValue["merchant"]?.jsonPrimitive?.contentOrNull.orEmpty().take(200),
+                date = parseDate(receivedAt),
                 amountMinor = amount,
-                currency = normalizeCurrencyCode(objectValue["currency"]?.jsonPrimitive?.contentOrNull ?: "RUB"),
+                currency = currency,
             )
         }
     }
@@ -669,16 +859,26 @@ class SchedulerService(
     ): ReceiptDetailView? {
         val root = element as? JsonObject ?: return null
         val detailCurrency = normalizeCurrencyCode(
-            root["currency"]?.jsonPrimitive?.contentOrNull ?: summary.currency,
+            root["currency"]?.jsonPrimitive?.contentOrNull
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
+                ?: summary.currency,
         )
+        require(CURRENCY_PATTERN.matches(detailCurrency)) {
+            "Источник чеков вернул некорректную валюту позиции."
+        }
         val rawItems = root["items"] as? JsonArray
             ?: throw IllegalStateException("Источник чеков вернул чек без списка позиций.")
+        require(rawItems.size <= MAX_RECEIPT_ITEMS) {
+            "Источник чеков вернул слишком много позиций."
+        }
         val items = rawItems.mapIndexed { index, item ->
             val value = item as? JsonObject
                 ?: throw IllegalStateException("Источник чеков вернул некорректную позицию #${index + 1}.")
             val name = value["name"]?.jsonPrimitive?.contentOrNull?.trim()
                 ?.takeIf(String::isNotBlank)
                 ?: throw IllegalStateException("Источник чеков вернул позицию без названия.")
+            require(name.length <= 200) { "Источник чеков вернул слишком длинное название позиции." }
             val quantity = value["quantity"]?.jsonPrimitive?.doubleOrNull
                 ?.takeIf { it.isFinite() && it > 0.0 && it <= 100_000.0 }
                 ?: throw IllegalStateException("Источник чеков вернул некорректное количество позиции.")
@@ -689,21 +889,31 @@ class SchedulerService(
                 ?.takeIf { it >= 0L }
                 ?: throw IllegalStateException("Источник чеков вернул некорректную сумму позиции.")
             TransactionItem(
-                name = name.take(200),
+                name = name,
                 quantity = quantity,
                 priceMinor = priceMinor,
                 sumMinor = sumMinor,
                 currency = detailCurrency,
             )
         }
+        val totalMinor = root["total_minor"]?.jsonPrimitive?.longOrNull
+            ?.takeIf { it >= 0L }
+            ?: throw IllegalStateException("Источник чеков вернул некорректную итоговую сумму.")
+        val detailDate = root["date_time"]?.jsonPrimitive?.contentOrNull
+            ?.trim()
+            ?.takeIf(String::isNotBlank)
+            ?: throw IllegalStateException("Источник чеков вернул чек без даты.")
+        require(detailDate.length <= 80) { "Источник чеков вернул слишком длинную дату чека." }
+        val parsedDetailDate = parseDate(detailDate)
         return ReceiptDetailView(
             alias = alias,
-            date = parseDate(root["date_time"]?.jsonPrimitive?.contentOrNull ?: summary.date.toString()),
-            amountMinor = root["total_minor"]?.jsonPrimitive?.longOrNull ?: summary.amountMinor,
+            date = parsedDetailDate,
+            amountMinor = totalMinor,
             currency = detailCurrency,
             merchant = summary.merchant,
             items = items,
         )
+
     }
 
     private suspend fun updateStatus(taskId: String, status: SchedulerTaskStatus): SchedulerTask {
@@ -718,10 +928,13 @@ class SchedulerService(
         this[name]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotBlank)
             ?: throw IllegalArgumentException("Аргумент $name обязателен.")
 
-    private fun parseDate(value: String): LocalDate = try {
-        LocalDate.parse(value.trim().take(10))
-    } catch (_: DateTimeParseException) {
-        throw IllegalStateException("Источник вернул некорректную дату.")
+    private fun parseDate(value: String): LocalDate {
+        val normalized = value.trim()
+        require(normalized.length in 1..80) { "Источник вернул слишком длинную дату." }
+        return runCatching { LocalDate.parse(normalized) }
+            .recoverCatching { java.time.OffsetDateTime.parse(normalized).toLocalDate() }
+            .recoverCatching { java.time.LocalDateTime.parse(normalized).toLocalDate() }
+            .getOrElse { throw IllegalStateException("Источник вернул некорректную дату.") }
     }
 
 

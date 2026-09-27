@@ -79,9 +79,22 @@ interface SchedulerRepository {
     suspend fun list(): List<SchedulerTask>
     suspend fun get(id: String): SchedulerTask?
     suspend fun update(task: SchedulerTask): SchedulerTask
+    suspend fun claimRun(
+        taskId: String,
+        expectedCursorDate: String?,
+        runId: String,
+        claimedAtEpochMs: Long,
+    ): SchedulerTask?
+    suspend fun renewRunClaim(
+        taskId: String,
+        expectedCursorDate: String?,
+        runId: String,
+        claimedAtEpochMs: Long,
+    ): Boolean
     suspend fun bindTargetSession(
         taskId: String,
         expectedCursorDate: String?,
+        runId: String,
         sessionId: String,
     ): SchedulerTask
     suspend fun recordSuccess(

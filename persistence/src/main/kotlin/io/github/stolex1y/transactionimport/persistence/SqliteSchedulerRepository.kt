@@ -63,9 +63,65 @@ class SqliteSchedulerRepository(
         require(updateTaskRow(this, task) == 1) { "Scheduler task не найден: ${task.id}" }
         task
     }
+    override suspend fun claimRun(
+        taskId: String,
+        expectedCursorDate: String?,
+        runId: String,
+        claimedAtEpochMs: Long,
+    ): SchedulerTask? = transaction {
+        require(runId.isNotBlank()) { "Scheduler run id не должен быть пустым." }
+        val updated = prepareStatement(
+            """
+            UPDATE scheduler_tasks
+            SET run_claim_id = ?, run_claimed_at_epoch_ms = ?
+            WHERE id = ?
+              AND ((cursor_date IS NULL AND ? IS NULL) OR cursor_date = ?)
+              AND (
+                  run_claim_id IS NULL
+                  OR run_claimed_at_epoch_ms IS NULL
+                  OR run_claimed_at_epoch_ms < ?
+              )
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, runId)
+            statement.setLong(2, claimedAtEpochMs)
+            statement.setString(3, taskId)
+            setNullableString(statement, 4, expectedCursorDate)
+            setNullableString(statement, 5, expectedCursorDate)
+            statement.setLong(6, claimedAtEpochMs - RUN_LEASE_TIMEOUT_MS)
+            statement.executeUpdate()
+        }
+        if (updated != 1) null else readTask(this, taskId)
+    }
+    override suspend fun renewRunClaim(
+        taskId: String,
+        expectedCursorDate: String?,
+        runId: String,
+        claimedAtEpochMs: Long,
+    ): Boolean = transaction {
+        require(runId.isNotBlank()) { "Scheduler run id не должен быть пустым." }
+        prepareStatement(
+            """
+            UPDATE scheduler_tasks
+            SET run_claimed_at_epoch_ms = ?
+            WHERE id = ?
+              AND ((cursor_date IS NULL AND ? IS NULL) OR cursor_date = ?)
+              AND run_claim_id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setLong(1, claimedAtEpochMs)
+            statement.setString(2, taskId)
+            setNullableString(statement, 3, expectedCursorDate)
+            setNullableString(statement, 4, expectedCursorDate)
+            statement.setString(5, runId)
+            statement.executeUpdate() == 1
+        }
+    }
+
     override suspend fun bindTargetSession(
         taskId: String,
         expectedCursorDate: String?,
+        runId: String,
         sessionId: String,
     ): SchedulerTask = transaction {
         require(sessionId.isNotBlank()) { "Target session id не должен быть пустым." }
@@ -78,8 +134,7 @@ class SqliteSchedulerRepository(
         }
         val updated = current.copy(targetSessionId = sessionId)
         validateTask(updated)
-        require(updateTaskRow(this, updated) == 1) {
-            "Не удалось привязать target session: $taskId"
+        require(updateTaskRow(this, updated, runClaimId = runId) == 1) {
         }
         updated
     }
@@ -105,7 +160,8 @@ class SqliteSchedulerRepository(
             lastError = null,
             lastResult = result,
         )
-        updateTaskRow(this, updated)
+        require(updateTaskRow(this, updated, runClaimId = result.runId, clearRunClaim = true) == 1) {
+        }
         insertRun(
             this,
             SchedulerRunHistory(
@@ -136,7 +192,8 @@ class SqliteSchedulerRepository(
             ),
             lastError = run.error?.take(500),
         )
-        updateTaskRow(this, updated)
+        require(updateTaskRow(this, updated, runClaimId = run.runId, clearRunClaim = true) == 1) {
+        }
         insertRun(this, run.copy(error = run.error?.take(500)))
         updated
     }
@@ -183,10 +240,15 @@ class SqliteSchedulerRepository(
                     last_run_at_epoch_ms INTEGER,
                     next_run_at_epoch_ms INTEGER,
                     last_error TEXT,
-                    last_result_json TEXT
+                    last_result_json TEXT,
+                    run_claim_id TEXT,
+                    run_claimed_at_epoch_ms INTEGER
                 )
                 """.trimIndent(),
             )
+            ensureTaskColumn(connection, "next_run_at_epoch_ms", "INTEGER")
+            ensureTaskColumn(connection, "run_claim_id", "TEXT")
+            ensureTaskColumn(connection, "run_claimed_at_epoch_ms", "INTEGER")
             statement.execute(
                 """
                 CREATE TABLE IF NOT EXISTS scheduler_runs (
@@ -204,6 +266,23 @@ class SqliteSchedulerRepository(
                 "CREATE INDEX IF NOT EXISTS scheduler_runs_task_idx " +
                     "ON scheduler_runs(task_id, started_at_epoch_ms DESC)",
             )
+        }
+    }
+
+    private fun ensureTaskColumn(connection: Connection, name: String, definition: String) {
+        val present = connection.createStatement().use { statement ->
+            statement.executeQuery("PRAGMA table_info(scheduler_tasks)").use { rows ->
+                var found = false
+                while (rows.next()) {
+                    if (rows.getString("name") == name) found = true
+                }
+                found
+            }
+        }
+        if (!present) {
+            connection.createStatement().use { statement ->
+                statement.execute("ALTER TABLE scheduler_tasks ADD COLUMN $name $definition")
+            }
         }
     }
 
@@ -243,15 +322,22 @@ class SqliteSchedulerRepository(
         statement.setString(13, task.lastResult?.let(databaseJson::encodeToString))
     }
 
-    private fun updateTaskRow(connection: Connection, task: SchedulerTask): Int =
-        connection.prepareStatement(
+    private fun updateTaskRow(
+        connection: Connection,
+        task: SchedulerTask,
+        runClaimId: String? = null,
+        clearRunClaim: Boolean = false,
+    ): Int {
+        val claimClause = if (runClaimId == null) "" else " AND run_claim_id = ?"
+        val clearClaim = if (clearRunClaim) ", run_claim_id = NULL, run_claimed_at_epoch_ms = NULL" else ""
+        return connection.prepareStatement(
             """
             UPDATE scheduler_tasks
             SET name = ?, account_refs_json = ?, start_date = ?, interval_minutes = ?,
                 time_zone = ?, status = ?, target_session_id = ?, cursor_date = ?,
                 last_run_at_epoch_ms = ?, next_run_at_epoch_ms = ?, last_error = ?,
-                last_result_json = ?
-            WHERE id = ?
+                last_result_json = ?$clearClaim
+            WHERE id = ?$claimClause
             """.trimIndent(),
         ).use { statement ->
             statement.setString(1, task.name.trim())
@@ -267,8 +353,10 @@ class SqliteSchedulerRepository(
             statement.setString(11, task.lastError)
             statement.setString(12, task.lastResult?.let(databaseJson::encodeToString))
             statement.setString(13, task.id)
+            runClaimId?.let { statement.setString(14, it) }
             statement.executeUpdate()
         }
+    }
 
     private fun insertRun(connection: Connection, run: SchedulerRunHistory) {
         connection.prepareStatement(
@@ -349,12 +437,16 @@ class SqliteSchedulerRepository(
         }
 
     private companion object {
+        const val RUN_LEASE_TIMEOUT_MS = 30 * 60 * 1_000L
         val databaseJson = Json {
             ignoreUnknownKeys = true
             encodeDefaults = true
             explicitNulls = false
         }
     }
+}
+private fun setNullableString(statement: java.sql.PreparedStatement, index: Int, value: String?) {
+    if (value == null) statement.setNull(index, Types.VARCHAR) else statement.setString(index, value)
 }
 
 private fun setNullableLong(statement: java.sql.PreparedStatement, index: Int, value: Long?) {
