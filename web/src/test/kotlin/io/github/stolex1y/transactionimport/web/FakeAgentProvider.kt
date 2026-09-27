@@ -66,7 +66,6 @@ class FakeAgentGateway(
                   "merchant": "ДЕМО МАРКЕТ",
                   "description": "Покупка яблок",
                   "category_id": "food.groceries",
-                  "card_last4": "1234",
                   "needs_review": false,
                   "issues": []
                 },
@@ -80,7 +79,6 @@ class FakeAgentGateway(
                   "currency": "RUB",
                   "merchant": "НЕИЗВЕСТНЫЙ ПЛАТЁЖ",
                   "category_id": null,
-                  "card_last4": null,
                   "needs_review": true,
                   "issues": ["Нужно выбрать категорию"]
                 }
@@ -119,7 +117,6 @@ class FakeAgentGateway(
                   "currency": "RUB",
                   "merchant": "ДЕМО МАРКЕТ-ABC123",
                   "category_id": "food.groceries",
-                  "card_last4": "1234",
                   "needs_review": false,
                   "issues": []
                 },
@@ -133,7 +130,6 @@ class FakeAgentGateway(
                   "currency": "RUB",
                   "merchant": "НОВЫЙ КАФЕ",
                   "category_id": "food.cafes",
-                  "card_last4": null,
                   "needs_review": false,
                   "issues": []
                 }
@@ -156,7 +152,7 @@ class FakeAgentGateway(
 
 fun fakeAgentDependencies(
     databasePath: String,
-    gateway: FakeAgentGateway = FakeAgentGateway(),
+    gateway: ChatCompletionGateway = FakeAgentGateway(),
     contextManagement: ContextManagementConfig = ContextManagementConfig(
         strategy = ContextStrategy.SUMMARY,
         recentMessages = 4,

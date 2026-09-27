@@ -16,6 +16,7 @@ import io.github.stolex1y.transactionimport.core.ModelCallMetric
 import io.github.stolex1y.transactionimport.core.MemoryLayer
 import io.github.stolex1y.transactionimport.core.MemoryCandidateStatus
 import io.github.stolex1y.transactionimport.core.ModelCallStatus
+import io.github.stolex1y.transactionimport.core.MerchantSuffixPolicy
 import io.github.stolex1y.transactionimport.core.ModelCallType
 import io.github.stolex1y.transactionimport.core.ResponseMessage
 import io.github.stolex1y.transactionimport.core.SmartExpenseAgent
@@ -66,6 +67,36 @@ class SqliteImportSessionRepositoryTest {
             deleteDatabase(database)
         }
     }
+
+    @Test
+    fun restoresMerchantCanonicalRulesAfterRestart() = runBlocking {
+        val database = Files.createTempFile("transaction-import-merchant-rules-", ".sqlite")
+        try {
+            var id = 0
+            val firstAgent = SmartExpenseAgent(
+                repository = SqliteImportSessionRepository(database.absolutePathString()),
+                gatewayResolver = AgentGatewayResolver { error("LLM не нужен для этой проверки") },
+                idGenerator = { "rule-${++id}" },
+                nowEpochMs = { 1_000L + id },
+            )
+            val saved = firstAgent.createMerchantCanonicalRule(
+                canonicalName = "У дома",
+                aliases = listOf("U doma"),
+                suffixPolicy = MerchantSuffixPolicy.NUMERIC_TERMINAL,
+            )
+
+            val restartedAgent = SmartExpenseAgent(
+                repository = SqliteImportSessionRepository(database.absolutePathString()),
+                gatewayResolver = AgentGatewayResolver { error("LLM не нужен для этой проверки") },
+                idGenerator = { "unused" },
+                nowEpochMs = { 2_000L },
+            )
+
+            assertEquals(saved, restartedAgent.getPreferences())
+        } finally {
+            deleteDatabase(database)
+        }
+    }
     @Test
     fun restoresConversationDraftConfigurationPreferencesAndCandidatesAfterRestart() = runBlocking {
         val database = Files.createTempFile("transaction-import-restart-", ".sqlite")
@@ -93,7 +124,7 @@ class SqliteImportSessionRepositoryTest {
                 transactionId = "1",
                 included = true,
                 description = "Рабочий обед",
-                replacement = transaction.copy(cardLast4 = null),
+                replacement = transaction,
             )
             val saved = firstAgent.updateSessionConfig(
                 sessionId = created.session.id,
@@ -120,7 +151,6 @@ class SqliteImportSessionRepositoryTest {
             assertEquals(ReceiptStatus.READY_FOR_EXPORT, restored.receiptState.status)
             assertEquals(7, restored.metrics.single().totalTokens)
             assertEquals("Рабочий обед", restored.draft!!.transactions.single().description)
-            assertNull(restored.draft!!.transactions.single().transaction.cardLast4)
             assertEquals(
                 MemoryCandidateStatus.ACCEPTED,
                 restored.memoryCandidates.single().status,
@@ -551,7 +581,7 @@ class SqliteImportSessionRepositoryTest {
                     """
                     INSERT INTO draft_transactions VALUES (
                         'legacy-session', 0, 'tx-1', 1,
-                        '{"source_index":1,"direction":"expense","occurred_at":"2026-01-15T12:10:00","posted_at":null,"amount_minor":125050,"currency":"RUB","merchant":"DEMO MARKET","category_id":"food.groceries","card_last4":null,"needs_review":false,"issues":[]}'
+                        '{"source_index":1,"direction":"expense","occurred_at":"2026-01-15T12:10:00","posted_at":null,"amount_minor":125050,"currency":"RUB","merchant":"DEMO MARKET","category_id":"food.groceries","needs_review":false,"issues":[]}'
                     )
                     """.trimIndent(),
                 )
@@ -675,7 +705,6 @@ class SqliteImportSessionRepositoryTest {
                   "currency": "RUB",
                   "merchant": "DEMO MARKET",
                   "category_id": "food.groceries",
-                  "card_last4": "1234",
                   "needs_review": false,
                   "issues": []
                 }
@@ -720,7 +749,6 @@ class SqliteImportSessionRepositoryTest {
                   "currency": "RUB",
                   "merchant": "DEMO MARKET",
                   "category_id": "food.groceries",
-                  "card_last4": "1234",
                   "needs_review": false,
                   "issues": []
                 },
@@ -734,7 +762,6 @@ class SqliteImportSessionRepositoryTest {
                   "currency": "RUB",
                   "merchant": "DEMO CAFE",
                   "category_id": "food.cafes",
-                  "card_last4": null,
                   "needs_review": false,
                   "issues": []
                 }

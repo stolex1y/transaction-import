@@ -23,6 +23,48 @@ data class ConfirmedDecision(
 )
 
 @Serializable
+enum class MerchantSuffixPolicy {
+    @SerialName("none")
+    NONE,
+
+    @SerialName("numeric_terminal")
+    NUMERIC_TERMINAL,
+}
+
+@Serializable
+data class MerchantCanonicalRule(
+    val id: String,
+    @SerialName("canonical_name") val canonicalName: String,
+    val aliases: List<String>,
+    @SerialName("suffix_policy") val suffixPolicy: MerchantSuffixPolicy = MerchantSuffixPolicy.NONE,
+    @SerialName("created_at_epoch_ms") val createdAtEpochMs: Long,
+)
+
+@Serializable
+data class MerchantCanonicalRuleProposal(
+    @SerialName("canonical_name") val canonicalName: String,
+    val aliases: List<String>,
+    @SerialName("suffix_policy") val suffixPolicy: MerchantSuffixPolicy =
+        MerchantSuffixPolicy.NONE,
+    val reason: String = "",
+)
+
+@Serializable
+data class MerchantCanonicalCandidate(
+    val id: String,
+    @SerialName("canonical_name") val canonicalName: String,
+    val aliases: List<String>,
+    @SerialName("suffix_policy") val suffixPolicy: MerchantSuffixPolicy,
+    val reason: String,
+    @SerialName("source_message_id") val sourceMessageId: String,
+    @SerialName("created_at_epoch_ms") val createdAtEpochMs: Long,
+    val status: MemoryCandidateStatus = MemoryCandidateStatus.PENDING,
+    @SerialName("accepted_rule_id") val acceptedRuleId: String? = null,
+    @SerialName("accepted_at_epoch_ms") val acceptedAtEpochMs: Long? = null,
+)
+
+
+@Serializable
 data class ShortTermMemorySnapshot(
     val messages: List<ConversationMessage>,
     val summary: ConversationSummary? = null,
@@ -115,7 +157,7 @@ data class MemoryTransactionProjection(
     val currency: String,
     val merchant: String,
     @SerialName("category_display_name") val categoryDisplayName: String? = null,
-    @SerialName("card_last4") val cardLast4: String? = null,
+    @SerialName("source_label") val sourceLabel: String? = null,
     @SerialName("needs_review") val needsReview: Boolean,
     val issues: List<String> = emptyList(),
 )
@@ -124,7 +166,10 @@ data class MemoryTransactionProjection(
 data class MemoryLongTermProjection(
     @SerialName("user_prompt") val userPrompt: String,
     @SerialName("confirmed_decisions") val confirmedDecisions: List<ConfirmedDecision>,
+    @SerialName("merchant_canonical_rules")
+    val merchantCanonicalRules: List<MerchantCanonicalRule> = emptyList(),
 )
+
 
 @Serializable
 enum class MemoryCandidateStatus {

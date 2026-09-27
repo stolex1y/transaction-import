@@ -5,7 +5,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
-const val STRUCTURED_SCHEMA_SIGNATURE = "transaction-import.v1"
+const val STRUCTURED_SCHEMA_SIGNATURE = "transaction-import.v2"
 
 @Serializable
 enum class CategoryType {
@@ -219,6 +219,15 @@ data class StructuredImport(
 )
 
 @Serializable
+data class TransactionItem(
+    val name: String,
+    val quantity: Double,
+    @SerialName("price_minor") val priceMinor: Long,
+    @SerialName("sum_minor") val sumMinor: Long,
+    val currency: String = "RUB",
+)
+
+@Serializable
 data class StructuredTransaction(
     @SerialName("source_index") val sourceIndex: Int,
     val direction: TransactionDirection,
@@ -228,11 +237,12 @@ data class StructuredTransaction(
     val currency: String,
     val merchant: String,
     @SerialName("category_id") val categoryId: String?,
-    @SerialName("card_last4") val cardLast4: String?,
     @SerialName("needs_review") val needsReview: Boolean,
     val issues: List<String>,
+    @SerialName("source_label") val sourceLabel: String? = null,
+    val items: List<TransactionItem> = emptyList(),
+    @SerialName("source_ref") val sourceRef: String? = null,
 )
-
 @Serializable
 data class StructuredValidation(
     val valid: Boolean,
@@ -263,7 +273,15 @@ private val postedAtPattern = Regex(
     """^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?)?$""",
 )
 private val currencyPattern = Regex("^[A-Z]{3}$")
-private val cardLast4Pattern = Regex("""^\d{4}$""")
+
+fun normalizeCurrencyCode(value: String): String = when (value.trim().uppercase()) {
+    "643" -> "RUB"
+    "840" -> "USD"
+    "978" -> "EUR"
+    "826" -> "GBP"
+    "156" -> "CNY"
+    else -> value.trim().uppercase()
+}
 private val defaultCategoryCatalog = CategoryCatalog(TRANSACTION_CATEGORIES)
 
 internal fun validateStructuredResponse(
@@ -449,9 +467,6 @@ internal fun transactionFieldErrors(
             )
         }
     }
-    if (transaction.cardLast4 != null && !cardLast4Pattern.matches(transaction.cardLast4)) {
-        add("card_last4", "Номер карты должен содержать последние четыре цифры.")
-    }
     if (transaction.needsReview) {
         transaction.issues.filter(String::isNotBlank).forEach { issue ->
             val field = issue.substringBefore(':').trim().takeIf {
@@ -475,7 +490,6 @@ private val DRAFT_ERROR_FIELDS = setOf(
     "currency",
     "merchant",
     "category_id",
-    "card_last4",
 )
 
 private fun validateRoot(
@@ -550,9 +564,6 @@ private fun validateTransactions(
                     errors += "$path.category_id не соответствует direction."
                 }
             }
-        }
-        if (transaction.cardLast4 != null && !cardLast4Pattern.matches(transaction.cardLast4)) {
-            errors += "$path.card_last4 должен содержать четыре цифры или null."
         }
         if (transaction.issues.any { it.isBlank() }) {
             errors += "$path.issues не должен содержать пустые строки."

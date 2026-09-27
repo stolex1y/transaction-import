@@ -18,6 +18,9 @@ import io.github.stolex1y.transactionimport.core.ModelCallType
 import io.github.stolex1y.transactionimport.core.ConfirmedDecision
 import io.github.stolex1y.transactionimport.core.MemoryCandidate
 import io.github.stolex1y.transactionimport.core.MemoryCandidateStatus
+import io.github.stolex1y.transactionimport.core.MerchantCanonicalCandidate
+import io.github.stolex1y.transactionimport.core.MerchantCanonicalRule
+import io.github.stolex1y.transactionimport.core.MerchantSuffixPolicy
 import io.github.stolex1y.transactionimport.core.MemoryTrace
 import io.github.stolex1y.transactionimport.core.RevisionConflictException
 import io.github.stolex1y.transactionimport.core.SessionNotFoundException
@@ -208,6 +211,7 @@ class SqliteImportSessionRepository(
         additionalMetrics: List<ModelCallMetric>,
         memoryTrace: MemoryTrace?,
         memoryCandidates: List<MemoryCandidate>,
+        merchantCanonicalCandidates: List<MerchantCanonicalCandidate>,
         receiptState: ReceiptState?,
     ): ImportSessionState = transaction {
         checkRevision(this, sessionId, expectedRevision)
@@ -218,6 +222,7 @@ class SqliteImportSessionRepository(
         insertMessage(this, sessionId, nextSequence, userMessage)
         insertMessage(this, sessionId, nextSequence + 1, assistantMessage)
         insertMemoryCandidates(this, sessionId, memoryCandidates)
+        insertMerchantCanonicalCandidates(this, sessionId, merchantCanonicalCandidates)
         additionalMetrics.forEach { insertMetric(this, sessionId, it) }
         insertMetric(this, sessionId, metric)
         if (facts != null) replaceFacts(this, sessionId, facts)
@@ -230,6 +235,25 @@ class SqliteImportSessionRepository(
             memoryTrace = memoryTrace,
             receiptState = receiptState,
         )
+        requireState(this, sessionId)
+    }
+
+    override suspend fun saveMessageExchange(
+        sessionId: String,
+        expectedRevision: Long,
+        userMessage: ConversationMessage,
+        assistantMessage: ConversationMessage,
+        metric: ModelCallMetric?,
+        updatedAtEpochMs: Long,
+        merchantCanonicalCandidates: List<MerchantCanonicalCandidate>,
+    ): ImportSessionState = transaction {
+        checkRevision(this, sessionId, expectedRevision)
+        val nextSequence = nextMessageSequence(this, sessionId)
+        insertMessage(this, sessionId, nextSequence, userMessage)
+        insertMessage(this, sessionId, nextSequence + 1, assistantMessage)
+        insertMerchantCanonicalCandidates(this, sessionId, merchantCanonicalCandidates)
+        metric?.let { insertMetric(this, sessionId, it) }
+        bumpSession(this, sessionId, expectedRevision, updatedAtEpochMs)
         requireState(this, sessionId)
     }
     override suspend fun acceptMemoryCandidate(
@@ -251,6 +275,34 @@ class SqliteImportSessionRepository(
             preferences.copy(confirmedDecisions = preferences.confirmedDecisions + decision),
         )
         updateAcceptedCandidate(this, sessionId, candidateId, decision.id, updatedAtEpochMs)
+        bumpSession(this, sessionId, expectedRevision, updatedAtEpochMs)
+        requireState(this, sessionId)
+    }
+    override suspend fun acceptMerchantCanonicalCandidate(
+        sessionId: String,
+        expectedRevision: Long,
+        candidateId: String,
+        rule: MerchantCanonicalRule,
+        updatedAtEpochMs: Long,
+    ): ImportSessionState = transaction {
+        checkRevision(this, sessionId, expectedRevision)
+        val candidate = readMerchantCanonicalCandidate(this, sessionId, candidateId)
+            ?: throw IllegalArgumentException("Предложение canonical rule не найдено: $candidateId")
+        require(candidate.status == MemoryCandidateStatus.PENDING) {
+            "Предложение canonical rule уже было принято."
+        }
+        val preferences = readPreferences(this)
+        writePreferences(
+            this,
+            preferences.copy(merchantCanonicalRules = preferences.merchantCanonicalRules + rule),
+        )
+        updateAcceptedMerchantCanonicalCandidate(
+            connection = this,
+            sessionId = sessionId,
+            candidateId = candidateId,
+            ruleId = rule.id,
+            acceptedAtEpochMs = updatedAtEpochMs,
+        )
         bumpSession(this, sessionId, expectedRevision, updatedAtEpochMs)
         requireState(this, sessionId)
     }
@@ -442,6 +494,24 @@ class SqliteImportSessionRepository(
         }
         prepareStatement(
             """
+            INSERT INTO merchant_canonical_candidates (
+                session_id, candidate_id, canonical_name, aliases_json, suffix_policy,
+                reason, source_message_id, created_at_epoch_ms, status,
+                accepted_rule_id, accepted_at_epoch_ms
+            )
+            SELECT ?, candidate_id, canonical_name, aliases_json, suffix_policy,
+                   reason, source_message_id, created_at_epoch_ms, status,
+                   accepted_rule_id, accepted_at_epoch_ms
+            FROM merchant_canonical_candidates
+            WHERE session_id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, forkSession.id)
+            statement.setString(2, sessionId)
+            statement.executeUpdate()
+        }
+        prepareStatement(
+            """
             INSERT INTO conversation_summaries (
                 session_id, summary_text, summarized_message_count, updated_at_epoch_ms
             )
@@ -583,6 +653,25 @@ class SqliteImportSessionRepository(
             )
             statement.execute(
                 """
+                CREATE TABLE IF NOT EXISTS merchant_canonical_candidates (
+                    session_id TEXT NOT NULL,
+                    candidate_id TEXT NOT NULL,
+                    canonical_name TEXT NOT NULL,
+                    aliases_json TEXT NOT NULL,
+                    suffix_policy TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    source_message_id TEXT NOT NULL,
+                    created_at_epoch_ms INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    accepted_rule_id TEXT,
+                    accepted_at_epoch_ms INTEGER,
+                    PRIMARY KEY (session_id, candidate_id),
+                    FOREIGN KEY (session_id) REFERENCES import_sessions(id) ON DELETE CASCADE
+                )
+                """.trimIndent(),
+            )
+            statement.execute(
+                """
                 CREATE TABLE IF NOT EXISTS conversation_summaries (
                     session_id TEXT PRIMARY KEY,
                     summary_text TEXT NOT NULL,
@@ -652,7 +741,8 @@ class SqliteImportSessionRepository(
                 CREATE TABLE IF NOT EXISTS user_preferences (
                     singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
                     user_prompt TEXT NOT NULL,
-                    confirmed_decisions_json TEXT NOT NULL DEFAULT '[]'
+                    confirmed_decisions_json TEXT NOT NULL DEFAULT '[]',
+                    merchant_canonical_rules_json TEXT NOT NULL DEFAULT '[]'
                 )
                 """.trimIndent(),
             )
@@ -767,6 +857,12 @@ class SqliteImportSessionRepository(
             table = "user_preferences",
             column = "confirmed_decisions_json",
             definition = "confirmed_decisions_json TEXT NOT NULL DEFAULT '[]'",
+        )
+        ensureColumn(
+            connection,
+            table = "user_preferences",
+            column = "merchant_canonical_rules_json",
+            definition = "merchant_canonical_rules_json TEXT NOT NULL DEFAULT '[]'",
         )
         migrateRemovedSettings(connection)
         seedCategories(connection)
@@ -992,6 +1088,40 @@ class SqliteImportSessionRepository(
                 }
             }
         }
+        val merchantCanonicalCandidates = connection.prepareStatement(
+            """
+            SELECT candidate_id, canonical_name, aliases_json, suffix_policy, reason,
+                   source_message_id, created_at_epoch_ms, status,
+                   accepted_rule_id, accepted_at_epoch_ms
+            FROM merchant_canonical_candidates
+            WHERE session_id = ?
+            ORDER BY created_at_epoch_ms ASC, candidate_id ASC
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, id)
+            statement.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        add(
+                            MerchantCanonicalCandidate(
+                                id = rows.getString("candidate_id"),
+                                canonicalName = rows.getString("canonical_name"),
+                                aliases = databaseJson.decodeFromString(
+                                    rows.getString("aliases_json"),
+                                ),
+                                suffixPolicy = MerchantSuffixPolicy.valueOf(rows.getString("suffix_policy")),
+                                reason = rows.getString("reason"),
+                                sourceMessageId = rows.getString("source_message_id"),
+                                createdAtEpochMs = rows.getLong("created_at_epoch_ms"),
+                                status = MemoryCandidateStatus.valueOf(rows.getString("status")),
+                                acceptedRuleId = rows.getString("accepted_rule_id"),
+                                acceptedAtEpochMs = rows.getLongOrNull("accepted_at_epoch_ms"),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
         val summary = connection.prepareStatement(
             """
             SELECT summary_text, summarized_message_count, updated_at_epoch_ms
@@ -1128,6 +1258,7 @@ class SqliteImportSessionRepository(
             summary = summary,
             memoryTrace = header.memoryTraceJson?.let(databaseJson::decodeFromString),
             memoryCandidates = memoryCandidates,
+            merchantCanonicalCandidates = merchantCanonicalCandidates,
             receiptState = receiptState,
         )
     }
@@ -1438,6 +1569,40 @@ class SqliteImportSessionRepository(
             statement.executeBatch()
         }
     }
+    private fun insertMerchantCanonicalCandidates(
+        connection: Connection,
+        sessionId: String,
+        candidates: List<MerchantCanonicalCandidate>,
+    ) {
+        if (candidates.isEmpty()) return
+        connection.prepareStatement(
+            """
+            INSERT INTO merchant_canonical_candidates (
+                session_id, candidate_id, canonical_name, aliases_json, suffix_policy,
+                reason, source_message_id, created_at_epoch_ms, status,
+                accepted_rule_id, accepted_at_epoch_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+        ).use { statement ->
+            candidates.forEach { candidate ->
+                statement.setString(1, sessionId)
+                statement.setString(2, candidate.id)
+                statement.setString(3, candidate.canonicalName)
+                statement.setString(4, databaseJson.encodeToString(candidate.aliases))
+                statement.setString(5, candidate.suffixPolicy.name)
+                statement.setString(6, candidate.reason)
+                statement.setString(7, candidate.sourceMessageId)
+                statement.setLong(8, candidate.createdAtEpochMs)
+                statement.setString(9, candidate.status.name)
+                statement.setString(10, candidate.acceptedRuleId)
+                candidate.acceptedAtEpochMs?.let {
+                    statement.setLong(11, it)
+                } ?: statement.setNull(11, java.sql.Types.INTEGER)
+                statement.addBatch()
+            }
+            statement.executeBatch()
+        }
+    }
 
     private fun readCandidate(
         connection: Connection,
@@ -1493,6 +1658,66 @@ class SqliteImportSessionRepository(
             statement.setString(6, MemoryCandidateStatus.PENDING.name)
             require(statement.executeUpdate() == 1) {
                 "Кандидат решения уже был принят или не найден."
+            }
+        }
+    }
+    private fun readMerchantCanonicalCandidate(
+        connection: Connection,
+        sessionId: String,
+        candidateId: String,
+    ): MerchantCanonicalCandidate? = connection.prepareStatement(
+        """
+        SELECT candidate_id, canonical_name, aliases_json, suffix_policy, reason,
+               source_message_id, created_at_epoch_ms, status,
+               accepted_rule_id, accepted_at_epoch_ms
+        FROM merchant_canonical_candidates
+        WHERE session_id = ? AND candidate_id = ?
+        """.trimIndent(),
+    ).use { statement ->
+        statement.setString(1, sessionId)
+        statement.setString(2, candidateId)
+        statement.executeQuery().use { rows ->
+            if (!rows.next()) {
+                null
+            } else {
+                MerchantCanonicalCandidate(
+                    id = rows.getString("candidate_id"),
+                    canonicalName = rows.getString("canonical_name"),
+                    aliases = databaseJson.decodeFromString(rows.getString("aliases_json")),
+                    suffixPolicy = MerchantSuffixPolicy.valueOf(rows.getString("suffix_policy")),
+                    reason = rows.getString("reason"),
+                    sourceMessageId = rows.getString("source_message_id"),
+                    createdAtEpochMs = rows.getLong("created_at_epoch_ms"),
+                    status = MemoryCandidateStatus.valueOf(rows.getString("status")),
+                    acceptedRuleId = rows.getString("accepted_rule_id"),
+                    acceptedAtEpochMs = rows.getLongOrNull("accepted_at_epoch_ms"),
+                )
+            }
+        }
+    }
+
+    private fun updateAcceptedMerchantCanonicalCandidate(
+        connection: Connection,
+        sessionId: String,
+        candidateId: String,
+        ruleId: String,
+        acceptedAtEpochMs: Long,
+    ) {
+        connection.prepareStatement(
+            """
+            UPDATE merchant_canonical_candidates
+            SET status = ?, accepted_rule_id = ?, accepted_at_epoch_ms = ?
+            WHERE session_id = ? AND candidate_id = ? AND status = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, MemoryCandidateStatus.ACCEPTED.name)
+            statement.setString(2, ruleId)
+            statement.setLong(3, acceptedAtEpochMs)
+            statement.setString(4, sessionId)
+            statement.setString(5, candidateId)
+            statement.setString(6, MemoryCandidateStatus.PENDING.name)
+            require(statement.executeUpdate() == 1) {
+                "Предложение canonical rule уже было принято или не найдено."
             }
         }
     }
@@ -1689,22 +1914,30 @@ class SqliteImportSessionRepository(
     private fun writePreferences(connection: Connection, preferences: UserPreferences) {
         connection.prepareStatement(
             """
-            INSERT INTO user_preferences (singleton_id, user_prompt, confirmed_decisions_json)
-            VALUES (1, ?, ?)
+            INSERT INTO user_preferences (
+                singleton_id,
+                user_prompt,
+                confirmed_decisions_json,
+                merchant_canonical_rules_json
+            )
+            VALUES (1, ?, ?, ?)
             ON CONFLICT(singleton_id) DO UPDATE SET
                 user_prompt = excluded.user_prompt,
-                confirmed_decisions_json = excluded.confirmed_decisions_json
+                confirmed_decisions_json = excluded.confirmed_decisions_json,
+                merchant_canonical_rules_json = excluded.merchant_canonical_rules_json
             """.trimIndent(),
         ).use { statement ->
             statement.setString(1, preferences.userPrompt)
             statement.setString(2, databaseJson.encodeToString(preferences.confirmedDecisions))
+            statement.setString(3, databaseJson.encodeToString(preferences.merchantCanonicalRules))
             statement.executeUpdate()
         }
     }
 
     private fun readPreferences(connection: Connection): UserPreferences =
         connection.prepareStatement(
-            "SELECT user_prompt, confirmed_decisions_json FROM user_preferences WHERE singleton_id = 1",
+            "SELECT user_prompt, confirmed_decisions_json, merchant_canonical_rules_json " +
+                "FROM user_preferences WHERE singleton_id = 1",
         ).use { statement ->
             statement.executeQuery().use { rows ->
                 check(rows.next()) { "Пользовательские настройки не созданы." }
@@ -1712,6 +1945,9 @@ class SqliteImportSessionRepository(
                     userPrompt = rows.getString("user_prompt"),
                     confirmedDecisions = databaseJson.decodeFromString(
                         rows.getString("confirmed_decisions_json") ?: "[]",
+                    ),
+                    merchantCanonicalRules = databaseJson.decodeFromString(
+                        rows.getString("merchant_canonical_rules_json") ?: "[]",
                     ),
                 )
             }

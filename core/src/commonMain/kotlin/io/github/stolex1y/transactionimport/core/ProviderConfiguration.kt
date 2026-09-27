@@ -242,7 +242,33 @@ data class McpServerConfig(
     @SerialName("display_name") val displayName: String,
     val endpoint: String,
     val enabled: Boolean = true,
+    @SerialName("allowed_tools") val allowedTools: List<String> = emptyList(),
 )
+
+@Serializable
+data class McpToolLoopConfig(
+    val enabled: Boolean = false,
+    @SerialName("max_iterations") val maxIterations: Int = 6,
+    @SerialName("max_tool_calls") val maxToolCalls: Int = 8,
+    @SerialName("call_timeout_ms") val callTimeoutMs: Long = 30_000L,
+    @SerialName("result_mode") val resultMode: String = "normalized",
+) {
+    internal fun validate() {
+        require(maxIterations in 1..32) {
+            "mcp_tool_loop.max_iterations должен быть в диапазоне 1..32."
+        }
+        require(maxToolCalls in 1..64) {
+            "mcp_tool_loop.max_tool_calls должен быть в диапазоне 1..64."
+        }
+        require(callTimeoutMs in 1_000L..300_000L) {
+            "mcp_tool_loop.call_timeout_ms должен быть в диапазоне 1000..300000."
+        }
+        require(resultMode == "normalized") {
+            "mcp_tool_loop.result_mode должен быть normalized."
+        }
+    }
+}
+
 
 @Serializable
 data class AgentRuntimeConfig(
@@ -257,6 +283,7 @@ data class AgentRuntimeConfig(
     @SerialName("context_management")
     val contextManagement: ContextManagementConfig? = null,
     @SerialName("mcp_servers") val mcpServers: List<McpServerConfig> = emptyList(),
+    @SerialName("mcp_tool_loop") val mcpToolLoop: McpToolLoopConfig = McpToolLoopConfig(),
 ) {
     fun defaultAgentConfig(): AgentConfig = AgentConfig(
         providerId = defaultProviderId,
@@ -283,6 +310,23 @@ data class AgentRuntimeConfig(
         require(maxTokens > 0) { "max_tokens должен быть положительным." }
         contextCompression.validate()
         contextManagement?.validate()
+        mcpToolLoop.validate()
+        require(mcpServers.map(McpServerConfig::id).distinct().size == mcpServers.size) {
+            "mcp_servers не должен содержать повторяющиеся id."
+        }
+        mcpServers.forEach { server ->
+            require(server.id.isNotBlank()) { "mcp_servers.id не должен быть пустым." }
+            require(server.displayName.isNotBlank()) {
+                "mcp_servers.display_name не должен быть пустым."
+            }
+            require(server.endpoint.isNotBlank()) { "mcp_servers.endpoint не должен быть пустым." }
+            require(server.allowedTools.distinct().size == server.allowedTools.size) {
+                "allowed_tools не должен содержать повторяющиеся имена."
+            }
+            require(server.allowedTools.all(String::isNotBlank)) {
+                "allowed_tools не должен содержать пустые имена."
+            }
+        }
         catalog.resolve(defaultAgentConfig())
         return this
     }

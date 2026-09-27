@@ -64,6 +64,16 @@ interface McpToolProvider {
     ): TbankToolCallResponse
 }
 
+fun interface McpCatalogProvider {
+    suspend fun catalog(): McpCatalogResponse
+}
+
+
+interface McpLogicalServer {
+    suspend fun tools(): List<McpToolCatalog>
+    suspend fun call(tool: String, arguments: JsonObject): TbankToolCallResponse
+}
+
 @Serializable
 data class McpServerCatalog(
     val id: String,
@@ -156,15 +166,12 @@ object UnavailableTbankMcpProvider : TbankMcpProvider {
     override suspend fun callTool(request: TbankToolCallRequest) =
         TbankToolCallResponse(tool = request.tool, isError = true, text = MESSAGE)
 }
-
-fun interface McpCatalogProvider {
-    suspend fun catalog(): McpCatalogResponse
-}
 class McpCatalogService private constructor(
     private val httpClient: HttpClient,
     private val configs: List<McpServerConfig>,
     private val states: MutableMap<String, McpServerCatalog>,
     private val connections: MutableMap<String, ActiveMcpConnection>,
+    private val logicalServers: Map<String, McpLogicalServer>,
 ) : McpCatalogProvider, TbankMcpProvider, McpToolProvider, AutoCloseable {
     private val mutex = Mutex()
 
@@ -175,14 +182,21 @@ class McpCatalogService private constructor(
             if (!config.enabled) {
                 return@map states.getValue(config.id)
             }
-
+            val logical = logicalServers[config.id]
+            if (logical != null) {
+                return@map McpServerCatalog(
+                    id = config.id,
+                    displayName = config.displayName,
+                    status = STATUS_CONNECTED,
+                    tools = logical.tools(),
+                ).also { states[config.id] = it }
+            }
             val connection = connections[config.id]
             if (connection == null) {
                 val result = connect(config, httpClient)
                 result.connection?.let { connections[config.id] = it }
                 return@map updateState(config, result).also { states[config.id] = it }
             }
-
             try {
                 val tools = withTimeout(LIST_TIMEOUT_MS) {
                     connection.client.listTools().tools.map { tool ->
@@ -334,21 +348,26 @@ class McpCatalogService private constructor(
         serverId: String,
         tool: String,
         arguments: JsonObject,
-    ): TbankToolCallResponse = mutex.withLock {
+    ): TbankToolCallResponse {
         val config = configs.singleOrNull { it.id == serverId }
-            ?: return@withLock TbankToolCallResponse(
+            ?: return TbankToolCallResponse(
                 tool = tool,
                 isError = true,
                 text = "MCP server не настроен.",
             )
         if (!config.enabled || tool !in config.allowedTools) {
-            return@withLock TbankToolCallResponse(
+            return TbankToolCallResponse(
                 tool = tool,
                 isError = true,
                 text = "Tool не разрешён конфигурацией MCP.",
             )
         }
-        callToolLocked(config, TbankToolCallRequest(tool, arguments))
+        logicalServers[serverId]?.let { logical ->
+            return logical.call(tool, arguments)
+        }
+        return mutex.withLock {
+            callToolLocked(config, TbankToolCallRequest(tool, arguments))
+        }
     }
 
     override suspend fun callTool(request: TbankToolCallRequest): TbankToolCallResponse = mutex.withLock {
@@ -474,6 +493,7 @@ class McpCatalogService private constructor(
         suspend fun connect(
             configs: List<McpServerConfig>,
             httpClient: HttpClient,
+            logicalServers: Map<String, McpLogicalServer> = emptyMap(),
         ): McpCatalogService = withContext(kotlinx.coroutines.Dispatchers.IO) {
             val states = linkedMapOf<String, McpServerCatalog>()
             val connections = linkedMapOf<String, ActiveMcpConnection>()
@@ -487,7 +507,16 @@ class McpCatalogService private constructor(
                     )
                     return@forEach
                 }
-
+                val logical = logicalServers[config.id]
+                if (logical != null) {
+                    states[config.id] = McpServerCatalog(
+                        id = config.id,
+                        displayName = config.displayName,
+                        status = STATUS_CONNECTED,
+                        tools = logical.tools(),
+                    )
+                    return@forEach
+                }
                 val result = connect(config, httpClient)
                 result.connection?.let { connections[config.id] = it }
                 states[config.id] = updateState(config, result)
@@ -498,6 +527,7 @@ class McpCatalogService private constructor(
                 configs = configs,
                 states = states,
                 connections = connections,
+                logicalServers = logicalServers,
             )
         }
 

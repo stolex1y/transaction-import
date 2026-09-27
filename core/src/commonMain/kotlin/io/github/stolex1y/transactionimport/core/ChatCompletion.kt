@@ -26,6 +26,7 @@ data class ChatCompletionRequest(
     @SerialName("max_tokens") val maxTokens: Int? = null,
     val temperature: Double? = null,
     val stream: Boolean = false,
+    val tools: List<ChatToolDefinition>? = null,
     @Transient val useConfiguredReasoning: Boolean = true,
 )
 
@@ -33,8 +34,36 @@ data class ChatCompletionRequest(
 data class RequestMessage(
     val role: String,
     val content: String,
+    @SerialName("tool_calls") val toolCalls: List<ChatToolCall>? = null,
+    @SerialName("tool_call_id") val toolCallId: String? = null,
+    val name: String? = null,
 )
 
+@Serializable
+data class ChatToolDefinition(
+    val type: String = "function",
+    val function: ChatFunctionDefinition,
+)
+
+@Serializable
+data class ChatFunctionDefinition(
+    val name: String,
+    val description: String? = null,
+    val parameters: JsonObject = JsonObject(emptyMap()),
+)
+
+@Serializable
+data class ChatToolCall(
+    val id: String,
+    val type: String = "function",
+    val function: ChatFunctionCall,
+)
+
+@Serializable
+data class ChatFunctionCall(
+    val name: String,
+    val arguments: String,
+)
 @Serializable
 data class ThinkingOptions(
     val type: String,
@@ -64,6 +93,7 @@ data class ResponseMessage(
     val content: String? = null,
     @SerialName("reasoning_content") val reasoningContent: String? = null,
     val reasoning: String? = null,
+    @SerialName("tool_calls") val toolCalls: List<ChatToolCall>? = null,
 )
 
 @Serializable

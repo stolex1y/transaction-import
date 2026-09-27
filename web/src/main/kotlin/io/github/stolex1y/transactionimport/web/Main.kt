@@ -2,6 +2,7 @@ package io.github.stolex1y.transactionimport.web
 
 import io.github.stolex1y.transactionimport.core.SmartExpenseAgent
 import io.github.stolex1y.transactionimport.persistence.SqliteImportSessionRepository
+import io.github.stolex1y.transactionimport.persistence.SqliteSchedulerRepository
 import io.github.stolex1y.transactionimport.transport.ConfiguredProviderRegistry
 import io.github.stolex1y.transactionimport.transport.loadProviderCatalog
 import io.github.stolex1y.transactionimport.transport.loadAgentRuntimeConfig
@@ -64,37 +65,70 @@ fun main() {
         }
     }
 
-    val mcpCatalog = runBlocking {
-        McpCatalogService.connect(runtimeConfig.mcpServers, httpClient)
-    }
+    val providerRegistry = ConfiguredProviderRegistry(httpClient, catalog)
+    val repository = SqliteImportSessionRepository(
+        databasePath = databasePath.toString(),
+        defaultContextManagement = runtimeConfig.sessionContextManagement(),
+    )
+    val schedulerRepository = SqliteSchedulerRepository(databasePath.toString())
+    val agent = SmartExpenseAgent(
+        repository = repository,
+        gatewayResolver = providerRegistry,
+        idGenerator = { UUID.randomUUID().toString() },
+        nowEpochMs = System::currentTimeMillis,
+        runtimeConfig = runtimeConfig,
+        configValidator = { catalog.resolve(it) },
+    )
+    lateinit var sourceTools: McpToolProvider
+    val scheduler = SchedulerService(
+        repository = schedulerRepository,
+        agent = agent,
+        mcpTools = object : McpToolProvider {
+            override suspend fun allowedTools() = sourceTools.allowedTools()
 
+            override suspend fun callConfiguredTool(
+                serverId: String,
+                tool: String,
+                arguments: kotlinx.serialization.json.JsonObject,
+            ) = sourceTools.callConfiguredTool(serverId, tool, arguments)
+        },
+        gatewayResolver = providerRegistry,
+        runtimeConfig = runtimeConfig,
+    )
+    var mcpCatalog: McpCatalogService? = null
     try {
-        val providerRegistry = ConfiguredProviderRegistry(httpClient, catalog)
-        val repository = SqliteImportSessionRepository(
-            databasePath = databasePath.toString(),
-            defaultContextManagement = runtimeConfig.sessionContextManagement(),
-        )
-        val agent = SmartExpenseAgent(
-            repository = repository,
+        val connectedCatalog = runBlocking {
+            McpCatalogService.connect(
+                configs = runtimeConfig.mcpServers,
+                httpClient = httpClient,
+                logicalServers = mapOf("scheduler" to scheduler),
+            )
+        }
+        mcpCatalog = connectedCatalog
+        sourceTools = connectedCatalog
+        scheduler.start()
+        val nativeMcpAgent = NativeMcpAgent(
+            agent = agent,
             gatewayResolver = providerRegistry,
-            idGenerator = { UUID.randomUUID().toString() },
-            nowEpochMs = System::currentTimeMillis,
+            mcpTools = connectedCatalog,
             runtimeConfig = runtimeConfig,
-            configValidator = { catalog.resolve(it) },
         )
         val agentDependencies = AgentWebDependencies(
             agent = agent,
             catalog = catalog,
             runtimeConfig = runtimeConfig,
             availableProviderIds = providerRegistry.availableProviderIds(),
-            mcpCatalog = mcpCatalog,
-            tbankMcp = mcpCatalog,
+            mcpCatalog = connectedCatalog,
+            tbankMcp = connectedCatalog,
+            nativeMcpAgent = nativeMcpAgent,
+            scheduler = scheduler,
         )
         embeddedServer(Netty, host = "127.0.0.1", port = port) {
             module(agentDependencies = agentDependencies)
         }.start(wait = true)
     } finally {
-        mcpCatalog.close()
+        scheduler.close()
+        mcpCatalog?.close()
         httpClient.close()
     }
 }

@@ -94,8 +94,7 @@ class AgentIntegrationTest {
                               "amount_minor":125125,
                               "merchant":"ДЕМО МАРКЕТ",
                               "description":"Проверено вручную",
-                              "category_id":"food.groceries",
-                              "card_last4":"1234"
+                              "category_id":"food.groceries"
                             }
                         """.trimIndent(),
                     )
@@ -116,8 +115,7 @@ class AgentIntegrationTest {
                               "amount_minor":9900,
                               "merchant":"НЕИЗВЕСТНЫЙ ПЛАТЁЖ",
                               "description":"",
-                              "category_id":null,
-                              "card_last4":null
+                              "category_id":null
                             }
                         """.trimIndent(),
                     )
@@ -205,8 +203,7 @@ class AgentIntegrationTest {
                               "amount_minor":9900,
                               "merchant":"НЕИЗВЕСТНЫЙ ПЛАТЁЖ",
                               "description":"",
-                              "category_id":null,
-                              "card_last4":null
+                              "category_id":null
                             }
                         """.trimIndent(),
                     )
@@ -237,8 +234,7 @@ class AgentIntegrationTest {
                               "amount_minor":125050,
                               "merchant":"ПОСЛЕ ЭКСПОРТА",
                               "description":"",
-                              "category_id":"food.groceries",
-                              "card_last4":"1234"
+                              "category_id":"food.groceries"
                             }
                         """.trimIndent(),
                     )
@@ -279,8 +275,7 @@ class AgentIntegrationTest {
                               "amount_minor":35000,
                               "merchant":"НОВЫЙ КАФЕ",
                               "description":"",
-                              "category_id":"food.cafe",
-                              "card_last4":null
+                              "category_id":"food.cafe"
                             }
                         """.trimIndent(),
                     )
@@ -413,6 +408,58 @@ class AgentIntegrationTest {
         }
     }
 
+
+    @Test
+    fun managesPerUserMerchantCanonicalRules() {
+        val database = Files.createTempFile("agent-merchant-rules-", ".sqlite")
+        try {
+            testApplication {
+                application { module(agentDependencies = fakeAgentDependencies(database.toString())) }
+
+                val created = client.post("/api/agent/preferences/merchant-rules") {
+                    jsonBody(
+                        """
+                            {
+                              "canonical_name":"У дома",
+                              "aliases":["U doma","U doma 23"],
+                              "suffix_policy":"numeric_terminal"
+                            }
+                        """.trimIndent(),
+                    )
+                }
+                assertEquals(HttpStatusCode.Created, created.status)
+                val createdRule = created.jsonObject()["merchant_canonical_rules"]!!.jsonArray.single().jsonObject
+                val ruleId = createdRule["id"]!!.jsonPrimitive.content
+                assertEquals("У дома", createdRule["canonical_name"]!!.jsonPrimitive.content)
+                assertEquals("numeric_terminal", createdRule["suffix_policy"]!!.jsonPrimitive.content)
+
+                val updated = client.put("/api/agent/preferences/merchant-rules/$ruleId") {
+                    jsonBody(
+                        """
+                            {
+                              "canonical_name":"У дома",
+                              "aliases":["U doma"],
+                              "suffix_policy":"none"
+                            }
+                        """.trimIndent(),
+                    )
+                }
+                assertEquals(HttpStatusCode.OK, updated.status)
+                val updatedRule = updated.jsonObject()["merchant_canonical_rules"]!!.jsonArray.single().jsonObject
+                assertEquals("none", updatedRule["suffix_policy"]!!.jsonPrimitive.content)
+                assertEquals(
+                    "U doma",
+                    updatedRule["aliases"]!!.jsonArray.single().jsonPrimitive.content,
+                )
+
+                val deleted = client.delete("/api/agent/preferences/merchant-rules/$ruleId")
+                assertEquals(HttpStatusCode.OK, deleted.status)
+                assertTrue(deleted.jsonObject()["merchant_canonical_rules"]!!.jsonArray.isEmpty())
+            }
+        } finally {
+            database.deleteIfExists()
+        }
+    }
 
     @Test
     fun exposesGlobalCategoryCatalogAndArchiveEndpoints() {

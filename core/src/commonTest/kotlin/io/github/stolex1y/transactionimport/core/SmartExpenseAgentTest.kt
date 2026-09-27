@@ -58,6 +58,899 @@ class SmartExpenseAgentTest {
         assertTrue(corrected.draft!!.transactions.single { it.id == "1" }.included)
         assertFalse(corrected.draft!!.transactions.single { it.id == "2" }.included)
     }
+    @Test
+    fun acceptsCanonicalMerchantProposalAndAppliesItToExternalCandidates() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(
+            repository,
+            QueuedGateway(
+                """{"items":[{"index":0,"merchant":"КофеБон","description":"","category_id":null}],"merchant_canonical_candidates":[{"canonical_name":"КофеБон","aliases":["Coffeebon"],"suffix_policy":"numeric_terminal","reason":"Явное правило пользователя."}]}""",
+            ),
+        )
+        val session = agent.createSession("Canonical merchant", defaultConfig)
+        val classification = agent.classifyExternalTransactionsWithProposals(
+            sessionId = session.session.id,
+            userText = "Coffeebon с любым числовым суффиксом — это КофеБон.",
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-09-02",
+                    amountMinor = -640,
+                    currency = "RUB",
+                    merchant = "Coffeebon 37",
+                ),
+            ),
+        )
+        assertEquals(1, classification.merchantCanonicalProposals.size)
+
+        val withCandidate = agent.recordExternalExchange(
+            sessionId = session.session.id,
+            expectedRevision = session.session.revision,
+            userText = "Coffeebon с любым числовым суффиксом — это КофеБон.",
+            assistantText = "Предлагаю сохранить правило названия.",
+            merchantCanonicalProposals = listOf(
+                MerchantCanonicalRuleProposal(
+                    canonicalName = "КофеБон",
+                    aliases = listOf("Coffeebon"),
+                    suffixPolicy = MerchantSuffixPolicy.NUMERIC_TERMINAL,
+                    reason = "Пользователь явно задал правило для числовых суффиксов.",
+                ),
+            ),
+        )
+        val candidate = withCandidate.merchantCanonicalCandidates.single()
+        assertEquals("КофеБон", candidate.canonicalName)
+        assertEquals(MerchantSuffixPolicy.NUMERIC_TERMINAL, candidate.suffixPolicy)
+        assertEquals(MemoryCandidateStatus.PENDING, candidate.status)
+
+        val accepted = agent.acceptMerchantCanonicalCandidate(
+            sessionId = session.session.id,
+            expectedRevision = withCandidate.session.revision,
+            candidateId = candidate.id,
+        )
+        assertEquals(MemoryCandidateStatus.ACCEPTED, accepted.merchantCanonicalCandidates.single().status)
+        assertEquals("КофеБон", agent.getPreferences().merchantCanonicalRules.single().canonicalName)
+        val applied = agent.applyMerchantCanonicalRulesToExternalCandidates(
+            listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-09-02",
+                    amountMinor = -640,
+                    currency = "RUB",
+                    merchant = "Coffeebon 37",
+                ),
+            ),
+        )
+        assertEquals("КофеБон", applied.single().merchant)
+    }
+ 
+    @Test
+    fun acceptingCanonicalRuleAppliesToExistingDraftTransactions() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(
+            repository,
+            QueuedGateway(initialDraftJson.replace("\"DEMO MARKET\"", "\"Your Smile\"")),
+        )
+        val created = agent.createSession("Canonical draft", defaultConfig)
+        val imported = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "Выписка с Your Smile",
+        )
+        val withCandidate = agent.recordExternalExchange(
+            sessionId = created.session.id,
+            expectedRevision = imported.session.revision,
+            userText = "Запомни: Your Smile — это Два дантиста.",
+            assistantText = "Предлагаю сохранить правило.",
+            merchantCanonicalProposals = listOf(
+                MerchantCanonicalRuleProposal(
+                    canonicalName = "Два дантиста",
+                    aliases = listOf("Your Smile"),
+                    suffixPolicy = MerchantSuffixPolicy.NONE,
+                    reason = "Пользователь явно задал правило.",
+                ),
+            ),
+        )
+        val candidate = withCandidate.merchantCanonicalCandidates.single()
+
+        val accepted = agent.acceptMerchantCanonicalCandidate(
+            sessionId = created.session.id,
+            expectedRevision = withCandidate.session.revision,
+            candidateId = candidate.id,
+        )
+
+        assertEquals("Два дантиста", accepted.draft!!.transactions.first().transaction.merchant)
+        assertEquals("DEMO TAXI", accepted.draft.transactions[1].transaction.merchant)
+    }
+
+    @Test
+    fun explicitRuleRequestSavesAndAppliesToCurrentDraft() = runBlocking {
+        val gateway = QueuedGateway(
+            initialDraftJson
+                .replace("\"DEMO MARKET\"", "\"Два Дантиста\"")
+                .replace("\"food.groceries\"", "null"),
+            """
+                {
+                  "intent": "needs_clarification",
+                  "message": "Сохраняю правило категории.",
+                  "operations": [],
+                  "transactions": [],
+                  "memory_candidates": [{
+                    "text": "Операции с мерчантом «Два Дантиста» относить к категории «Здоровье».",
+                    "reason": "Пользователь явно задал правило категории."
+                  }],
+                  "merchant_canonical_candidates": [],
+                  "review_draft": true,
+                  "persist_memory": true
+                }
+            """.trimIndent(),
+            """
+                {
+                  "operations": [{
+                    "transaction_id": "1",
+                    "action": "set_field",
+                    "field": "category_id",
+                    "value": "health.pharmacy"
+                  }],
+                  "message": "Правило применено ко всем подходящим строкам."
+                }
+            """.trimIndent(),
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Explicit rule", defaultConfig)
+        val imported = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "Выписка с Два Дантиста",
+        )
+
+        val updated = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = imported.session.revision,
+            text = "Запомни, что Два Дантиста относится к категории Здоровье",
+        )
+
+        assertEquals(
+            "health.pharmacy",
+            updated.draft!!.transactions.first().transaction.categoryId,
+            updated.toString(),
+        )
+        assertEquals(
+            MemoryCandidateStatus.ACCEPTED,
+            updated.memoryCandidates.single().status,
+        )
+        assertEquals(
+            "Операции с мерчантом «Два Дантиста» относить к категории «Здоровье».",
+            agent.getPreferences().confirmedDecisions.single().text,
+        )
+    }
+
+    @Test
+    fun recheckReviewsAllDraftRowsAgainstRules() = runBlocking {
+        val gateway = QueuedGateway(
+            initialDraftJson,
+            """
+                {
+                  "intent": "needs_clarification",
+                  "message": "Перепроверяю весь draft.",
+                  "operations": [],
+                  "transactions": [],
+                  "review_draft": true
+                }
+            """.trimIndent(),
+            """
+                {
+                  "operations": [{
+                    "transaction_id": "2",
+                    "action": "set_included",
+                    "field": null,
+                    "value": false
+                  }],
+                  "message": "Все строки перепроверены."
+                }
+            """.trimIndent(),
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Draft recheck", defaultConfig)
+        val imported = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "Выписка",
+        )
+        agent.createMerchantCanonicalRule(
+            canonicalName = "Магазин",
+            aliases = listOf("DEMO MARKET"),
+            suffixPolicy = MerchantSuffixPolicy.NONE,
+        )
+
+        val checked = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = imported.session.revision,
+            text = "Перепроверь",
+        )
+
+        assertEquals("Магазин", checked.draft!!.transactions[0].transaction.merchant)
+        assertFalse(checked.draft.transactions[1].included)
+        assertTrue(gateway.requests.any { request ->
+            request.messages.any { it.content.contains("DEMO MARKET") }
+        })
+    }
+
+    @Test
+    fun acceptsExplicitCanonicalRuleAndAppliesItToCurrentDraft() = runBlocking {
+        val gateway = QueuedGateway(
+            initialDraftJson.replace("\"DEMO MARKET\"", "\"Coffeebon 37\""),
+            """
+                {
+                  "intent": "needs_clarification",
+                  "message": "Сохраняю правила названия и выбора.",
+                  "operations": [],
+                  "transactions": [],
+                  "memory_candidates": [{
+                    "text": "Не включать переводы",
+                    "reason": "Отдельное пользовательское правило."
+                  }],
+                  "merchant_canonical_candidates": [{
+                    "canonical_name": "КофеБон",
+                    "aliases": ["Coffeebon"],
+                    "suffix_policy": "numeric_terminal",
+                    "reason": "Пользователь явно задал правило."
+                  }],
+                  "review_draft": true,
+                  "persist_memory": true
+                }
+            """.trimIndent(),
+            """
+                {
+                  "operations": [{
+                    "transaction_id": "1",
+                    "action": "set_field",
+                    "field": "merchant",
+                    "value": "КофеБон"
+                  }],
+                  "message": "Правила применены."
+                }
+            """.trimIndent(),
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Memory-only follow-up", defaultConfig)
+        val initial = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "Первая выписка",
+        )
+
+        val updated = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = initial.session.revision,
+            text = "Запомни, что все названия Coffeebon с различными численными суффиксами - это КофеБон",
+        )
+
+        assertTrue(updated.session.revision > initial.session.revision)
+        assertEquals("КофеБон", updated.draft!!.transactions.first().transaction.merchant)
+        assertEquals("КофеБон", updated.merchantCanonicalCandidates.single().canonicalName)
+        assertEquals(
+            MemoryCandidateStatus.ACCEPTED,
+            updated.merchantCanonicalCandidates.single().status,
+        )
+        assertEquals(listOf("Не включать переводы"), updated.memoryCandidates.map { it.text })
+        assertEquals("Правило сохранено и применяется к текущему draft.", updated.messages.last().displayText)
+        assertEquals(listOf("Не включать переводы"), agent.getPreferences().confirmedDecisions.map { it.text })
+    }
+
+    @Test
+    fun appliesPatchWhenFollowUpOmitsIntentAndUsesNullOptionalFields() = runBlocking {
+        val gateway = QueuedGateway(
+            initialDraftJson,
+            """
+                {
+                  "message": null,
+                  "operations": [{
+                    "transaction_id": "1",
+                    "action": "set_included",
+                    "field": null,
+                    "value": false
+                  }],
+                  "transactions": null,
+                  "memory_candidates": null,
+                  "merchant_canonical_candidates": null
+                }
+            """.trimIndent(),
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Nullable correction", defaultConfig)
+        val initial = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "Первая выписка",
+        )
+
+        val updated = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = initial.session.revision,
+            text = "Не включай операцию 1",
+        )
+
+        assertFalse(updated.draft!!.transactions.first { it.id == "1" }.included)
+        assertEquals("Черновик обновлён.", updated.messages.last().displayText)
+    }
+
+    @Test
+    fun appliesPatchWhenFollowUpUsesCommonAliasesAndCodeFence() = runBlocking {
+        val gateway = QueuedGateway(
+            initialDraftJson,
+            """
+                ```json
+                {
+                  "type": "update",
+                  "message": "Операции исправлены.",
+                  "changes": [
+                    {
+                      "id": 1,
+                      "field": "included",
+                      "value": false
+                    },
+                    {
+                      "id": 1,
+                      "action": "update",
+                      "field": "category",
+                      "value": "food.cafe"
+                    }
+                  ]
+                }
+                ```
+            """.trimIndent(),
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Aliased correction", defaultConfig)
+        val initial = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "Первая выписка",
+        )
+
+        val updated = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = initial.session.revision,
+            text = "Не включай операцию 1",
+        )
+
+        val row = updated.draft!!.transactions.first { it.id == "1" }
+        assertFalse(row.included)
+        assertEquals("food.cafe", row.transaction.categoryId)
+        assertEquals("Операции исправлены.", updated.messages.last().displayText)
+    }
+
+
+    @Test
+    fun failedPostImportReviewKeepsAcceptedTransactions() = runBlocking {
+        val gateway = QueuedGateway(initialDraftJson, "not-json")
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Post-import review failure", defaultConfig)
+        val initial = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "Первая выписка",
+        )
+        val appended = agent.appendExternalTransactions(
+            sessionId = created.session.id,
+            expectedRevision = initial.session.revision,
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-09-02",
+                    amountMinor = -640,
+                    currency = "RUB",
+                    merchant = "КофеБон",
+                    categoryId = "food.cafe",
+                ),
+            ),
+        )
+        val importedId = appended.draft!!.transactions.last().id
+
+        val reviewed = agent.reviewImportedDraftInclusion(
+            sessionId = created.session.id,
+            expectedRevision = appended.session.revision,
+            importedTransactionIds = listOf(importedId),
+            userText = "Загрузи операции",
+        )
+
+        assertEquals(appended.session.revision, reviewed.session.revision)
+        assertEquals(appended.draft, reviewed.draft)
+        assertTrue(reviewed.lastError.orEmpty().contains("не выполнена"))
+    }
+
+    @Test
+    fun preservesSourceMerchantWhenModelLeavesItUnknownAndKeepsAmbiguousCategoryOnReview() = runBlocking {
+        val gateway = QueuedGateway(
+            """{"items":[{"index":0,"merchant":null,"category_id":null},{"index":1,"merchant":null,"category_id":null}]}""",
+        )
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, gateway)
+        val session = agent.createSession("MCP операции", defaultConfig)
+
+        val enriched = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -499,
+                    currency = "RUB",
+                    merchant = "B121",
+                    description = "Булочная Ф. Вол",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -1_200,
+                    currency = "RUB",
+                    merchant = "Ozon Bank",
+                    description = "Алексей Ф.",
+                ),
+            ),
+        )
+
+        assertEquals("B121", enriched[0].merchant)
+        assertNull(enriched[0].categoryId)
+        assertTrue(enriched[0].categoryIssue != null)
+        assertEquals("Алексей Ф.", enriched[1].description)
+        assertNull(enriched[1].categoryId)
+        assertTrue(gateway.requests.single().messages.last().content.contains("description=Булочная Ф. Вол"))
+    }
+
+    @Test
+    fun externalPreviewUsesMemoryAndCanonicalizesMerchantDescriptionAndTransfers() = runBlocking {
+        val gateway = QueuedGateway(
+            """{"items":[
+                {"index":0,"merchant":"Додо Пицца","description":"Без описания","category_id":"food.cafe"},
+                {"index":1,"merchant":"Альфа-Банк","description":"Яна К.","category_id":null},
+                {"index":2,"merchant":"BeFit","description":"","category_id":"food.groceries"},
+                {"index":3,"merchant":"Яндекс","description":"Себе в другой банк","category_id":null},
+                {"index":4,"merchant":"Ozon Bank","description":"Алексей Ф.","category_id":null},
+                {"index":5,"merchant":"КофеБон","description":"Описание отсутствует","category_id":"food.cafe"}
+            ]}""".trimIndent(),
+        )
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, gateway)
+        agent.updatePreferences("BeFit относить к еде.")
+        repository.saveLongTermMemory(
+            repository.readLongTermMemory().copy(
+                confirmedDecisions = listOf(
+                    ConfirmedDecision(
+                        id = "decision-befit",
+                        text = "Транзакции с systemletbefit/letbefit относить к Еде и использовать название BeFit.",
+                        createdAtEpochMs = 1L,
+                    ),
+                ),
+            ),
+        )
+        val session = agent.createSession("MCP memory", defaultConfig)
+
+        val enriched = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            userText = "Получи операции и учти мои правила.",
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -1_135,
+                    currency = "RUB",
+                    merchant = "DODOPIZZA",
+                    description = "Без описания",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -10_990,
+                    currency = "RUB",
+                    merchant = "Альфа-Банк",
+                    description = "Яна К.",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -2_500,
+                    currency = "RUB",
+                    merchant = "systemletbefit",
+                    description = "systemletbefit",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -3_000,
+                    currency = "RUB",
+                    merchant = "Яндекс",
+                    description = "Себе в другой банк",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -2_613,
+                    currency = "RUB",
+                    merchant = "Ozon Bank",
+                    description = "Алексей Ф.",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -640,
+                    currency = "RUB",
+                    merchant = "COFFEBON",
+                    description = "Описание отсутствует",
+                ),
+            ),
+        )
+
+        assertEquals("Додо Пицца", enriched[0].merchant)
+        assertEquals("", enriched[0].description)
+        assertEquals("food.cafe", enriched[0].categoryId)
+        assertEquals("Перевод", enriched[1].merchant)
+        assertEquals("Яна К.", enriched[1].description)
+        assertNull(enriched[1].categoryId)
+        assertEquals("BeFit", enriched[2].merchant)
+        assertEquals("", enriched[2].description)
+        assertEquals("food.groceries", enriched[2].categoryId)
+        assertEquals("Перевод", enriched[3].merchant)
+        assertEquals("Себе в другой банк", enriched[3].description)
+        assertNull(enriched[3].categoryId)
+        assertEquals("Перевод", enriched[4].merchant)
+        assertEquals("Алексей Ф.", enriched[4].description)
+        assertNull(enriched[4].categoryId)
+        assertEquals("КофеБон", enriched[5].merchant)
+        assertEquals("", enriched[5].description)
+        assertEquals("food.cafe", enriched[5].categoryId)
+
+        val request = gateway.requests.single()
+        assertTrue(request.messages.first().content.contains("systemletbefit/letbefit"))
+        assertTrue(request.messages.first().content.contains("<general-user-instructions>"))
+
+        assertTrue(request.messages.first().content.contains("<confirmed-decisions>"))
+        assertTrue(request.messages.last().content.contains("Получи операции"))
+    }
+
+    @Test
+    fun externalPreviewAppliesConfirmedCategoryRuleToMatchingMerchant() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        repository.saveLongTermMemory(
+            repository.readLongTermMemory().copy(
+                confirmedDecisions = listOf(
+                    ConfirmedDecision(
+                        id = "decision-category-preview",
+                        text = "Операции с мерчантом «Два Дантиста» относить к категории «Здоровье».",
+                        createdAtEpochMs = 1L,
+                    ),
+                ),
+            ),
+        )
+        val agent = testAgent(
+            repository = repository,
+            gateway = QueuedGateway(
+                """{"items":[{"index":0,"merchant":"Два Дантиста","description":"","category_id":"health.pharmacy"}]}""",
+            ),
+        )
+        val session = agent.createSession("Category preview", defaultConfig)
+
+        val enriched = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            userText = "Получи новые операции.",
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -1_500,
+                    currency = "RUB",
+                    merchant = "Два Дантиста",
+                    description = "",
+                ),
+            ),
+        )
+
+        assertEquals("health.pharmacy", enriched.single().categoryId)
+        assertNull(enriched.single().categoryIssue)
+    }
+
+    @Test
+    fun externalPreviewAppliesConfirmedDescriptionRules() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        repository.saveLongTermMemory(
+            repository.readLongTermMemory().copy(
+                confirmedDecisions = listOf(
+                    ConfirmedDecision(
+                        id = "decision-location",
+                        text = "Если в операции «Стритфуд» (IP Zamiralova) в описании нет обозначения места, добавлять место «ЦПКиО».",
+                        createdAtEpochMs = 1L,
+                    ),
+                    ConfirmedDecision(
+                        id = "decision-cleanup",
+                        text = "У операций с мерчантом «Подорожник» удалять описание «Организатор перевозок» как бессмысленное.",
+                        createdAtEpochMs = 2L,
+                    ),
+                ),
+            ),
+        )
+        val gateway = QueuedGateway(
+            """{"items":[
+                {"index":0,"merchant":"Стритфуд","description":"Бургер, ЦПКиО","category_id":null},
+                {"index":1,"merchant":"Подорожник","description":"","category_id":null}
+            ]}""".trimIndent(),
+        )
+        val agent = testAgent(repository, gateway)
+        val session = agent.createSession("Description rules", defaultConfig)
+
+        val enriched = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            userText = "Учти подтверждённые правила описаний.",
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -1_000,
+                    currency = "RUB",
+                    merchant = "IP Zamiralova",
+                    description = "Бургер",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -500,
+                    currency = "RUB",
+                    merchant = "Подорожник",
+                    description = "Организатор перевозок",
+                ),
+            ),
+        )
+
+        assertEquals("Бургер, ЦПКиО", enriched[0].description)
+        assertEquals("", enriched[1].description)
+        assertTrue(
+            gateway.requests.single().messages.any {
+                it.content.contains("добавлять место «ЦПКиО»") &&
+                    it.content.contains("удалять описание «Организатор перевозок»")
+            },
+        )
+    }
+
+    @Test
+    fun draftReviewAppliesConfirmedDescriptionRulesToEveryMatchingRow() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        repository.saveLongTermMemory(
+            repository.readLongTermMemory().copy(
+                confirmedDecisions = listOf(
+                    ConfirmedDecision(
+                        id = "decision-location-draft",
+                        text = "Если в операции «Стритфуд» (IP Zamiralova) в описании нет обозначения места, добавлять место «ЦПКиО».",
+                        createdAtEpochMs = 1L,
+                    ),
+                    ConfirmedDecision(
+                        id = "decision-cleanup-draft",
+                        text = "У операций с мерчантом «Подорожник» удалять описание «Организатор перевозок» как бессмысленное.",
+                        createdAtEpochMs = 2L,
+                    ),
+                ),
+            ),
+        )
+        val agent = testAgent(
+            repository = repository,
+            gateway = QueuedGateway(
+                initialDraftJson,
+                """{"intent":"needs_clarification","message":"Проверяю подтверждённые правила.","operations":[],"transactions":[],"review_draft":true}""",
+                """{"operations":[
+                    {"transaction_id":"1","action":"set_field","field":"description","value":"Бургер, ЦПКиО"},
+                    {"transaction_id":"2","action":"set_field","field":"description","value":""}
+                ],"message":"Проверил все строки."}""",
+            ),
+        )
+        val created = agent.createSession("Draft description rules", defaultConfig)
+        val imported = agent.sendMessage(created.session.id, 0, "Выписка")
+        val first = imported.draft!!.transactions.first()
+        val second = imported.draft.transactions[1]
+        val described = agent.replaceTransaction(
+            sessionId = imported.session.id,
+            expectedRevision = imported.session.revision,
+            transactionId = first.id,
+            included = first.included,
+            description = "Бургер",
+            replacement = first.transaction.copy(merchant = "IP Zamiralova"),
+        )
+        val prepared = described.draft!!.transactions[1]
+        val describedAgain = agent.replaceTransaction(
+            sessionId = described.session.id,
+            expectedRevision = described.session.revision,
+            transactionId = prepared.id,
+            included = prepared.included,
+            description = "Организатор перевозок",
+            replacement = prepared.transaction.copy(merchant = "Подорожник"),
+        )
+
+        val reviewed = agent.sendMessage(
+            sessionId = describedAgain.session.id,
+            expectedRevision = describedAgain.session.revision,
+            text = "Перепроверь",
+        )
+
+        assertEquals("Бургер, ЦПКиО", reviewed.draft!!.transactions.first().description)
+        assertEquals("", reviewed.draft.transactions[1].description)
+        assertEquals(second.id, prepared.id)
+    }
+
+    @Test
+    fun conversationalRuleAutomaticallyReviewsEveryDraftRow() = runBlocking {
+        val gateway = QueuedGateway(
+            initialDraftJson,
+            """{
+              "intent":"needs_clarification",
+              "message":"Правило принято, перепроверяю весь draft.",
+              "operations":[],
+              "transactions":[],
+              "memory_candidates":[{
+                "text":"Не дублировать название продавца в описании операции.",
+                "reason":"Пользователь явно сформулировал правило описаний."
+              }],
+              "review_draft":true
+            }""".trimIndent(),
+            """{"operations":[
+              {"transaction_id":"1","action":"set_field","field":"description","value":"Яблоки"},
+              {"transaction_id":"2","action":"set_field","field":"description","value":"Поездка"}
+            ],"message":"Проверил все строки."}""",
+        )
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, gateway)
+        val created = agent.createSession("Automatic rule review", defaultConfig)
+        val imported = agent.sendMessage(created.session.id, 0, "Выписка")
+        val first = imported.draft!!.transactions.first()
+        val described = agent.replaceTransaction(
+            sessionId = imported.session.id,
+            expectedRevision = imported.session.revision,
+            transactionId = first.id,
+            included = first.included,
+            description = "DEMO MARKET, Яблоки",
+            replacement = first.transaction.copy(merchant = "DEMO MARKET"),
+        )
+        val second = described.draft!!.transactions[1]
+        val describedAgain = agent.replaceTransaction(
+            sessionId = described.session.id,
+            expectedRevision = described.session.revision,
+            transactionId = second.id,
+            included = second.included,
+            description = "DEMO TAXI, Поездка",
+            replacement = second.transaction.copy(merchant = "DEMO TAXI"),
+        )
+
+        val reviewed = agent.sendMessage(
+            sessionId = describedAgain.session.id,
+            expectedRevision = describedAgain.session.revision,
+            text = "Не дублируй в описании название продавца",
+        )
+
+        assertEquals("Яблоки", reviewed.draft!!.transactions.first().description)
+        assertEquals("Поездка", reviewed.draft.transactions[1].description)
+        assertEquals(
+            "Все операции текущего draft перепроверены по этому правилу.",
+            reviewed.messages.last().displayText,
+        )
+        assertEquals(MemoryCandidateStatus.PENDING, reviewed.memoryCandidates.single().status)
+        assertTrue(agent.getPreferences().confirmedDecisions.isEmpty())
+        assertEquals(3, gateway.requests.size)
+        assertTrue(
+            gateway.requests.last().messages.any {
+                it.role == "user" &&
+                    it.content.contains("Не дублируй в описании название продавца")
+            },
+        )
+        assertTrue(
+            gateway.requests.last().messages.any {
+                it.content.contains("DEMO MARKET") && it.content.contains("DEMO TAXI")
+            },
+        )
+    }
+
+    @Test
+    fun fallbackCategoryLeavesUnknownModelSelectionForReview() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(
+            repository,
+            QueuedGateway(
+                """{"items":[{"index":0,"merchant":"Додо Пицца","description":"Нет описания","category_id":null}]}""",
+            ),
+        )
+        agent.archiveCategory("food.cafe")
+        val customCategory = agent.createCategory(
+            displayName = "Рестораны",
+            type = CategoryType.EXPENSE,
+            parentId = null,
+            hint = "cafes and restaurants",
+        ).single { it.displayName == "Рестораны" }
+        val session = agent.createSession("Custom catalog", defaultConfig)
+
+        val enriched = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            userText = "Получи операции.",
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -1_135,
+                    currency = "RUB",
+                    merchant = "DODOPIZZA",
+                    description = "Нет описания",
+                ),
+            ),
+        )
+
+        assertNull(enriched.single().categoryId)
+        assertTrue(enriched.single().categoryIssue != null)
+        assertEquals("Рестораны", customCategory.displayName)
+    }
+    @Test
+    fun appliesPerUserMerchantCanonicalRuleBeforeAndAfterModelResponse() = runBlocking {
+        val gateway = QueuedGateway(
+            """{"items":[
+                {"index":0,"merchant":"Other","description":"U doma 23 кофе","category_id":null},
+                {"index":1,"merchant":"Other","description":"U doma Coffee","category_id":null}
+            ]}""".trimIndent(),
+        )
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, gateway)
+        agent.createMerchantCanonicalRule(
+            canonicalName = "У дома",
+            aliases = listOf("U doma"),
+            suffixPolicy = MerchantSuffixPolicy.NUMERIC_TERMINAL,
+        )
+        val session = agent.createSession("Canonical merchant", defaultConfig)
+
+        val enriched = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -1_000,
+                    currency = "RUB",
+                    merchant = "U doma 23",
+                    description = "U doma 23 кофе",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -1_000,
+                    currency = "RUB",
+                    merchant = "U doma Coffee",
+                    description = "U doma Coffee",
+                ),
+            ),
+        )
+
+        assertEquals("У дома", enriched[0].merchant)
+        assertEquals("кофе", enriched[0].description)
+        assertEquals("Other", enriched[1].merchant)
+        assertTrue(gateway.requests.single().messages.last().content.contains("merchant=U doma 23"))
+        assertTrue(gateway.requests.single().messages.first().content.contains("<merchant-canonical-rules>"))
+        assertEquals(
+            listOf("U doma"),
+            repository.readLongTermMemory().merchantCanonicalRules.single().aliases,
+        )
+    }
+
+    @Test
+    fun doesNotMigrateTextOnlyConfirmedDecisionIntoStructuredMerchantRule() = runBlocking {
+        val gateway = QueuedGateway(
+            """{"items":[{"index":0,"merchant":"Other","description":"U doma 23 кофе","category_id":null}]}""",
+        )
+        val repository = MemoryImportSessionRepository()
+        repository.saveLongTermMemory(
+            UserPreferences(
+                userPrompt = "",
+                confirmedDecisions = listOf(
+                    ConfirmedDecision(
+                        id = "decision-u-doma",
+                        text = "Магазины, похожим образом на U doma нужно называть У дома.",
+                        createdAtEpochMs = 1L,
+                    ),
+                ),
+            ),
+        )
+        val agent = testAgent(repository, gateway)
+        val session = agent.createSession("Decision canonical merchant", defaultConfig)
+
+        val enriched = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -1_000,
+                    currency = "RUB",
+                    merchant = "U doma 23",
+                    description = "U doma 23 кофе",
+                ),
+            ),
+        )
+
+        assertEquals("Other", enriched.single().merchant)
+        assertEquals("U doma 23 кофе", enriched.single().description)
+    }
 
     @Test
     fun derivesReceiptStateFromCurrentDraft() {
@@ -70,7 +963,6 @@ class SmartExpenseAgentTest {
             currency = "RUB",
             merchant = "Магазин",
             categoryId = "food.groceries",
-            cardLast4 = null,
             needsReview = false,
             issues = emptyList(),
         )
@@ -462,7 +1354,7 @@ class SmartExpenseAgentTest {
         val systemPrompt = gateway.requests.single().messages.first().content
         assertFalse(systemPrompt.contains("<general-user-instructions>"))
         assertTrue(systemPrompt.contains("prove who owns a number"))
-        assertTrue(systemPrompt.contains("internal or external"))
+        assertTrue(systemPrompt.contains("transfer type"))
     }
 
     @Test
@@ -550,7 +1442,6 @@ class SmartExpenseAgentTest {
             listOf("2026-08-18T16:02:00", "2026-08-19T14:31:00"),
             gosuslugi.map { it.transaction.postedAt },
         )
-        assertEquals(listOf("6960", "9818"), gosuslugi.map { it.transaction.cardLast4 })
         assertEquals(
             "Добавлено операций: 2. Пропущено точных дубликатов: 0.",
             appended.messages.last().displayText,
@@ -725,9 +1616,12 @@ class SmartExpenseAgentTest {
     }
 
     @Test
-    fun merchantNormalizationPreservesSourceLanguageAndBrands() {
+    fun merchantNormalizationPreservesSourceLanguageWithoutGlobalBrandMap() {
         assertEquals("Оплата в ДИКСИ", normalizeMerchantLabel("Оплата в ДИКСИ"))
         assertEquals("Coca-Cola", normalizeMerchantLabel("Coca-Cola"))
+        assertEquals("DODOPIZZA", normalizeMerchantLabel("DODOPIZZA"))
+        assertEquals("COFFEEBON 37", normalizeMerchantLabel("COFFEEBON 37"))
+        assertEquals("LAMODA", normalizeMerchantLabel("LAMODA"))
     }
 
     @Test
@@ -747,7 +1641,6 @@ class SmartExpenseAgentTest {
 
         assertTrue(gateway.requests[0].messages.first().content.contains("Не включай переводы"))
         assertTrue(gateway.requests[1].messages.first().content.contains("Не включай переводы"))
-        assertTrue(gateway.requests[1].messages.first().content.contains("initial extraction"))
     }
     @Test
     fun routesShortWorkingAndLongTermMemoryWithoutCrossSessionLeakage() = runBlocking {
@@ -940,7 +1833,7 @@ class SmartExpenseAgentTest {
         assertTrue(systemPrompt.contains("Еда / Продукты"))
         assertTrue(systemPrompt.contains("Кино"))
         assertFalse(systemPrompt.contains("category.food"))
-        assertFalse(systemPrompt.contains("Между своими счетами"))
+        assertFalse(systemPrompt.contains("- transfer.internal"))
     }
 
     @Test
@@ -955,7 +1848,6 @@ class SmartExpenseAgentTest {
             occurredAt = "",
             amountMinor = -1,
             categoryId = null,
-            cardLast4 = null,
         )
 
         val withErrors = agent.replaceTransaction(
@@ -968,7 +1860,6 @@ class SmartExpenseAgentTest {
         )
         val invalidRow = withErrors.draft!!.transactions.first()
         assertTrue(invalidRow.fieldErrors.keys.containsAll(listOf("occurred_at", "amount_minor", "category_id")))
-        assertFalse(invalidRow.fieldErrors.containsKey("card_last4"))
         assertFailsWith<IllegalArgumentException> { agent.buildImportBatch(created.session.id) }
 
         val excluded = agent.replaceTransaction(
@@ -986,14 +1877,13 @@ class SmartExpenseAgentTest {
             transactionId = "2",
             included = true,
             description = "Поездка на встречу",
-            replacement = second.copy(cardLast4 = null),
+            replacement = second,
         )
 
         val batch = agent.buildImportBatch(created.session.id)
         assertEquals(1, batch.transactions.size)
         assertEquals(2, batch.transactions.single().sourceIndex)
         assertEquals("Поездка на встречу", batch.transactions.single().description)
-        assertNull(batch.transactions.single().cardLast4)
         assertEquals("RUB", batch.transactions.single().currency)
         assertEquals(described.session.revision, agent.getSession(created.session.id).session.revision)
     }
@@ -1045,7 +1935,7 @@ class SmartExpenseAgentTest {
         val corrected = agent.sendMessage(
             created.session.id,
             extracted.session.revision,
-            "Проверь ещё раз",
+            "Оставь текущий draft без изменений",
         )
 
         assertEquals(listOf(150, 280), corrected.metrics.map { it.totalTokens })
@@ -1386,6 +2276,7 @@ class SmartExpenseAgentTest {
             additionalMetrics: List<ModelCallMetric>,
             memoryTrace: MemoryTrace?,
             memoryCandidates: List<MemoryCandidate>,
+            merchantCanonicalCandidates: List<MerchantCanonicalCandidate>,
             receiptState: ReceiptState?,
         ): ImportSessionState = update(
             sessionId,
@@ -1396,9 +2287,32 @@ class SmartExpenseAgentTest {
             facts = facts,
             memoryTrace = memoryTrace,
             memoryCandidates = memoryCandidates,
+            merchantCanonicalCandidates = merchantCanonicalCandidates,
             receiptState = receiptState,
         ) { state ->
             state.messages + userMessage + assistantMessage
+        }
+
+        override suspend fun saveMessageExchange(
+            sessionId: String,
+            expectedRevision: Long,
+            userMessage: ConversationMessage,
+            assistantMessage: ConversationMessage,
+            metric: ModelCallMetric?,
+            updatedAtEpochMs: Long,
+            merchantCanonicalCandidates: List<MerchantCanonicalCandidate>,
+        ): ImportSessionState {
+            val current = checkedState(sessionId, expectedRevision)
+            return current.copy(
+                session = current.session.copy(
+                    revision = expectedRevision + 1,
+                    updatedAtEpochMs = updatedAtEpochMs,
+                ),
+                messages = current.messages + userMessage + assistantMessage,
+                metrics = metric?.let { current.metrics + it } ?: current.metrics,
+                merchantCanonicalCandidates = current.merchantCanonicalCandidates +
+                    merchantCanonicalCandidates,
+            ).also { states[sessionId] = it }
         }
 
         override suspend fun acceptMemoryCandidate(
@@ -1425,6 +2339,38 @@ class SmartExpenseAgentTest {
                         stored.copy(
                             status = MemoryCandidateStatus.ACCEPTED,
                             acceptedDecisionId = decision.id,
+                            acceptedAtEpochMs = updatedAtEpochMs,
+                        )
+                    } else {
+                        stored
+                    }
+                },
+            ).also { states[sessionId] = it }
+        }
+        override suspend fun acceptMerchantCanonicalCandidate(
+            sessionId: String,
+            expectedRevision: Long,
+            candidateId: String,
+            rule: MerchantCanonicalRule,
+            updatedAtEpochMs: Long,
+        ): ImportSessionState {
+            val current = checkedState(sessionId, expectedRevision)
+            val candidate = current.merchantCanonicalCandidates.singleOrNull { it.id == candidateId }
+                ?: throw IllegalArgumentException("Предложение canonical rule не найдено: $candidateId")
+            require(candidate.status == MemoryCandidateStatus.PENDING)
+            preferences = (preferences ?: UserPreferences("")).copy(
+                merchantCanonicalRules = (preferences?.merchantCanonicalRules ?: emptyList()) + rule,
+            )
+            return current.copy(
+                session = current.session.copy(
+                    revision = expectedRevision + 1,
+                    updatedAtEpochMs = updatedAtEpochMs,
+                ),
+                merchantCanonicalCandidates = current.merchantCanonicalCandidates.map { stored ->
+                    if (stored.id == candidateId) {
+                        stored.copy(
+                            status = MemoryCandidateStatus.ACCEPTED,
+                            acceptedRuleId = rule.id,
                             acceptedAtEpochMs = updatedAtEpochMs,
                         )
                     } else {
@@ -1508,6 +2454,7 @@ class SmartExpenseAgentTest {
                 memoryTrace = current.memoryTrace,
                 receiptState = current.receiptState,
                 memoryCandidates = current.memoryCandidates,
+                merchantCanonicalCandidates = current.merchantCanonicalCandidates,
             ).also { states[forkSession.id] = it }
         }
 
@@ -1541,6 +2488,7 @@ class SmartExpenseAgentTest {
             facts: List<StickyFact>? = null,
             memoryTrace: MemoryTrace? = null,
             memoryCandidates: List<MemoryCandidate>? = null,
+            merchantCanonicalCandidates: List<MerchantCanonicalCandidate>? = null,
             receiptState: ReceiptState? = null,
             messages: (ImportSessionState) -> List<ConversationMessage>,
         ): ImportSessionState {
@@ -1558,6 +2506,8 @@ class SmartExpenseAgentTest {
                 summary = current.summary,
                 memoryTrace = memoryTrace ?: current.memoryTrace,
                 receiptState = receiptState ?: receiptStateFor(draft, current.receiptState.lastCompliance),
+                merchantCanonicalCandidates =
+                    current.merchantCanonicalCandidates + (merchantCanonicalCandidates ?: emptyList()),
                 memoryCandidates = current.memoryCandidates + (memoryCandidates ?: emptyList()),
             )
             states[sessionId] = updated
@@ -1591,7 +2541,6 @@ class SmartExpenseAgentTest {
                   "currency": "RUB",
                   "merchant": "DEMO MARKET",
                   "category_id": "food.groceries",
-                  "card_last4": "1234",
                   "needs_review": false,
                   "issues": []
                 },
@@ -1605,7 +2554,6 @@ class SmartExpenseAgentTest {
                   "currency": "RUB",
                   "merchant": "DEMO TAXI",
                   "category_id": "transport",
-                  "card_last4": null,
                   "needs_review": false,
                   "issues": []
                 }
@@ -1624,7 +2572,7 @@ class SmartExpenseAgentTest {
         val initialDraftWithGeneratedDescriptionsJson = initialDraftJson
             .replace(
                 "\"merchant\": \"DEMO MARKET\",",
-                "\"merchant\": \"DEMO MARKET\",\n                  \"description\": \"Яблоки, 2 кг\",",
+                "\"merchant\": \"DEMO MARKET\",\n                  \"description\": \"DEMO MARKET, Яблоки, 2 кг\",",
             )
             .replace(
                 "\"merchant\": \"DEMO TAXI\",",
@@ -1647,7 +2595,6 @@ class SmartExpenseAgentTest {
                   "merchant": "DEMO EMPLOYER",
                   "description": "Зарплата за январь",
                   "category_id": "income.salary",
-                  "card_last4": null,
                   "needs_review": false,
                   "issues": []
                 }
@@ -1672,7 +2619,6 @@ class SmartExpenseAgentTest {
                   "currency": "RUB",
                   "merchant": "DEMO MARKET",
                   "category_id": "food.groceries",
-                  "card_last4": "1234",
                   "needs_review": true,
                   "issues": [
                     "category_id: investment top-up, not in category catalog",
@@ -1700,8 +2646,8 @@ class SmartExpenseAgentTest {
               "transactions": [],
               "memory_candidates": [
                 {
-                  "text": "Не включать переводы себе.",
-                  "reason": "Пользователь явно указал это правило в подтверждённых решениях."
+                  "text": "Не включай переводы себе",
+                  "reason": "Это уже подтверждённое решение."
                 },
                 {
                   "text": "Не включать покупки без чека.",
@@ -1728,7 +2674,6 @@ class SmartExpenseAgentTest {
                   "currency": "RUB",
                   "merchant": "DEMO MARKET-ABC123",
                   "category_id": "food.groceries",
-                  "card_last4": "1234",
                   "needs_review": false,
                   "issues": []
                 },
@@ -1742,7 +2687,6 @@ class SmartExpenseAgentTest {
                   "currency": "RUB",
                   "merchant": "DEMO CAFE",
                   "category_id": "food.cafes",
-                  "card_last4": null,
                   "needs_review": false,
                   "issues": []
                 },
@@ -1756,7 +2700,6 @@ class SmartExpenseAgentTest {
                   "currency": "RUB",
                   "merchant": "DEMO CAFE",
                   "category_id": "food.cafes",
-                  "card_last4": null,
                   "needs_review": false,
                   "issues": []
                 }
@@ -1780,7 +2723,6 @@ class SmartExpenseAgentTest {
                   "currency": "RUB",
                   "merchant": "Госуслуги",
                   "category_id": null,
-                  "card_last4": "6960",
                   "needs_review": true,
                   "issues": []
                 },
@@ -1794,7 +2736,6 @@ class SmartExpenseAgentTest {
                   "currency": "RUB",
                   "merchant": "Госуслуги",
                   "category_id": null,
-                  "card_last4": "9818",
                   "needs_review": true,
                   "issues": []
                 }
@@ -1818,7 +2759,6 @@ class SmartExpenseAgentTest {
                   "currency": "RUB",
                   "merchant": "DEMO MARKET",
                   "category_id": "food.groceries",
-                  "card_last4": "1234",
                   "needs_review": false,
                   "issues": []
                 }
@@ -1842,7 +2782,6 @@ class SmartExpenseAgentTest {
                   "currency": "RUB",
                   "merchant": "DEMO INCOMPLETE",
                   "category_id": null,
-                  "card_last4": null,
                   "needs_review": true,
                   "issues": ["occurred_at: дата не указана"]
                 }
@@ -1890,7 +2829,6 @@ class SmartExpenseAgentTest {
                   "currency": "RUB",
                   "merchant": "Внешний перевод по номеру телефона +*******6539",
                   "category_id": "transfer.internal",
-                  "card_last4": null,
                   "needs_review": true,
                   "issues": ["category_id: номер телефона не совпадает с собственными, но перевод внешний"]
                 }
@@ -1914,7 +2852,6 @@ class SmartExpenseAgentTest {
                   "currency": "RUB",
                   "merchant": "DEMO MARKET",
                   "category_id": null,
-                  "card_last4": "1234",
                   "needs_review": true,
                   "issues": ["category_id: категория не определена"]
                 }

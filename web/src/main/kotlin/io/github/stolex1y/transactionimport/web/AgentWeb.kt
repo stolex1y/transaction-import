@@ -6,6 +6,7 @@ import io.github.stolex1y.transactionimport.core.ProviderCatalog
 import io.github.stolex1y.transactionimport.core.ProviderUnavailableException
 import io.github.stolex1y.transactionimport.core.SmartExpenseAgent
 import io.github.stolex1y.transactionimport.core.StructuredTransaction
+import io.github.stolex1y.transactionimport.core.MerchantSuffixPolicy
 import io.github.stolex1y.transactionimport.core.CategoryCatalog
 import io.github.stolex1y.transactionimport.core.CategoryType
 import io.github.stolex1y.transactionimport.core.TransactionCategory
@@ -23,6 +24,14 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.put
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
@@ -36,6 +45,8 @@ class AgentWebDependencies(
         McpCatalogResponse(emptyList())
     },
     val tbankMcp: TbankMcpProvider = UnavailableTbankMcpProvider,
+    val nativeMcpAgent: NativeMcpAgent? = null,
+    val scheduler: SchedulerService? = null,
 )
 
 @Serializable
@@ -89,7 +100,6 @@ data class UpdateDraftTransactionRequest(
     val merchant: String,
     val description: String = "",
     @SerialName("category_id") val categoryId: String? = null,
-    @SerialName("card_last4") val cardLast4: String? = null,
 )
 
 @Serializable
@@ -117,9 +127,21 @@ data class SystemInvariantCatalogResponse(
 data class UpdateUserPreferencesRequest(
     @SerialName("user_prompt") val userPrompt: String,
 )
+
+@Serializable
+data class UpdateMerchantCanonicalRuleRequest(
+    @SerialName("canonical_name") val canonicalName: String,
+    val aliases: List<String>,
+    @SerialName("suffix_policy") val suffixPolicy: MerchantSuffixPolicy = MerchantSuffixPolicy.NONE,
+)
 @Serializable
 data class AcceptMemoryCandidateRequest(
     val revision: Long,
+)
+@Serializable
+data class AcceptMerchantCanonicalCandidateRequest(
+    val revision: Long,
+    @SerialName("preview_id") val previewId: String? = null,
 )
 @Serializable
 data class UpdateConfirmedDecisionRequest(
@@ -139,6 +161,29 @@ data class UpdateCategoryRequest(
     @SerialName("display_name") val displayName: String,
     @SerialName("parent_id") val parentId: String? = null,
     val hint: String = "",
+)
+
+@Serializable
+data class CreateSchedulerTaskRequest(
+    val name: String,
+    @SerialName("account_refs") val accountRefs: List<String>,
+    @SerialName("start_date") val startDate: String,
+    @SerialName("interval_minutes") val intervalMinutes: Long,
+    @SerialName("time_zone") val timeZone: String = "UTC",
+)
+
+@Serializable
+data class SchedulerAccountResponse(
+    @SerialName("account_ref") val accountRef: String,
+    val name: String,
+    val currency: String = "RUB",
+    @SerialName("balance_minor") val balanceMinor: Long? = null,
+)
+
+@Serializable
+data class SchedulerAccountsResponse(
+    val accounts: List<SchedulerAccountResponse>,
+    val error: String? = null,
 )
 
 internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
@@ -172,6 +217,63 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
         call.respond(dependencies.requireAgentRuntime().mcpCatalog.catalog())
     }
 
+    get("/api/agent/scheduler/accounts") {
+        val runtime = dependencies.requireAgentRuntime()
+        val response = runtime.tbankMcp.callTool(TbankToolCallRequest("list-accounts"))
+        if (response.isError) {
+            call.respond(SchedulerAccountsResponse(emptyList(), response.text.take(240)))
+        } else {
+            val accounts = runCatching { parseSchedulerAccounts(response.text) }.getOrElse {
+                call.respond(
+                    SchedulerAccountsResponse(
+                        accounts = emptyList(),
+                        error = "Список счетов временно недоступен: некорректный ответ источника.",
+                    ),
+                )
+                return@get
+            }
+            call.respond(SchedulerAccountsResponse(accounts))
+        }
+    }
+    get("/api/agent/scheduler/tasks") {
+        call.respond(dependencies.requireAgentRuntime().requireScheduler().listTasks())
+    }
+    post("/api/agent/scheduler/tasks") {
+        val runtime = dependencies.requireAgentRuntime()
+        val request = call.receive<CreateSchedulerTaskRequest>()
+        call.respond(
+            HttpStatusCode.Created,
+            runtime.requireScheduler().createTask(
+                name = request.name,
+                accountRefs = request.accountRefs,
+                startDate = request.startDate,
+                intervalMinutes = request.intervalMinutes,
+                timeZone = request.timeZone,
+            ),
+        )
+    }
+    get("/api/agent/scheduler/tasks/{id}/history") {
+        val runtime = dependencies.requireAgentRuntime()
+        val id = call.parameters["id"].requiredPathParameter("id")
+        val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
+        call.respond(runtime.requireScheduler().history(id, limit))
+    }
+    post("/api/agent/scheduler/tasks/{id}/pause") {
+        val runtime = dependencies.requireAgentRuntime()
+        val id = call.parameters["id"].requiredPathParameter("id")
+        call.respond(runtime.requireScheduler().pause(id))
+    }
+    post("/api/agent/scheduler/tasks/{id}/resume") {
+        val runtime = dependencies.requireAgentRuntime()
+        val id = call.parameters["id"].requiredPathParameter("id")
+        call.respond(runtime.requireScheduler().resume(id))
+    }
+    post("/api/agent/scheduler/tasks/{id}/run") {
+        val runtime = dependencies.requireAgentRuntime()
+        val id = call.parameters["id"].requiredPathParameter("id")
+        call.respond(runtime.requireScheduler().runNow(id))
+    }
+
     post("/api/agent/tbank/login") {
         val runtime = dependencies.requireAgentRuntime()
         call.respond(runtime.tbankMcp.login(call.receive()))
@@ -185,6 +287,10 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
     }
     get("/api/agent/tbank/session") {
         call.respond(dependencies.requireAgentRuntime().tbankMcp.session())
+    }
+
+    get("/api/agent/tbank/session/retry") {
+        call.respond(dependencies.requireAgentRuntime().tbankMcp.retrySession())
     }
     post("/api/agent/tbank/tools/call") {
         call.respond(
@@ -216,6 +322,36 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
             dependencies.requireAgentRuntime().agent.deleteConfirmedDecision(decisionId),
         )
     }
+    post("/api/agent/preferences/merchant-rules") {
+        val request = call.receive<UpdateMerchantCanonicalRuleRequest>()
+        call.respond(
+            HttpStatusCode.Created,
+            dependencies.requireAgentRuntime().agent.createMerchantCanonicalRule(
+                canonicalName = request.canonicalName,
+                aliases = request.aliases,
+                suffixPolicy = request.suffixPolicy,
+            ),
+        )
+    }
+    put("/api/agent/preferences/merchant-rules/{ruleId}") {
+        val ruleId = call.parameters["ruleId"].requiredPathParameter("ruleId")
+        val request = call.receive<UpdateMerchantCanonicalRuleRequest>()
+        call.respond(
+            dependencies.requireAgentRuntime().agent.updateMerchantCanonicalRule(
+                ruleId = ruleId,
+                canonicalName = request.canonicalName,
+                aliases = request.aliases,
+                suffixPolicy = request.suffixPolicy,
+            ),
+        )
+    }
+    delete("/api/agent/preferences/merchant-rules/{ruleId}") {
+        val ruleId = call.parameters["ruleId"].requiredPathParameter("ruleId")
+        call.respond(
+            dependencies.requireAgentRuntime().agent.deleteMerchantCanonicalRule(ruleId),
+        )
+    }
+
 
     get("/api/agent/categories") {
         call.respond(dependencies.requireAgentRuntime().agent.listCategories(includeArchived = true))
@@ -309,6 +445,27 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
             ),
         )
     }
+    post("/api/agent/sessions/{id}/merchant-canonical-candidates/{candidateId}/accept") {
+        val id = call.parameters["id"].requiredPathParameter("id")
+        val candidateId = call.parameters["candidateId"].requiredPathParameter("candidateId")
+        val request = call.receive<AcceptMerchantCanonicalCandidateRequest>()
+        val runtime = dependencies.requireAgentRuntime()
+        val response = if (request.previewId != null && runtime.nativeMcpAgent != null) {
+            runtime.nativeMcpAgent.acceptMerchantCanonicalCandidate(
+                sessionId = id,
+                expectedRevision = request.revision,
+                candidateId = candidateId,
+                previewId = request.previewId,
+            )
+        } else {
+            runtime.agent.acceptMerchantCanonicalCandidate(
+                sessionId = id,
+                expectedRevision = request.revision,
+                candidateId = candidateId,
+            )
+        }
+        call.respond(response)
+    }
 
     put("/api/agent/sessions/{id}/config") {
         val id = call.parameters["id"].requiredPathParameter("id")
@@ -325,13 +482,43 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
     post("/api/agent/sessions/{id}/messages") {
         val id = call.parameters["id"].requiredPathParameter("id")
         val request = call.receive<SendAgentMessageRequest>()
-        call.respond(
-            dependencies.requireAgentRuntime().agent.sendMessage(
+        val runtime = dependencies.requireAgentRuntime()
+        when (
+            val nativeResult = runtime.nativeMcpAgent?.handle(
                 sessionId = id,
                 expectedRevision = request.revision,
                 text = request.text,
-            ),
-        )
+            )
+        ) {
+            is NativeMcpHandlingResult.Handled -> call.respond(nativeResult.response)
+            NativeMcpHandlingResult.NotHandled,
+            null,
+            -> call.respond(
+                runtime.agent.sendMessage(
+                    sessionId = id,
+                    expectedRevision = request.revision,
+                    text = request.text,
+                ),
+            )
+        }
+    }
+
+    post("/api/agent/sessions/{id}/mcp-previews/{previewId}/confirm") {
+        val id = call.parameters["id"].requiredPathParameter("id")
+        val previewId = call.parameters["previewId"].requiredPathParameter("previewId")
+        val request = call.receive<ConfirmMcpPreviewRequest>()
+        val native = dependencies.requireAgentRuntime().nativeMcpAgent
+            ?: throw ProviderUnavailableException("Native MCP loop не настроен.")
+        call.respond(native.confirm(id, request.revision, previewId))
+    }
+
+    delete("/api/agent/sessions/{id}/mcp-previews/{previewId}") {
+        val id = call.parameters["id"].requiredPathParameter("id")
+        val previewId = call.parameters["previewId"].requiredPathParameter("previewId")
+        val native = dependencies.requireAgentRuntime().nativeMcpAgent
+            ?: throw ProviderUnavailableException("Native MCP loop не настроен.")
+        native.cancel(id, previewId)
+        call.respond(HttpStatusCode.NoContent)
     }
 
     put("/api/agent/sessions/{id}/transactions/{transactionId}") {
@@ -361,9 +548,11 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
                     currency = existing.currency,
                     merchant = request.merchant.trim(),
                     categoryId = request.categoryId?.trim()?.ifEmpty { null },
-                    cardLast4 = request.cardLast4?.trim()?.ifEmpty { null },
                     needsReview = false,
                     issues = emptyList(),
+                    sourceLabel = existing.sourceLabel,
+                    items = existing.items,
+                    sourceRef = existing.sourceRef,
                 ),
             ),
         )
@@ -396,6 +585,43 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
 
 private fun AgentWebDependencies?.requireAgentRuntime(): AgentWebDependencies =
     this ?: throw ProviderUnavailableException("Сервис временно недоступен.")
+
+private fun AgentWebDependencies.requireScheduler(): SchedulerService =
+    scheduler ?: throw ProviderUnavailableException("Scheduler service не настроен.")
+
+private fun parseSchedulerAccounts(text: String): List<SchedulerAccountResponse> {
+    val payload = runCatching { Json.parseToJsonElement(text) }.getOrElse {
+        throw IllegalStateException("Некорректный JSON списка счетов.")
+    }
+    val root = payload as? JsonObject
+    val array = (payload as? JsonArray) ?: listOf(
+        root?.get("accounts"),
+        (root?.get("data") as? JsonObject)?.get("accounts"),
+        (root?.get("payload") as? JsonObject)?.get("accounts"),
+    ).firstNotNullOfOrNull { it as? JsonArray }
+        ?: throw IllegalStateException("Источник не вернул список счетов.")
+    return array.mapNotNull { element ->
+        val item = element as? JsonObject ?: return@mapNotNull null
+        val ref = sequenceOf("account_ref", "ref", "id")
+            .mapNotNull { item[it]?.jsonPrimitive?.contentOrNull?.trim() }
+            .firstOrNull(String::isNotBlank)
+            ?: return@mapNotNull null
+        val name = sequenceOf("name", "account_name", "display_name", "title")
+            .mapNotNull { item[it]?.jsonPrimitive?.contentOrNull?.trim() }
+            .firstOrNull(String::isNotBlank)
+            ?: "Счёт / карта"
+        SchedulerAccountResponse(
+            accountRef = ref,
+            name = name,
+            currency = item["currency"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty().ifBlank { "RUB" },
+            balanceMinor = item["balance_minor"]?.jsonPrimitive?.longOrNull,
+        )
+    }.also {
+        if (it.isEmpty() && array.isNotEmpty()) {
+            throw IllegalStateException("Источник вернул счета без безопасных ссылок.")
+        }
+    }
+}
 
 private fun String?.requiredPathParameter(name: String): String =
     this?.takeIf(String::isNotBlank)
