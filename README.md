@@ -6,7 +6,10 @@ Transaction Import — локальное web-приложение для изв
 ## Возможности
 
 - локальные memory layers: short-term для диалога, working для текущего
-  `ImportDraft`, long-term для общих инструкций и явно подтверждённых решений;
+  `ImportDraft`, long-term для общих инструкций, confirmed decisions и
+  canonical merchant rules;
+- список canonical merchant rules в профиле: aliases, optional numeric terminal
+  suffix, model context и deterministic post-processing;
 - read-only trace и проекция следующего запроса: слои выбираются без нового
   LLM-вызова, а подробности не раскрывают raw provider prompt/payload;
 - общий локальный каталог категорий с глобально уникальными названиями,
@@ -38,10 +41,24 @@ Transaction Import — локальное web-приложение для изв
   сохраняет консервативную локальную оценку occupancy и effective reserve;
 - даты операций в UI показываются как `DD-MM-YYYY HH:mm`, а в SQLite и API
   сохраняются в ISO 8601.
-- локальный MCP-каталог в drawer: приложение подключается к настроенным
-  Streamable HTTP endpoints, показывает их статус, tools и входные JSON Schema;
-  для T-Банк отдельная форма выполняет безопасные read-only `tools/call`;
-
+- конфигурируемый native LLM tool-calling loop: `mcp_servers.enabled` и
+  `allowed_tools` ограничивают поверхность MCP, а bounded limits останавливают
+  цикл; банк возвращает только нормализованные операции;
+- MCP-операции показываются inline внутри сообщения агента с компактной таблицей
+  и добавляются в `ImportDraft` только после явного действия «Принять
+  операции»; отдельной preview-панели ниже диалога нет;
+- post-tool enrichment и обычное извлечение используют merchant и description:
+  технический merchant нормализуется в official/common Russian label, повтор
+  merchant из description удаляется, а явные переводы получают merchant
+  `Перевод` и описание получателя/назначения;
+- MCP post-tool pass получает текущий запрос и тот же релевантный memory context,
+  что и draft: общие инструкции, подтверждённые решения и доступные слои
+  short-term/working/sticky facts; пользовательские правила вроде
+  `BeFit → еда` учитываются только вместе с валидным направлением и активным
+  leaf-каталогом;
+- неоднозначная категория или тип перевода остаются на review;
+- отдельное поле `card_last4` удалено из draft DTO, storage, card/table views и
+  экспортного batch; источник операции остаётся единым полем `Счёт / карта`;
 Приложение не записывает операции в финансовый ledger. Подготовленный JSON —
 конечный результат текущего сценария.
 
@@ -103,8 +120,9 @@ Transaction Import — локальное web-приложение для изв
    `Готово к экспорту`; при ошибке рядом отображается причина;
 5. исправить ошибки в редакторе операций или сообщением; ручных кнопок
    перехода между внутренними этапами нет;
-6. открыть список системных инвариантов в drawer; пользовательские typed rules
-   недоступны для создания и изменения;
+6. открыть список системных инвариантов в drawer и настроить canonical merchant
+   rules: например, `У дома` с alias `U doma` и включённым numeric suffix
+   преобразует `U doma 23`, но не произвольный `U doma Coffee`;
 7. проверить панель memory layers: initial-запрос использует long-term, а
    follow-up по draft — short-term, working и long-term; карточки раскрывают
    безопасную проекцию без нового вызова модели;
@@ -116,8 +134,8 @@ Transaction Import — локальное web-приложение для изв
 10. проверить операции, исправить поля и добавить пользовательские описания;
 11. исключить ненужные операции либо изменить выбор массовым флажком;
 12. нажать `Экспортировать`: приложение построит batch и сразу скачает JSON
-   с выбранными валидными операциями; preview и отдельной кнопки скачивания
-   нет;
+   с выбранными валидными операциями; MCP preview подтверждается отдельно в
+   сообщении агента и не запускает экспорт автоматически;
 13. после экспорта изменить поле операции, сохранить его и снова нажать
    `Экспортировать`: сессия остаётся редактируемой, а повторный JSON содержит
    актуальное значение;
@@ -128,9 +146,10 @@ Transaction Import — локальное web-приложение для изв
    изменения draft.
 
 Явные телефоны с международным префиксом либо меткой `тел.`, `телефон` или
-`phone` маскируются локально с сохранением последних четырёх цифр. Длинные
-account/reference ID без телефонных признаков не изменяются. Несмотря на это,
-не отправляйте реальные финансовые данные внешнему LLM-провайдеру.
+`phone` маскируются локально с сохранением последних четырёх цифр. Для MCP
+raw bank `account_id` и transaction ID остаются внутри адаптера; LLM получает
+только opaque `account_alias` и нормализованные поля операции. Несмотря на
+это, не отправляйте реальные финансовые данные внешнему LLM-провайдеру.
 
 ## Локальный MCP и T-Банк flow
 
@@ -138,14 +157,15 @@ account/reference ID без телефонных признаков не изм�
 серверов находятся в `config/agent.json` в поле `mcp_servers`: приложение
 использует только endpoint URL и не запускает MCP-процессы.
 
-Для fake demo откройте три терминала.
+Для demo откройте три терминала. В первом запускается fake target
+`bank-transactions-mcp-server`; приложение в третьем терминале использует тот же
+endpoint, что и для real target.
 
-Терминал 1 — T-Банк MCP-сервер:
+Терминал 1 — fake T‑Банк MCP target:
 
 ```bash
 cd solutions/bank-transactions-mcp-server
-./gradlew installDist
-MCP_PORT=3001 ./build/install/bank-transactions-mcp-server/bin/bank-transactions-mcp-server
+MCP_PORT=3001 ./gradlew runFakeServer
 ```
 
 Терминал 2 — MCP-сервер чеков:
@@ -164,38 +184,51 @@ cd solutions/transaction-import
 ./web/build/install/transaction-import-web/bin/transaction-import-web
 ```
 
-Откройте `http://127.0.0.1:8080/agent`, затем в drawer:
+1. проверьте каталог `MCP-серверы`, статус серверов и разрешённые tools;
+2. в единой форме T-Банка введите phone `+79990000000`, запросите SMS-код,
+   затем введите OTP `000000` и password `demo`;
+3. для ручной проверки выберите счёт и период с 1 по 30 сентября через
+   нативный date picker, затем нажмите `Вызвать get-account-transactions`;
+4. проверьте JSON результата: opaque `account_ref`, `amount_minor`, дату,
+   merchant и список нормализованных операций.
 
-1. проверьте каталог `MCP-серверы` и две схемы T-Банк tools;
-2. оставьте `fake`, введите synthetic credentials `demo` / `demo` и нажмите
-   `Войти`;
-3. выберите счёт и период с 1 по 30 сентября через нативный date picker, затем
-   нажмите `Вызвать get-account-transactions`;
-4. проверьте JSON результата: счёт, `amount_minor`, дату, merchant и список
-   операций.
-
-Fake mode детерминирован и не обращается к банку. Fake и real используют
-раздельные login формы: fake показывает только synthetic demo login/password.
-Real — пошаговый flow: сначала видны только phone и `Получить SMS-код`; после
-`requires_otp=true` телефон становится read-only, появляются OTP, `Войти`,
-`Повторить код` отправляет только текущий phone, запускает новый challenge и
-может восстановить локальный challenge после restart MCP; OTP/password не
-передаются и кнопка блокируется на 30 секунд. После `requires_password=true`
-появляется password, resend скрывается до смены номера. `Изменить номер`
-очищает challenge и возвращает первый шаг.
+Fake target детерминирован, не обращается к банку и использует synthetic
+значения только внутри server demo. Он проходит тот же phone → OTP → password
+flow, что и real target; web UI не показывает выбор backend и не меняет форму.
 Ошибки остаются на текущем шаге и очищают введённые OTP/password.
 
-`real` выбирается явно для собственного read-only аккаунта: private API не
-является официальным публичным контрактом, credentials передаются только на
+Для real сценария остановите fake target и запустите вместо него real target:
+
+```bash
+cd solutions/bank-transactions-mcp-server
+./gradlew installDist
+MCP_PORT=3001 ./build/install/bank-transactions-mcp-server/bin/bank-transactions-mcp-server
+```
+
+Приложение, его конфигурация и пользовательский flow при этом не меняются.
+Real login предназначен только для собственного read-only аккаунта: private API
+не является официальным публичным контрактом, credentials передаются только на
 loopback во время login. После успешного login session envelope сохраняется
 MCP-сервером в OS credential store; при недоступном store session живёт только
-до restart и это явно показывается пользователю. Logout и отказ банка удаляют
-сохранённый envelope.
+до restart и это явно показывается пользователю. Явный logout real session,
+повреждённый envelope и подтверждённая финальная ревокация удаляют сохранённый
+envelope.
 
 После обновления страницы сохранённая session проверяется сервером; при успехе
 показываются статус активной session и только кнопка `Выйти`, login-формы
-скрыты. Нативные поля периода отображаются в формате locale браузера, а их
-значения отправляются в MCP-контракте как `YYYY-MM-DD`.
+скрыты. При временном сетевом/VPN/региональном отказе показывается
+recoverable status, envelope сохраняется, а кнопка `Повторить проверку`
+повторяет восстановление без OTP/password. Нативные поля периода отображаются
+в формате locale браузера, а их значения отправляются в MCP-контракте как
+`YYYY-MM-DD`.
+
+Для real session T-Банк MCP-server хранит access/refresh metadata в защищённом
+session envelope, обновляет access token заранее перед account/transaction
+tool и сохраняет rotated refresh token. Если refresh отклонён, сервер пытается
+выполнить silent relogin через сохранённый SSO cookie; OTP и password повторно
+не запрашиваются, пока refresh или SSO session действительны. Временная
+недоступность не инвалидирует session; подтверждённая финальная ревокация
+переводит UI в обычный real login.
 
 Phone, password, OTP, access/refresh tokens, session IDs, auth cookies,
 fingerprints и raw private API responses не попадают в БД, logs, LLM context или
@@ -213,13 +246,75 @@ machine проверяется `MockEngine`. Реальные credentials и SMS
 используются; real smoke выполняется отдельно только пользователем на своём
 аккаунте.
 
-Приложение использует explicit form flow, а не автономный LLM
-tool-calling loop: UI формирует MCP arguments, backend вызывает `tools/call`,
-а ответ показывает в панели результата.
+Основной путь MCP использует native LLM tool-calling loop. После сообщения
+пользователя агент получает только configured tools: сервер должен быть
+`enabled`, а имя tool должно входить в `allowed_tools`. Каждая итерация и
+число вызовов ограничены `mcp_tool_loop`; автономный scheduler запускается
+только по явно сохранённой task и не использует этот conversational loop.
+
+Для T-Банк LLM выбирает только `account_alias`. MCP-адаптер разрешает alias в
+внутренний raw account ID, получает операции, удаляет идентификаторы и
+возвращает нормализованные `date`, `amount_minor`, `currency`, `merchant` и
+`description`. Приложение повторно allowlist-ит DTO перед следующим LLM
+сообщением. Post-tool pass получает текущий запрос и релевантные memory layers
+сессии, обогащает merchant и description по `merchant + description`, применяет
+общие инструкции и подтверждённые решения к категории и выбирает только
+совместимую конечную категорию. Узнаваемые бренды нормализуются в
+official/common Russian label, повтор merchant из description удаляется, а
+явный перевод получает merchant `Перевод` и описание получателя/назначения.
+Неоднозначный результат остаётся на review. Полученный список отображается
+inline в сообщении агента; только кнопка «Принять операции» вызывает изменение
+`ImportDraft`.
 
 При старте и по кнопке «Обновить» приложение выполняет через HTTP MCP
-`initialize` и `tools/list`. Вызов `tools/call` выполняется только после
-локального login и явного действия пользователя в форме.
+`initialize` и `tools/list`. Ручная T-Банк форма `tools/call` остаётся
+диагностическим способом проверки того же read-only контракта и не заменяет
+native loop.
+
+## Фоновый импорт и enrichment чеков
+
+Панель `Фоновый импорт` в drawer сохраняет scheduler tasks в той же SQLite
+базе, что и сессии. Для task пользователь выбирает безопасные `account_ref`,
+дату начала, cadence в минутах и timezone. Task можно поставить на паузу,
+возобновить, запустить немедленно и открыть историю запусков.
+
+Один запуск последовательно:
+
+1. запрашивает операции через read-only `tbank-transactions`;
+2. ищет и получает кандидатов чеков через read-only `receipts`;
+3. отбрасывает кандидатов с несовпадающими абсолютной суммой, валютой или
+   датой за пределами ±1 дня;
+4. при нескольких допустимых кандидатах использует LLM только для выбора
+   непрозрачного alias; невалидный или недостаточно уверенный выбор оставляет
+   операцию неоднозначной;
+5. сохраняет `items[]` чека и безопасный `source_ref` в общий редактируемый
+   session draft.
+
+Первый успешный запуск создаёт session. Следующие запуски append-ят данные в
+ту же session, пропускают уже сохранённые `source_ref` и не перезаписывают
+ручные правки. Cursor и история записываются только после успешного
+сохранения draft; при ошибке cursor не продвигается, а повторный запуск
+получает окно с последней успешной даты.
+
+Для D19 порядок handoff виден в trace: bank transactions → receipt
+candidates → receipt details → match proposal → session persistence →
+aggregate result. Для D20 scheduler публикует только bounded status/history/run
+tools; scheduler не пишет в банковский ledger и не даёт модели raw receipt
+keys, account IDs или transaction IDs.
+
+Локальный fake receipts target запускается так:
+
+```bash
+cd solutions/receipts-mcp-server
+MCP_PORT=3002 ./gradlew runFakeServer
+```
+
+Synthetic login использует `+79990000000`, OTP `000000` и password `demo`.
+Real LKDR login не является частью обычных тестов: ввод выполняется только
+пользователем на loopback, разрешены только явные HTTPS endpoints, CAPTCHA,
+MFA и anti-bot обход не выполняются. Access/refresh envelope хранится в OS
+credential store; raw tax receipt keys, tokens и credentials не попадают в
+SQLite, LLM context или application logs.
 
 ## Конфигурация провайдеров
 
@@ -284,26 +379,35 @@ tool-calling loop: UI формирует MCP arguments, backend вызывает
 | `temperature` | `null` или число `0.0..2.0` | Температура всех агентных LLM-вызовов. `null` не добавляет поле в запрос и оставляет решение провайдеру. |
 | `max_tokens` | положительное целое | Максимум output tokens обычного agent-вызова. Фактическое значение ограничивается `max_output_tokens` модели, если оно задано. Для summary и facts используются отдельные поля `summary_max_tokens` и `facts_max_tokens`. |
 | `default_user_prompt` | строка, максимум 8000 символов | Начальные общие инструкции пользователя. Они записываются в SQLite при первом создании настроек; изменение файла не перезаписывает уже сохранённое значение. |
-| `context_management` | объект или `null` | Выбирает одну стратегию контекста для новых сессий. |
-| `mcp_servers` | массив объектов | HTTP endpoints локальных MCP-серверов для каталога; по умолчанию пустой список. |
-
-`default_*` и `context_management` фиксируются в snapshot сессии при её
-создании. Поэтому после изменения `agent.json` нужно перезапустить приложение и
-создать новую сессию; существующие сессии продолжают работать со своей
-стратегией и provider/model/reasoning. Provider/model/reasoning текущей сессии
-можно изменить в web-интерфейсе, стратегию контекста — нет.
+| `mcp_servers` | массив объектов | HTTP или in-process logical MCP servers, их enabled-флаг и allowlist tools. |
+| `mcp_tool_loop` | объект | Native tool-calling loop и его bounded limits. |
 
 ### Поля `mcp_servers`
 
 Каждый объект содержит:
 
 - `id` и `display_name` — стабильный идентификатор и название в drawer;
-- `endpoint` — URL Streamable HTTP MCP endpoint;
-- `enabled` — признак включения, по умолчанию `true`.
+- `endpoint` — URL Streamable HTTP MCP endpoint либо `in-process://<id>` для
+  встроенного logical server;
+- `enabled` — признак включения, по умолчанию `true`;
+- `allowed_tools` — точный список имён tools, которые можно рекламировать и
+  вызывать native loop; пустой список не даёт LLM доступных tools.
 
-Приложение не запускает и не останавливает MCP-серверы. Оно сохраняет
-MCP-соединение до остановки приложения и повторно запрашивает `tools/list` по
-кнопке «Обновить».
+Приложение не запускает и не останавливает внешние MCP-серверы. Оно сохраняет
+HTTP MCP-соединение до остановки приложения и повторно запрашивает `tools/list`
+по кнопке «Обновить». Scheduler остаётся встроенным logical server и вызывает
+только allowlisted source tools через тот же catalog; серверы с
+`enabled=false` не подключаются.
+
+### Поля `mcp_tool_loop`
+
+| Поле | Тип и ограничения | Назначение |
+| --- | --- | --- |
+| `enabled` | boolean | Включает native tool-calling path; `false` сохраняет обычный LLM import flow. |
+| `max_iterations` | целое `1..32` | Верхняя граница раундов LLM в одном bounded loop. |
+| `max_tool_calls` | целое `1..64` | Общий лимит MCP-вызовов одного сообщения. |
+| `call_timeout_ms` | целое `1000..300000` | Таймаут каждого MCP-вызова. |
+| `result_mode` | `normalized` | Фиксирует безопасный DTO-режим результата. |
 
 ### Поля `context_management`
 
@@ -514,7 +618,8 @@ Browser-тест проверяет создание сессии, отобра�
 скачивания JSON с редактированием после первого экспорта и hover/focus memory
 layers в светлой и тёмной темах, LLM-flow, native token metrics и рост input
 при повторной отправке истории, table/card switch с несохранёнными правками,
-автоматический card fallback ниже 768 px, reload/restart и изолированное
+отсутствие отдельного `card_last4` в редакторе и экспорте, inline MCP preview
+внутри сообщения агента с кнопкой принятия, reload/restart и изолированное
 удаление. Отдельный overflow-сценарий подтверждает русскую ошибку без
 изменения messages и draft.
 `playwrightInstall` нужен один раз на окружение после изменения версии Playwright.

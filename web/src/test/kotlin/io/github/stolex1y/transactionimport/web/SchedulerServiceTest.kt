@@ -99,6 +99,10 @@ class SchedulerServiceTest {
             arguments: JsonObject,
         ): TbankToolCallResponse {
             return when (serverId to tool) {
+                "tbank-transactions" to "list-accounts" -> TbankToolCallResponse(
+                    tool = tool,
+                    text = """[{"account_ref":"transaction-ref-account-1","name":"Основной счёт","currency":"RUB"}]""",
+                )
                 "tbank-transactions" to "get-account-transactions" -> {
                     val from = arguments["from"]?.jsonPrimitive?.contentOrNull.orEmpty()
                     bankFromDates += from

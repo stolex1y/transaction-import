@@ -7,20 +7,48 @@
   "default_user_prompt": "",
   "context_management": {
     "strategy": "summary",
-    "recent_messages": 5,
-    "summary_batch_messages": 5,
-    "summary_max_tokens": 1024
+    "recent_messages": 20,
+    "summary_batch_messages": 10,
+    "summary_max_tokens": 20000
   },
   "mcp_servers": [
     {
       "id": "tbank-transactions",
       "display_name": "Т-Банк: счета и операции",
-      "endpoint": "http://127.0.0.1:3001/mcp"
+      "endpoint": "http://127.0.0.1:3001/mcp",
+      "enabled": true,
+      "allowed_tools": [
+        "list-accounts",
+        "get-account-transactions"
+      ]
     },
     {
       "id": "receipts",
       "display_name": "Чеки",
-      "endpoint": "http://127.0.0.1:3002/mcp"
+      "endpoint": "http://127.0.0.1:3002/mcp",
+      "enabled": true,
+      "allowed_tools": [
+        "search-receipts",
+        "get-receipt"
+      ]
+    },
+    {
+      "id": "scheduler",
+      "display_name": "Планировщик импорта",
+      "endpoint": "in-process://scheduler",
+      "enabled": true,
+      "allowed_tools": [
+        "list-scheduled-tasks",
+        "get-scheduler-history",
+        "run-scheduled-task"
+      ]
     }
-  ]
+  ],
+  "mcp_tool_loop": {
+    "enabled": true,
+    "max_iterations": 6,
+    "max_tool_calls": 8,
+    "call_timeout_ms": 30000,
+    "result_mode": "normalized"
+  }
 }

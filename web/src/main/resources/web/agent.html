@@ -42,55 +42,65 @@
             <p id="mcp-catalog-status" class="control-note">Проверяем подключение…</p>
             <div id="mcp-catalog-list" class="mcp-catalog-list"></div>
         </section>
+        <section class="scheduler-panel" aria-labelledby="scheduler-title">
+            <div class="section-heading">
+                <h2 id="scheduler-title">Фоновый импорт</h2>
+                <button id="refresh-scheduler" class="compact-button" type="button">Обновить</button>
+            </div>
+            <p id="scheduler-status" class="control-note">
+                Настройте периодическое чтение операций и чеков в одну SQLite-сессию.
+            </p>
+            <form id="scheduler-form" class="category-form">
+                <label for="scheduler-name">Название задания</label>
+                <input id="scheduler-name" maxlength="120" value="Ежедневный импорт" required>
+                <label for="scheduler-accounts">Счета</label>
+                <select id="scheduler-accounts" multiple size="4" required></select>
+                <label for="scheduler-start-date">Начальная дата</label>
+                <input id="scheduler-start-date" type="date" value="2026-09-01" required>
+                <label for="scheduler-interval">Период, минут</label>
+                <input id="scheduler-interval" type="number" min="1" max="43200" value="1440" required>
+                <label for="scheduler-time-zone">Часовой пояс</label>
+                <input id="scheduler-time-zone" value="UTC" maxlength="80" required>
+                <button id="scheduler-submit" type="submit">Создать фоновое задание</button>
+            </form>
+            <div id="scheduler-task-list" class="scheduler-task-list"></div>
+            <div id="scheduler-history" class="scheduler-history"></div>
+        </section>
         <section class="tbank-panel" aria-labelledby="tbank-title">
             <div class="section-heading">
                 <h2 id="tbank-title">Т-Банк MCP</h2>
                 <span id="tbank-session-status" class="mcp-server-status">не выполнен login</span>
             </div>
-            <div class="tbank-login-switch" role="tablist" aria-label="Режим T-Банк login">
-                <button id="tbank-show-fake" class="compact-button" type="button"
-                        role="tab" aria-selected="true">Fake demo</button>
-                <button id="tbank-show-real" class="compact-button" type="button"
-                        role="tab" aria-selected="false">Real T-Банк</button>
-            </div>
-            <form id="tbank-fake-login-form" class="category-form">
-                <label for="tbank-fake-login">Demo login</label>
-                <input id="tbank-fake-login" name="fake-login" autocomplete="off" value="demo" required>
-                <label for="tbank-fake-password">Demo password</label>
-                <input id="tbank-fake-password" name="fake-password" type="password"
-                       autocomplete="off" value="demo" required>
-                <div class="category-form-actions">
-                    <button id="tbank-fake-submit" type="submit">Войти в fake mode</button>
-                </div>
-            </form>
-            <form id="tbank-real-login-form" class="category-form" hidden>
-                <label for="tbank-real-phone">Телефон</label>
-                <input id="tbank-real-phone" name="real-phone" autocomplete="off"
+            <form id="tbank-login-form" class="category-form">
+                <label for="tbank-phone">Телефон</label>
+                <input id="tbank-phone" name="phone" autocomplete="off"
                        placeholder="+79991234567" required>
-                <div id="tbank-real-otp-step" hidden>
-                    <label for="tbank-real-otp">Одноразовый код из SMS</label>
-                    <input id="tbank-real-otp" name="real-otp" inputmode="numeric"
+                <div id="tbank-otp-step" hidden>
+                    <label for="tbank-otp">Одноразовый код из SMS</label>
+                    <input id="tbank-otp" name="otp" inputmode="numeric"
                            autocomplete="one-time-code">
                     <div class="category-form-actions">
-                        <button id="tbank-real-resend" class="secondary-button compact-button"
+                        <button id="tbank-resend" class="secondary-button compact-button"
                                 type="button">Повторить код</button>
-                        <button id="tbank-real-change-phone" class="secondary-button compact-button"
+                        <button id="tbank-change-phone" class="secondary-button compact-button"
                                 type="button">Изменить номер</button>
                     </div>
                 </div>
-                <div id="tbank-real-password-field" hidden>
-                    <label for="tbank-real-password">Пароль (если запросил банк)</label>
-                    <input id="tbank-real-password" name="real-password" type="password"
+                <div id="tbank-password-field" hidden>
+                    <label for="tbank-password">Пароль (если запросил банк)</label>
+                    <input id="tbank-password" name="password" type="password"
                            autocomplete="off" disabled>
                 </div>
                 <div class="category-form-actions">
-                    <button id="tbank-real-submit" type="submit">Получить SMS-код</button>
+                    <button id="tbank-submit" type="submit">Получить SMS-код</button>
                 </div>
             </form>
             <div class="category-form-actions">
+                <button id="tbank-session-retry" class="secondary-button compact-button"
+                        type="button" hidden>Повторить проверку</button>
                 <button id="tbank-logout" class="danger-button" type="button" hidden>Выйти</button>
             </div>
-            <p id="tbank-login-status" class="control-note">Синтетические credentials: demo / demo.</p>
+            <p id="tbank-login-status" class="control-note">Введите номер телефона и запросите SMS-код.</p>
             <form id="tbank-query-form" class="category-form" hidden>
                 <label for="tbank-account">Счёт</label>
                 <select id="tbank-account" required></select>
@@ -113,6 +123,28 @@
             <p class="control-note">Инструкции применяются к следующим сообщениям во всех сессиях.</p>
             <button id="save-preferences" class="secondary-button" type="submit">Сохранить инструкции</button>
         </form>
+        <section class="merchant-rules" aria-labelledby="merchant-rules-title">
+            <h2 id="merchant-rules-title">Канонические названия магазинов</h2>
+            <p class="control-note">Правила принадлежат текущему профилю и применяются до и после ответа модели.</p>
+            <form id="merchant-rule-form" class="category-form">
+                <input id="merchant-rule-edit-id" type="hidden">
+                <label for="merchant-rule-canonical-name">Каноническое название <span aria-hidden="true">*</span></label>
+                <input id="merchant-rule-canonical-name" maxlength="120" required>
+                <label for="merchant-rule-aliases">Варианты названия <span aria-hidden="true">*</span></label>
+                <textarea id="merchant-rule-aliases" rows="3" maxlength="2400"
+                          placeholder="По одному варианту в строке или через запятую" required></textarea>
+                <label for="merchant-rule-suffix-policy">Совпадение числового суффикса</label>
+                <select id="merchant-rule-suffix-policy">
+                    <option value="none">Только указанные варианты</option>
+                    <option value="numeric_terminal">Также вариант с числовым суффиксом</option>
+                </select>
+                <div class="category-form-actions">
+                    <button id="save-merchant-rule" class="secondary-button compact-button" type="submit">Добавить правило</button>
+                    <button id="cancel-merchant-rule-edit" class="compact-button" type="button" hidden>Отмена</button>
+                </div>
+            </form>
+            <div id="merchant-rule-list" class="category-list"></div>
+        </section>
         <section class="category-manager" aria-labelledby="categories-title">
             <h2 id="categories-title">Категории операций</h2>
             <p class="control-note">Общий справочник для всех сессий. В операции выбираются только конечные категории.</p>

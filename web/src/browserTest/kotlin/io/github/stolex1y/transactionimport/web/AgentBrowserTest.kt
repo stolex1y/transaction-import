@@ -43,6 +43,54 @@ class AgentBrowserTest {
                         val baseUrl = "http://127.0.0.1:$port"
                         page.navigate("$baseUrl/agent")
                         waitForAgentInitialized(page)
+                        assertTrue(
+                            page.evaluate(
+                                """
+                                    () => {
+                                      const form = document.querySelector("#tbank-query-form");
+                                      const event = new Event("submit", { bubbles: true, cancelable: true });
+                                      form.dispatchEvent(event);
+                                      return event.defaultPrevented;
+                                    }
+                                """.trimIndent(),
+                            ) as Boolean,
+                        )
+                        assertEquals(
+                            1,
+                            page.evaluate(
+                                """() => normalizeTbankAccounts({
+                                    content: [{
+                                        text: JSON.stringify({
+                                            data: { accounts: [{ id: 'account-1', account_name: 'Основной счёт' }] }
+                                        })
+                                    }]
+                                }).length""",
+                            ).toString().toInt(),
+                        )
+                        val emptyAccountsStatus = page.evaluate(
+                            """
+                                async () => {
+                                  const originalFetch = window.fetch;
+                                  window.fetch = async () => new Response(
+                                    JSON.stringify({ is_error: false, text: "[]" }),
+                                    { status: 200, headers: { "Content-Type": "application/json" } },
+                                  );
+                                  try {
+                                    const result = await loadTbankAccounts();
+                                    return JSON.stringify({
+                                      result,
+                                      className: document.querySelector("#tbank-login-status").className,
+                                      text: document.querySelector("#tbank-login-status").textContent,
+                                    });
+                                  } finally {
+                                    window.fetch = originalFetch;
+                                  }
+                                }
+                            """.trimIndent(),
+                        ).toString()
+                        assertTrue(emptyAccountsStatus.contains("\"result\":false"))
+                        assertTrue(emptyAccountsStatus.contains("control-note error"))
+                        assertTrue(emptyAccountsStatus.contains("session отвечает"))
                         page.locator("#empty-new-session").click()
                         waitForSessionReady(page)
                         assertTrue(page.locator("#context-strategy-note").textContent().contains("Summary"))
@@ -64,6 +112,29 @@ class AgentBrowserTest {
                             "Ответ агента получен. Черновик обновлён.",
                             page.locator("#agent-status").textContent(),
                         )
+                        page.evaluate(
+                            """
+                                () => renderMcpPreview({
+                                  id: "browser-preview",
+                                  session_revision: 1,
+                                  transactions: [{
+                                    occurred_at: "2026-02-08",
+                                    amount_minor: -499,
+                                    currency: "RUB",
+                                    merchant: "Булочная Ф. Вол",
+                                    description: "Свежая выпечка",
+                                    category_id: "food.cafe",
+                                    category_issue: null,
+                                    source_label: "Основной счёт"
+                                  }]
+                                })
+                            """.trimIndent(),
+                        )
+                        assertEquals(0, page.locator("#mcp-preview-panel").count())
+                        assertEquals(1, page.locator("#message-list .message.assistant .mcp-inline-preview").count())
+                        assertEquals(6, page.locator(".mcp-inline-preview-table th").count())
+                        assertEquals("Принять операции", page.locator(".mcp-inline-preview button").last().textContent())
+                        page.evaluate("() => renderMcpPreview(null)")
                         assertEquals(1, page.locator("#metrics-table-body tr").count())
                         assertTrue(page.locator("#metrics-summary").textContent().contains("За сессию всего"))
                         page.locator("#agent-message").fill("уточнение ".repeat(700))
@@ -149,6 +220,9 @@ class AgentBrowserTest {
                         )
 
                         assertEquals("table", page.locator("#draft-editor").getAttribute("data-view"))
+                        assertEquals(12, page.locator("#operation-table thead th").count())
+                        assertFalse(page.locator("#operation-table thead th").allTextContents().contains("Карта"))
+                        assertEquals(0, page.locator("input[name='card_last4']").count())
                         assertEquals(0, page.locator(".operation-card").count())
                         assertEquals(
                             "1",
@@ -216,6 +290,7 @@ class AgentBrowserTest {
                             "Проверено в браузере",
                             firstCard.locator("input[name='description']").inputValue(),
                         )
+                        assertEquals(0, page.locator("input[name='card_last4']").count())
 
                         var secondCard = page.locator("article[data-transaction-id='2']")
                         assertTrue(secondCard.locator(".field-error").count() > 0)
@@ -270,6 +345,7 @@ class AgentBrowserTest {
                             "Проверено в браузере",
                             transactions.single().jsonObject["description"]!!.jsonPrimitive.content,
                         )
+                        assertFalse(transactions.single().jsonObject.containsKey("card_last4"))
 
                         page.locator("#card-view").click()
                         page.reload()
@@ -364,6 +440,14 @@ class AgentBrowserTest {
                             "() => document.querySelector('#agent-status')?.textContent === 'Общие инструкции сохранены.'",
                         )
 
+                        page.locator("#merchant-rule-canonical-name").fill("У дома")
+                        page.locator("#merchant-rule-aliases").fill("U doma")
+                        page.locator("#merchant-rule-suffix-policy").selectOption("numeric_terminal")
+                        page.locator("#merchant-rule-form button[type='submit']").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#agent-status')?.textContent === 'Merchant rule добавлено.'",
+                        )
+                        assertTrue(page.locator("#merchant-rule-list").textContent().contains("У дома"))
                         page.locator("#drawer-new-session").click()
                         page.locator("#agent-workspace").waitFor()
                         assertEquals(1, page.locator("#memory-layer-list .memory-layer").count())
@@ -762,6 +846,130 @@ class AgentBrowserTest {
             }
         } finally {
             server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun rendersSafeMarkdownSubsetWithoutRawHtml() {
+        val database = Files.createTempFile("agent-browser-markdown-", ".sqlite")
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString()))
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(
+                    BrowserType.LaunchOptions().setHeadless(true),
+                ).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        val result = JSON.parseToJsonElement(
+                            page.evaluate(
+                                """
+                                    () => {
+                                      const host = document.createElement("div");
+                                      renderMarkdown(
+                                        host,
+                                        "| Название | Сумма |\n| --- | --- |\n| **Кафе** | <script>bad</script> |\n\n- Проверено",
+                                      );
+                                      return JSON.stringify({
+                                        tables: host.querySelectorAll("table").length,
+                                        strong: host.querySelectorAll("strong").length,
+                                        scripts: host.querySelectorAll("script").length,
+                                        text: host.textContent,
+                                        html: host.innerHTML,
+                                      });
+                                    }
+                                """.trimIndent(),
+                            ).toString(),
+                        ).jsonObject
+                        assertEquals(1, result["tables"]!!.jsonPrimitive.content.toInt())
+                        assertEquals(1, result["strong"]!!.jsonPrimitive.content.toInt())
+                        assertEquals(0, result["scripts"]!!.jsonPrimitive.content.toInt())
+                        assertTrue(result["text"]!!.jsonPrimitive.content.contains("<script>bad</script>"))
+                        assertTrue(result["html"]!!.jsonPrimitive.content.contains("&lt;script&gt;"))
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 1_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun keepsTbankSpacingAndParsesAccountEnvelope() {
+        val database = Files.createTempFile("agent-browser-tbank-", ".sqlite")
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString()))
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(
+                    BrowserType.LaunchOptions().setHeadless(true),
+                ).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        assertEquals(1, page.locator("#tbank-login-form").count())
+                        assertEquals(0, page.locator("#tbank-show-fake").count())
+                        assertEquals(0, page.locator("#tbank-fake-login-form").count())
+                        val result = JSON.parseToJsonElement(
+                            page.evaluate(
+                                """
+                                    () => {
+                                      const preview = renderInlineMcpPreview({
+                                        transactions: [{
+                                          occurred_at: "2026-02-08",
+                                          amount_minor: -100,
+                                          currency: "RUB",
+                                          merchant: "Додо Пицца",
+                                          description: "",
+                                        }],
+                                      });
+                                      tbankSession = {
+                                        authenticated: true,
+                                        persistence_status: "persisted",
+                                        persistence_message: null,
+                                      };
+                                      renderTbankSession();
+                                      return JSON.stringify({
+                                        margin: getComputedStyle(
+                                          document.querySelector("#tbank-logout").parentElement,
+                                        ).marginTop,
+                                        direct: normalizeTbankAccounts([
+                                          { account_ref: "a", name: "Основной счёт" },
+                                        ]).length,
+                                        nested: normalizeTbankAccounts({
+                                          payload: {
+                                            accounts: [{ account_ref: "b", name: "Накопительный счёт" }],
+                                          },
+                                        }).length,
+                                        status: document.querySelector("#tbank-session-status").textContent,
+                                        description: preview.querySelector("tbody td:nth-child(4)").textContent,
+                                      });
+                                    }
+                                """.trimIndent(),
+                            ).toString(),
+                        ).jsonObject
+                        assertEquals("12px", result["margin"]!!.jsonPrimitive.content)
+                        assertEquals(1, result["direct"]!!.jsonPrimitive.content.toInt())
+                        assertEquals(1, result["nested"]!!.jsonPrimitive.content.toInt())
+                        assertEquals(
+                            "Сессия активна · Сессия восстановима после перезапуска",
+                            result["status"]!!.jsonPrimitive.content,
+                        )
+                        assertEquals("", result["description"]!!.jsonPrimitive.content)
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 1_000)
             database.deleteIfExists()
         }
     }

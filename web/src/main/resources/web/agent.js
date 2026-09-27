@@ -11,21 +11,27 @@ const elements = {
     mcpRefresh: document.querySelector("#refresh-mcp-catalog"),
     mcpStatus: document.querySelector("#mcp-catalog-status"),
     mcpList: document.querySelector("#mcp-catalog-list"),
-    tbankFakeLoginForm: document.querySelector("#tbank-fake-login-form"),
-    tbankFakeLogin: document.querySelector("#tbank-fake-login"),
-    tbankFakePassword: document.querySelector("#tbank-fake-password"),
-    tbankRealLoginForm: document.querySelector("#tbank-real-login-form"),
-    tbankRealPhone: document.querySelector("#tbank-real-phone"),
-    tbankRealOtpStep: document.querySelector("#tbank-real-otp-step"),
-    tbankRealPasswordField: document.querySelector("#tbank-real-password-field"),
-    tbankRealPassword: document.querySelector("#tbank-real-password"),
-    tbankRealOtp: document.querySelector("#tbank-real-otp"),
-    tbankRealSubmit: document.querySelector("#tbank-real-submit"),
-    tbankRealResend: document.querySelector("#tbank-real-resend"),
-    tbankRealChangePhone: document.querySelector("#tbank-real-change-phone"),
-    tbankShowFake: document.querySelector("#tbank-show-fake"),
-    tbankShowReal: document.querySelector("#tbank-show-real"),
-    tbankLoginSwitch: document.querySelector(".tbank-login-switch"),
+    schedulerRefresh: document.querySelector("#refresh-scheduler"),
+    schedulerStatus: document.querySelector("#scheduler-status"),
+    schedulerForm: document.querySelector("#scheduler-form"),
+    schedulerName: document.querySelector("#scheduler-name"),
+    schedulerAccounts: document.querySelector("#scheduler-accounts"),
+    schedulerStartDate: document.querySelector("#scheduler-start-date"),
+    schedulerInterval: document.querySelector("#scheduler-interval"),
+    schedulerTimeZone: document.querySelector("#scheduler-time-zone"),
+    schedulerSubmit: document.querySelector("#scheduler-submit"),
+    schedulerTaskList: document.querySelector("#scheduler-task-list"),
+    schedulerHistory: document.querySelector("#scheduler-history"),
+    tbankLoginForm: document.querySelector("#tbank-login-form"),
+    tbankPhone: document.querySelector("#tbank-phone"),
+    tbankOtpStep: document.querySelector("#tbank-otp-step"),
+    tbankPasswordField: document.querySelector("#tbank-password-field"),
+    tbankPassword: document.querySelector("#tbank-password"),
+    tbankOtp: document.querySelector("#tbank-otp"),
+    tbankSubmit: document.querySelector("#tbank-submit"),
+    tbankResend: document.querySelector("#tbank-resend"),
+    tbankChangePhone: document.querySelector("#tbank-change-phone"),
+    tbankSessionRetry: document.querySelector("#tbank-session-retry"),
     tbankLogout: document.querySelector("#tbank-logout"),
     tbankSessionStatus: document.querySelector("#tbank-session-status"),
     tbankLoginStatus: document.querySelector("#tbank-login-status"),
@@ -39,6 +45,14 @@ const elements = {
     globalUserPrompt: document.querySelector("#global-user-prompt"),
     savePreferences: document.querySelector("#save-preferences"),
     confirmedDecisionsList: document.querySelector("#confirmed-decisions-list"),
+    merchantRuleForm: document.querySelector("#merchant-rule-form"),
+    merchantRuleEditId: document.querySelector("#merchant-rule-edit-id"),
+    merchantRuleCanonicalName: document.querySelector("#merchant-rule-canonical-name"),
+    merchantRuleAliases: document.querySelector("#merchant-rule-aliases"),
+    merchantRuleSuffixPolicy: document.querySelector("#merchant-rule-suffix-policy"),
+    saveMerchantRule: document.querySelector("#save-merchant-rule"),
+    cancelMerchantRuleEdit: document.querySelector("#cancel-merchant-rule-edit"),
+    merchantRuleList: document.querySelector("#merchant-rule-list"),
     categoryForm: document.querySelector("#category-form"),
     categoryEditId: document.querySelector("#category-edit-id"),
     categoryName: document.querySelector("#category-name"),
@@ -88,6 +102,7 @@ const elements = {
     status: document.querySelector("#agent-status"),
 };
 let taskInvariantCatalog = { system: [] };
+let schedulerState = { accounts: [], tasks: [] };
 const THEME_KEY = "smart-expense-theme";
 const ACTIVE_SESSION_KEY = "smart-expense-active-session";
 const VIEW_KEY = "smart-expense-operation-view";
@@ -102,12 +117,14 @@ let memoryProjection = null;
 let memoryProjectionRequest = 0;
 let expandedMemoryLayer = null;
 let editingCategoryId = "";
+let editingMerchantRuleId = "";
+let lastPreferences = null;
 let busy = false;
+let activeMcpPreview = null;
 let preferredView = localStorage.getItem(VIEW_KEY) === "cards" ? "cards" : "table";
 let workingDraft = new Map();
 let dirtyFields = new Map();
-let realLoginStage = "phone";
-let tbankLoginMode = "fake";
+let loginStage = "phone";
 let resendCooldownTimer = null;
 let toastTimer = null;
 
@@ -125,8 +142,10 @@ function ensureMcpElements() {
 }
 
 ensureMcpElements();
-showTbankLoginMode("fake");
 initializeTheme();
+elements.schedulerRefresh?.addEventListener("click", loadSchedulerPanel);
+elements.schedulerForm?.addEventListener("submit", createSchedulerTask);
+elements.schedulerTaskList?.addEventListener("click", handleSchedulerTaskClick);
 elements.themeToggle.addEventListener("click", toggleTheme);
 elements.openDrawer.addEventListener("click", openDrawer);
 elements.closeDrawer.addEventListener("click", closeDrawer);
@@ -138,15 +157,16 @@ for (const button of [elements.newSession, elements.drawerNewSession, elements.e
     button.addEventListener("click", createSession);
 }
 elements.mcpRefresh?.addEventListener("click", loadMcpCatalog);
-elements.tbankFakeLoginForm?.addEventListener("submit", handleTbankLogin);
-elements.tbankRealLoginForm?.addEventListener("submit", handleTbankLogin);
-elements.tbankRealResend?.addEventListener("click", handleTbankResend);
-elements.tbankRealChangePhone?.addEventListener("click", handleTbankChangePhone);
-elements.tbankShowFake?.addEventListener("click", () => showTbankLoginMode("fake"));
-elements.tbankShowReal?.addEventListener("click", () => showTbankLoginMode("real"));
+elements.tbankLoginForm?.addEventListener("submit", handleTbankLogin);
+elements.tbankResend?.addEventListener("click", handleTbankResend);
+elements.tbankChangePhone?.addEventListener("click", handleTbankChangePhone);
+elements.tbankSessionRetry?.addEventListener("click", handleTbankSessionRetry);
 elements.tbankLogout?.addEventListener("click", handleTbankLogout);
 elements.tbankQueryForm?.addEventListener("submit", handleTbankTransactions);
 elements.preferencesForm.addEventListener("submit", savePreferences);
+elements.merchantRuleForm.addEventListener("submit", saveMerchantRuleForm);
+elements.cancelMerchantRuleEdit.addEventListener("click", resetMerchantRuleForm);
+elements.merchantRuleList.addEventListener("click", handleMerchantRuleListClick);
 elements.categoryForm.addEventListener("submit", saveCategoryForm);
 elements.cancelCategoryEdit.addEventListener("click", resetCategoryForm);
 elements.categoryParent.addEventListener("change", syncCategoryTypeControl);
@@ -196,6 +216,7 @@ async function initialize() {
         renderTbankSession();
         renderPreferences(preferences);
         renderCategoryManager();
+        void loadSchedulerPanel();
         renderSessionList();
         if (tbankSession.authenticated) {
             await loadTbankAccounts();
@@ -212,6 +233,36 @@ async function initialize() {
         renderEmptyState();
     } finally {
         setBusy(false);
+    }
+}
+
+async function refreshTbankSession() {
+    tbankSession = await api("/api/agent/tbank/session");
+    renderTbankSession();
+    if (tbankSession.authenticated) {
+        await loadTbankAccounts();
+    }
+}
+
+async function handleTbankSessionRetry() {
+    const button = elements.tbankSessionRetry;
+    if (!button) return;
+    button.disabled = true;
+    elements.tbankLoginStatus.textContent = "Повторяем проверку T-Банк session…";
+    elements.tbankLoginStatus.className = "control-note";
+    try {
+        tbankSession = await api("/api/agent/tbank/session/retry");
+        renderTbankSession();
+        if (tbankSession.authenticated) {
+            await loadTbankAccounts();
+        }
+    } catch (error) {
+        elements.tbankLoginStatus.textContent = `Повторная проверка не выполнена: ${error.message}`;
+        elements.tbankLoginStatus.className = "control-note error";
+    } finally {
+        if (elements.tbankSessionRetry) {
+            elements.tbankSessionRetry.disabled = false;
+        }
     }
 }
 
@@ -238,6 +289,206 @@ function jsonOptions(method, body) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
     };
+}
+
+async function loadSchedulerPanel() {
+    if (!elements.schedulerTaskList) return;
+    try {
+        const [accounts, tasks] = await Promise.all([
+            api("/api/agent/scheduler/accounts"),
+            api("/api/agent/scheduler/tasks"),
+        ]);
+        schedulerState.accounts = accounts.accounts || [];
+        schedulerState.tasks = tasks || [];
+        renderSchedulerAccounts();
+        renderSchedulerTasks();
+        elements.schedulerStatus.textContent = accounts.error
+            ? `Счета недоступны: ${accounts.error}`
+            : "Задания сохраняются в SQLite; следующий запуск использует дату последнего успешного окна.";
+        elements.schedulerStatus.className = accounts.error ? "control-note error" : "control-note";
+    } catch (error) {
+        schedulerState.tasks = [];
+        elements.schedulerTaskList.replaceChildren();
+        elements.schedulerStatus.textContent = `Планировщик недоступен: ${error.message}`;
+        elements.schedulerStatus.className = "control-note error";
+    }
+}
+
+function renderSchedulerAccounts() {
+    if (!elements.schedulerAccounts) return;
+    const selected = new Set([...elements.schedulerAccounts.selectedOptions].map((option) => option.value));
+    elements.schedulerAccounts.replaceChildren();
+    for (const account of schedulerState.accounts) {
+        const option = document.createElement("option");
+        option.value = account.account_ref;
+        const balance = account.balance_minor == null
+            ? ""
+            : ` · ${minorToMajor(account.balance_minor, account.currency || "RUB")} ${account.currency || "RUB"}`;
+        option.textContent = `${account.name || "Счёт / карта"}${balance}`;
+        option.selected = selected.has(option.value);
+        elements.schedulerAccounts.append(option);
+    }
+}
+
+function renderSchedulerTasks() {
+    if (!elements.schedulerTaskList) return;
+    elements.schedulerTaskList.replaceChildren();
+    if (schedulerState.tasks.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "Фоновые задания пока не созданы.";
+        elements.schedulerTaskList.append(empty);
+        return;
+    }
+    for (const task of schedulerState.tasks) {
+        const article = document.createElement("article");
+        article.className = "scheduler-task";
+        article.dataset.taskId = task.id;
+        const heading = document.createElement("h3");
+        heading.textContent = task.name;
+        const status = document.createElement("span");
+        status.className = "mcp-server-status";
+        status.textContent = task.status === "active" ? "активно" : "пауза";
+        heading.append(" ", status);
+        const meta = document.createElement("p");
+        meta.className = "control-note";
+        const nextRun = task.next_run_at_epoch_ms == null
+            ? "не запланирован"
+            : formatDate(task.next_run_at_epoch_ms);
+        const targetSession = task.target_session_id || "будет создана при первом успехе";
+        meta.textContent =
+            `Счета: ${task.account_refs.length}; окно с ${task.cursor_date || task.start_date}; ` +
+            `период ${task.interval_minutes} мин; часовой пояс ${task.time_zone}; ` +
+            `следующий запуск: ${nextRun}; target session: ${targetSession}.`;
+        const result = document.createElement("p");
+        result.className = "control-note";
+        if (task.last_error) {
+            result.textContent = `Последняя ошибка: ${task.last_error}`;
+            result.classList.add("error");
+        } else if (task.last_result) {
+            result.textContent =
+                `Последний запуск: ${task.last_result.transaction_count} операций, ` +
+                `${task.last_result.enriched_item_count} позиций, ` +
+                `${task.last_result.unmatched_count} без чека, ` +
+                `${task.last_result.ambiguous_count} неоднозначных.`;
+        } else {
+            result.textContent = "Запуск ещё не выполнялся.";
+        }
+        const actions = document.createElement("div");
+        actions.className = "category-form-actions";
+        actions.append(
+            schedulerButton(task.status === "active" ? "pause" : "resume", task.status === "active" ? "Пауза" : "Продолжить"),
+            schedulerButton("run", "Запустить сейчас"),
+            schedulerButton("history", "История"),
+        );
+        article.append(heading, meta, result, actions);
+        elements.schedulerTaskList.append(article);
+    }
+}
+
+function schedulerButton(action, text) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button compact-button";
+    button.dataset.schedulerAction = action;
+    button.textContent = text;
+    return button;
+}
+
+async function createSchedulerTask(event) {
+    event.preventDefault();
+    const accountRefs = [...elements.schedulerAccounts.selectedOptions].map((option) => option.value);
+    if (accountRefs.length === 0) {
+        elements.schedulerStatus.textContent = "Выберите хотя бы один счёт.";
+        elements.schedulerStatus.className = "control-note error";
+        return;
+    }
+    await runBusy(async () => {
+        await api("/api/agent/scheduler/tasks", jsonOptions("POST", {
+            name: elements.schedulerName.value.trim(),
+            account_refs: accountRefs,
+            start_date: elements.schedulerStartDate.value,
+            interval_minutes: Number(elements.schedulerInterval.value),
+            time_zone: elements.schedulerTimeZone.value.trim(),
+        }));
+        await loadSchedulerPanel();
+        showSuccess("Фоновое задание создано.");
+    });
+}
+
+async function handleSchedulerTaskClick(event) {
+    const button = event.target.closest("button[data-scheduler-action]");
+    const article = button?.closest("[data-task-id]");
+    if (!button || !article) return;
+    const taskId = article.dataset.taskId;
+    const action = button.dataset.schedulerAction;
+    if (action === "history") {
+        await loadSchedulerHistory(taskId);
+        return;
+    }
+    await runBusy(async () => {
+        try {
+            const path = action === "run"
+                ? `/api/agent/scheduler/tasks/${encodeURIComponent(taskId)}/run`
+                : `/api/agent/scheduler/tasks/${encodeURIComponent(taskId)}/${action}`;
+            await api(path, { method: "POST" });
+            showSuccess(action === "run" ? "Фоновое задание выполнено." : "Состояние задания обновлено.");
+        } finally {
+            await loadSchedulerPanel();
+        }
+    });
+}
+
+async function loadSchedulerHistory(taskId) {
+    try {
+        const history = await api(
+            `/api/agent/scheduler/tasks/${encodeURIComponent(taskId)}/history?limit=20`,
+        );
+        renderSchedulerHistory(history);
+    } catch (error) {
+        elements.schedulerHistory.textContent = `История недоступна: ${error.message}`;
+    }
+}
+
+function renderSchedulerHistory(history) {
+    elements.schedulerHistory.replaceChildren();
+    const heading = document.createElement("h3");
+    heading.textContent = "История выбранного задания";
+    elements.schedulerHistory.append(heading);
+    if (!history.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "Запусков пока нет.";
+        elements.schedulerHistory.append(empty);
+        return;
+    }
+    for (const run of history) {
+        const item = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = `${run.status === "succeeded" ? "Успешно" : "Ошибка"} · ${run.run_id}`;
+        item.append(summary);
+        const text = document.createElement("p");
+        text.className = "control-note";
+        text.textContent = run.error || (
+            run.result
+                ? `Окно ${run.result.window_from} — ${run.result.window_to}; trace-событий: ${run.result.trace.length}.`
+                : "Результат отсутствует."
+        );
+        item.append(text);
+        for (const event of run.result?.trace || []) {
+            const trace = document.createElement("div");
+            trace.className = "scheduler-trace";
+            trace.textContent = [
+                event.stage,
+                event.server_id,
+                event.tool,
+                event.status,
+                event.detail,
+            ].filter(Boolean).join(" · ");
+            item.append(trace);
+        }
+        elements.schedulerHistory.append(item);
+    }
 }
 
 function openDrawer() {
@@ -378,42 +629,35 @@ function renderMcpCatalog() {
 
 async function handleTbankLogin(event) {
     event.preventDefault();
-    const form = event.currentTarget;
-    const real = form === elements.tbankRealLoginForm;
-    const stageBeforeRequest = real ? realLoginStage : "fake";
-    const button = real ? elements.tbankRealSubmit : form.querySelector("button[type='submit']");
+    const stageBeforeRequest = loginStage;
+    const button = elements.tbankSubmit;
     button.disabled = true;
     elements.tbankLoginStatus.textContent = "Выполняем login…";
     elements.tbankLoginStatus.className = "control-note";
     try {
         const response = await api("/api/agent/tbank/login", jsonOptions("POST", {
-            mode: real ? "real" : "fake",
-            phone: real ? elements.tbankRealPhone.value.trim() : elements.tbankFakeLogin.value.trim(),
-            password: real
-                ? stageBeforeRequest === "password" ? elements.tbankRealPassword.value : ""
-                : elements.tbankFakePassword.value,
-            otp: real && stageBeforeRequest !== "phone" ? elements.tbankRealOtp.value.trim() : "",
+            phone: elements.tbankPhone.value.trim(),
+            password: stageBeforeRequest === "password" ? elements.tbankPassword.value : "",
+            otp: stageBeforeRequest !== "phone" ? elements.tbankOtp.value.trim() : "",
         }));
         tbankSession = response;
         renderTbankSession();
-        if (real) {
-            if (response.authenticated) {
-                resetRealLoginForm(true);
-            } else if (response.requires_password) {
-                setRealLoginStage("password");
-                elements.tbankRealPassword.focus();
-            } else if (response.requires_otp) {
-                setRealLoginStage("otp");
-                elements.tbankRealOtp.focus();
-            } else if (stageBeforeRequest === "otp") {
-                setRealLoginStage("otp");
-                elements.tbankRealOtp.value = "";
-            } else if (stageBeforeRequest === "password") {
-                setRealLoginStage("password");
-                elements.tbankRealPassword.value = "";
-            } else {
-                setRealLoginStage("phone");
-            }
+        if (response.authenticated) {
+            resetLoginForm(true);
+        } else if (response.requires_password) {
+            setLoginStage("password");
+            elements.tbankPassword.focus();
+        } else if (response.requires_otp) {
+            setLoginStage("otp");
+            elements.tbankOtp.focus();
+        } else if (stageBeforeRequest === "otp") {
+            setLoginStage("otp");
+            elements.tbankOtp.value = "";
+        } else if (stageBeforeRequest === "password") {
+            setLoginStage("password");
+            elements.tbankPassword.value = "";
+        } else {
+            setLoginStage("phone");
         }
         elements.tbankLoginStatus.textContent = response.message;
         elements.tbankLoginStatus.className = response.authenticated
@@ -422,22 +666,20 @@ async function handleTbankLogin(event) {
                 ? "control-note"
                 : "control-note error";
         if (response.authenticated) {
-            elements.tbankFakePassword.value = "";
-            elements.tbankRealPassword.value = "";
-            elements.tbankRealOtp.value = "";
+            elements.tbankPassword.value = "";
+            elements.tbankOtp.value = "";
             await loadTbankAccounts();
+            await loadSchedulerPanel();
         }
     } catch (error) {
-        if (real) {
-            if (stageBeforeRequest === "otp") {
-                setRealLoginStage("otp");
-                elements.tbankRealOtp.value = "";
-            } else if (stageBeforeRequest === "password") {
-                setRealLoginStage("password");
-                elements.tbankRealPassword.value = "";
-            } else {
-                setRealLoginStage("phone");
-            }
+        if (stageBeforeRequest === "otp") {
+            setLoginStage("otp");
+            elements.tbankOtp.value = "";
+        } else if (stageBeforeRequest === "password") {
+            setLoginStage("password");
+            elements.tbankPassword.value = "";
+        } else {
+            setLoginStage("phone");
         }
         elements.tbankLoginStatus.textContent = `Login не выполнен: ${error.message}`;
         elements.tbankLoginStatus.className = "control-note error";
@@ -447,30 +689,31 @@ async function handleTbankLogin(event) {
 }
 
 async function handleTbankResend() {
-    if (realLoginStage !== "otp") return;
-    elements.tbankRealResend.disabled = true;
+    if (loginStage !== "otp") return;
+    elements.tbankResend.disabled = true;
     elements.tbankLoginStatus.textContent = "Отправляем новый SMS-код…";
     elements.tbankLoginStatus.className = "control-note";
     try {
         const response = await api(
             "/api/agent/tbank/otp/resend",
-            jsonOptions("POST", { phone: elements.tbankRealPhone.value.trim() }),
+            jsonOptions("POST", { phone: elements.tbankPhone.value.trim() }),
         );
         tbankSession = response;
         renderTbankSession();
         if (response.authenticated) {
-            resetRealLoginForm(true);
+            resetLoginForm(true);
             await loadTbankAccounts();
+            await loadSchedulerPanel();
         } else if (response.requires_password) {
-            setRealLoginStage("password");
-            elements.tbankRealPassword.focus();
+            setLoginStage("password");
+            elements.tbankPassword.focus();
         } else if (response.requires_otp) {
-            setRealLoginStage("otp");
-            elements.tbankRealOtp.value = "";
+            setLoginStage("otp");
+            elements.tbankOtp.value = "";
             startResendCooldown();
-            elements.tbankRealOtp.focus();
+            elements.tbankOtp.focus();
         } else {
-            setRealLoginStage("otp");
+            setLoginStage("otp");
         }
         elements.tbankLoginStatus.textContent = response.message;
         elements.tbankLoginStatus.className = response.authenticated
@@ -479,21 +722,21 @@ async function handleTbankResend() {
                 ? "control-note"
                 : "control-note error";
     } catch (error) {
-        setRealLoginStage("otp");
+        setLoginStage("otp");
         elements.tbankLoginStatus.textContent = `SMS-код не отправлен повторно: ${error.message}`;
         elements.tbankLoginStatus.className = "control-note error";
     } finally {
-        if (!resendCooldownTimer && realLoginStage === "otp") {
-            elements.tbankRealResend.disabled = false;
+        if (!resendCooldownTimer && loginStage === "otp") {
+            elements.tbankResend.disabled = false;
         }
     }
 }
 
 function handleTbankChangePhone() {
-    resetRealLoginForm(false);
+    resetLoginForm(false);
     elements.tbankLoginStatus.textContent = "Введите номер телефона и запросите SMS-код.";
     elements.tbankLoginStatus.className = "control-note";
-    elements.tbankRealPhone.focus();
+    elements.tbankPhone.focus();
 }
 
 async function handleTbankLogout() {
@@ -501,17 +744,18 @@ async function handleTbankLogout() {
     try {
         tbankSession = await api("/api/agent/tbank/logout", { method: "POST" });
         elements.tbankAccount.replaceChildren();
-        elements.tbankFakePassword.value = "";
-        resetRealLoginForm(true);
-        showTbankLoginMode("fake");
-        elements.tbankQueryForm.hidden = true;
+        schedulerState.accounts = [];
+        renderSchedulerAccounts();
+        resetLoginForm(true);
         elements.tbankResult.hidden = true;
         elements.tbankResult.textContent = "";
+        elements.tbankQueryForm.hidden = true;
         elements.tbankLoginStatus.textContent = tbankSession.persistence_status === "unavailable"
             ? "Сессия очищена в памяти; OS credential store недоступен."
             : "Сессия очищена в памяти и OS credential store.";
         elements.tbankLoginStatus.className = "control-note";
         renderTbankSession();
+        await loadSchedulerPanel();
     } catch (error) {
         elements.tbankLoginStatus.textContent = `Logout не выполнен: ${error.message}`;
         elements.tbankLoginStatus.className = "control-note error";
@@ -520,49 +764,180 @@ async function handleTbankLogout() {
     }
 }
 
+function tbankPersistenceNote() {
+    switch (tbankSession.persistence_status) {
+        case "persisted":
+            return "Сессия восстановима после перезапуска";
+        case "memory_only":
+            return "Сессия действует только до перезапуска";
+        case "unavailable":
+            return "Сохранение сессии недоступно";
+        default:
+            return "";
+    }
+}
+
 function renderTbankSession() {
     const authenticated = Boolean(tbankSession.authenticated);
-    elements.tbankLogout.hidden = !authenticated;
-    elements.tbankLoginSwitch.hidden = authenticated;
+    const recoverable = Boolean(
+        tbankSession.retryable || tbankSession.status === "recoverable_error",
+    );
+    elements.tbankLogout.hidden = !(authenticated || recoverable);
+    elements.tbankSessionRetry.hidden = !recoverable;
     if (authenticated) {
-        elements.tbankFakeLoginForm.hidden = true;
-        elements.tbankRealLoginForm.hidden = true;
-        const persistenceNote = tbankSession.persistence_message
-            ? ` · ${tbankSession.persistence_message}`
-            : "";
-        elements.tbankSessionStatus.textContent = `сессия активна (${tbankSession.mode})${persistenceNote}`;
+        elements.tbankLoginForm.hidden = true;
+        const persistenceNote = tbankPersistenceNote();
+        const suffix = persistenceNote ? ` · ${persistenceNote}` : "";
+        elements.tbankSessionStatus.textContent = `Сессия активна${suffix}`;
         elements.tbankSessionStatus.className = "mcp-server-status connected";
         elements.tbankLoginStatus.textContent = "Сессия активна; повторный login не требуется.";
         elements.tbankLoginStatus.className = "control-note success";
         return;
     }
-    elements.tbankFakeLoginForm.hidden = tbankLoginMode !== "fake";
-    elements.tbankRealLoginForm.hidden = tbankLoginMode !== "real";
-    elements.tbankSessionStatus.textContent = "login не выполнен";
-    elements.tbankSessionStatus.className = "mcp-server-status";
+    elements.tbankLoginForm.hidden = false;
+    const persistenceMessage = tbankSession.persistence_message || "";
+    if (recoverable) {
+        const retryAfter = Number(tbankSession.retry_after_seconds || 0);
+        const retryHint = retryAfter > 0
+            ? ` Повторите через ${retryAfter} сек.`
+            : " Нажмите «Повторить проверку».";
+        elements.tbankSessionStatus.textContent =
+            `T-Банк временно недоступен: ${persistenceMessage || "session сохранена."}${retryHint}`;
+        elements.tbankSessionStatus.className = "mcp-server-status recoverable";
+        elements.tbankLoginStatus.textContent =
+            `${persistenceMessage || "Сохранённая session не изменена."}${retryHint}`;
+        elements.tbankLoginStatus.className = "control-note";
+        elements.tbankQueryForm.hidden = true;
+        return;
+    }
+    elements.tbankSessionStatus.textContent = persistenceMessage
+        ? `login требуется: ${persistenceMessage}`
+        : "login не выполнен";
+    elements.tbankSessionStatus.className = persistenceMessage
+        ? "mcp-server-status error"
+        : "mcp-server-status";
+    elements.tbankLoginStatus.textContent = persistenceMessage || "Выполните login для доступа к T-Bank.";
+    elements.tbankLoginStatus.className = persistenceMessage
+        ? "control-note error"
+        : "control-note";
     elements.tbankQueryForm.hidden = true;
+}
+
+function normalizeTbankAccounts(payload) {
+    if (typeof payload === "string") {
+        try {
+            return normalizeTbankAccounts(JSON.parse(payload));
+        } catch (_) {
+            return [];
+        }
+    }
+    if (Array.isArray(payload)) {
+        return payload.flatMap((item) => {
+            if (item && typeof item === "object") {
+                const embedded = item.text ?? item.data ?? item.result;
+                if (embedded !== undefined) {
+                    return normalizeTbankAccounts(embedded);
+                }
+            }
+            const account = normalizeTbankAccount(item);
+            return account ? [account] : [];
+        });
+    }
+    if (!payload || typeof payload !== "object") {
+        return [];
+    }
+    for (const key of [
+        "accounts",
+        "account_list",
+        "items",
+        "payload",
+        "data",
+        "result",
+        "response",
+        "content",
+        "structuredContent",
+        "structured_content",
+        "text",
+    ]) {
+        const nested = normalizeTbankAccounts(payload[key]);
+        if (nested.length > 0) {
+            return nested;
+        }
+    }
+    const account = normalizeTbankAccount(payload);
+    return account ? [account] : [];
+}
+
+
+function normalizeTbankAccount(account) {
+    if (!account || typeof account !== "object") {
+        return null;
+    }
+    const reference = firstAccountValue(account, [
+        "account_ref",
+        "account_id",
+        "accountId",
+        "ref",
+        "id",
+    ]);
+    if (reference == null || String(reference).trim() === "") {
+        return null;
+    }
+    const name = firstAccountValue(account, [
+        "name",
+        "account_name",
+        "accountName",
+        "display_name",
+        "displayName",
+        "title",
+        "alias",
+    ]);
+    return {
+        ...account,
+        account_ref: String(reference),
+        name: name == null || String(name).trim() === "" ? "Счёт" : String(name),
+    };
+}
+
+function firstAccountValue(account, keys) {
+    for (const key of keys) {
+        const value = account[key];
+        if (value != null && String(value).trim() !== "") {
+            return value;
+        }
+    }
+    return null;
 }
 
 async function loadTbankAccounts() {
     try {
-        const accounts = await callTbankTool("list-accounts", {});
+        const payload = await callTbankTool("list-accounts", {});
+        const accounts = normalizeTbankAccounts(payload);
         elements.tbankAccount.replaceChildren();
-        for (const account of Array.isArray(accounts) ? accounts : []) {
+        for (const account of accounts) {
             const option = document.createElement("option");
-            option.value = account.id;
+            option.value = account.account_ref;
             const balance = account.balance_minor == null
                 ? ""
                 : ` · ${(account.balance_minor / 100).toFixed(2)} ${account.currency}`;
-            option.textContent = `${account.name} (${account.id})${balance}`;
+            option.textContent = `${account.name}${balance}`;
             elements.tbankAccount.append(option);
         }
         elements.tbankQueryForm.hidden = elements.tbankAccount.options.length === 0;
+        if (accounts.length === 0) {
+            elements.tbankLoginStatus.textContent =
+                "list-accounts вернул пустой список: session отвечает, но доступные счета не получены. Проверьте доступ или выполните login заново.";
+            elements.tbankLoginStatus.className = "control-note error";
+            return false;
+        }
         elements.tbankLoginStatus.textContent = `Счета получены через tools/call: ${elements.tbankAccount.options.length}.`;
         elements.tbankLoginStatus.className = "control-note success";
+        return true;
     } catch (error) {
         elements.tbankQueryForm.hidden = true;
         elements.tbankLoginStatus.textContent = `Не удалось вызвать list-accounts: ${error.message}`;
         elements.tbankLoginStatus.className = "control-note error";
+        return false;
     }
 }
 
@@ -574,7 +949,7 @@ async function handleTbankTransactions(event) {
     elements.tbankResult.textContent = "Вызываем get-account-transactions…";
     try {
         const result = await callTbankTool("get-account-transactions", {
-            account_id: elements.tbankAccount.value,
+            account_ref: elements.tbankAccount.value,
             from: elements.tbankFrom.value,
             to: elements.tbankTo.value,
             limit: Number(elements.tbankLimit.value),
@@ -606,58 +981,39 @@ async function callTbankTool(tool, argumentsValue) {
     }
 }
 
-function showTbankLoginMode(mode) {
-    const fake = mode === "fake";
-    tbankLoginMode = fake ? "fake" : "real";
-    elements.tbankFakeLoginForm.hidden = !fake;
-    elements.tbankRealLoginForm.hidden = fake;
-    elements.tbankShowFake.setAttribute("aria-selected", String(fake));
-    elements.tbankShowReal.setAttribute("aria-selected", String(!fake));
-    if (fake) {
-        resetRealLoginForm(true);
-        elements.tbankLoginStatus.textContent = "Синтетические credentials: demo / demo.";
-    } else {
-        elements.tbankFakeLogin.value = "";
-        elements.tbankFakePassword.value = "";
-        resetRealLoginForm(true);
-        elements.tbankLoginStatus.textContent =
-            "Real mode: введите телефон и запросите SMS-код.";
-    }
-    elements.tbankLoginStatus.className = "control-note";
-}
 
-function setRealLoginStage(stage) {
-    realLoginStage = stage;
+function setLoginStage(stage) {
+    loginStage = stage;
     const hasChallenge = stage !== "phone";
-    elements.tbankRealOtpStep.hidden = !hasChallenge;
-    elements.tbankRealPhone.readOnly = hasChallenge;
-    elements.tbankRealResend.hidden = stage !== "otp";
-    elements.tbankRealChangePhone.hidden = stage === "phone";
-    elements.tbankRealSubmit.textContent = stage === "phone"
+    elements.tbankOtpStep.hidden = !hasChallenge;
+    elements.tbankPhone.readOnly = hasChallenge;
+    elements.tbankResend.hidden = stage !== "otp";
+    elements.tbankChangePhone.hidden = stage === "phone";
+    elements.tbankSubmit.textContent = stage === "phone"
         ? "Получить SMS-код"
         : "Войти";
-    setRealPasswordVisibility(stage === "password");
+    setPasswordVisibility(stage === "password");
     if (stage !== "otp") {
         stopResendCooldown();
     } else if (!resendCooldownTimer) {
-        elements.tbankRealResend.disabled = false;
-        elements.tbankRealResend.textContent = "Повторить код";
+        elements.tbankResend.disabled = false;
+        elements.tbankResend.textContent = "Повторить код";
     }
 }
 
-function resetRealLoginForm(clearPhone) {
+function resetLoginForm(clearPhone) {
     stopResendCooldown();
-    if (clearPhone) elements.tbankRealPhone.value = "";
-    elements.tbankRealOtp.value = "";
-    elements.tbankRealPassword.value = "";
-    setRealLoginStage("phone");
+    if (clearPhone) elements.tbankPhone.value = "";
+    elements.tbankOtp.value = "";
+    elements.tbankPassword.value = "";
+    setLoginStage("phone");
 }
 
 function startResendCooldown() {
     stopResendCooldown();
     const deadline = Date.now() + 30_000;
     const update = () => {
-        if (realLoginStage !== "otp") {
+        if (loginStage !== "otp") {
             stopResendCooldown();
             return;
         }
@@ -666,8 +1022,8 @@ function startResendCooldown() {
             stopResendCooldown();
             return;
         }
-        elements.tbankRealResend.disabled = true;
-        elements.tbankRealResend.textContent = `Повторить код (${seconds})`;
+        elements.tbankResend.disabled = true;
+        elements.tbankResend.textContent = `Повторить код (${seconds})`;
     };
     resendCooldownTimer = window.setInterval(update, 250);
     update();
@@ -678,16 +1034,16 @@ function stopResendCooldown() {
         window.clearInterval(resendCooldownTimer);
         resendCooldownTimer = null;
     }
-    if (elements.tbankRealResend) {
-        elements.tbankRealResend.disabled = false;
-        elements.tbankRealResend.textContent = "Повторить код";
+    if (elements.tbankResend) {
+        elements.tbankResend.disabled = false;
+        elements.tbankResend.textContent = "Повторить код";
     }
 }
 
-function setRealPasswordVisibility(visible) {
-    elements.tbankRealPasswordField.hidden = !visible;
-    elements.tbankRealPassword.disabled = !visible;
-    if (!visible) elements.tbankRealPassword.value = "";
+function setPasswordVisibility(visible) {
+    elements.tbankPasswordField.hidden = !visible;
+    elements.tbankPassword.disabled = !visible;
+    if (!visible) elements.tbankPassword.value = "";
 }
 
 function mcpStatusLabel(status) {
@@ -700,7 +1056,9 @@ function mcpStatusLabel(status) {
 }
 
 function renderPreferences(preferences) {
+    lastPreferences = preferences;
     elements.globalUserPrompt.value = preferences.user_prompt || "";
+    renderMerchantRules(preferences.merchant_canonical_rules || []);
     elements.confirmedDecisionsList.replaceChildren();
     const decisions = preferences.confirmed_decisions || [];
     if (decisions.length === 0) {
@@ -737,6 +1095,122 @@ function renderPreferences(preferences) {
         item.append(input, date, actions);
         elements.confirmedDecisionsList.append(item);
     }
+}
+
+function renderMerchantRules(rules) {
+    elements.merchantRuleList.replaceChildren();
+    if (rules.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "Канонических правил пока нет.";
+        elements.merchantRuleList.append(empty);
+        return;
+    }
+    for (const rule of rules) {
+        const item = document.createElement("article");
+        item.className = "category-item";
+        const title = document.createElement("strong");
+        title.textContent = rule.canonical_name;
+        const meta = document.createElement("small");
+        const suffix = rule.suffix_policy === "numeric_terminal"
+            ? " · допускается числовой суффикс"
+            : "";
+        meta.textContent = `Варианты: ${rule.aliases.join(", ")}${suffix}`;
+        const actions = document.createElement("div");
+        actions.className = "category-actions";
+        const edit = document.createElement("button");
+        edit.type = "button";
+        edit.className = "secondary-button compact-button";
+        edit.dataset.action = "edit-merchant-rule";
+        edit.dataset.ruleId = rule.id;
+        edit.textContent = "Изменить";
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "danger-button compact-button";
+        remove.dataset.action = "delete-merchant-rule";
+        remove.dataset.ruleId = rule.id;
+        remove.textContent = "Удалить";
+        actions.append(edit, remove);
+        item.append(title, meta, actions);
+        elements.merchantRuleList.append(item);
+    }
+}
+
+function handleMerchantRuleListClick(event) {
+    const button = event.target.closest("button[data-action]");
+    if (!button) return;
+    const preferences = lastPreferences;
+    const rule = (preferences?.merchant_canonical_rules || [])
+        .find((item) => item.id === button.dataset.ruleId);
+    if (!rule) return;
+    if (button.dataset.action === "edit-merchant-rule") {
+        editingMerchantRuleId = rule.id;
+        elements.merchantRuleEditId.value = rule.id;
+        elements.merchantRuleCanonicalName.value = rule.canonical_name;
+        elements.merchantRuleAliases.value = rule.aliases.join("\n");
+        elements.merchantRuleSuffixPolicy.value = rule.suffix_policy || "none";
+        elements.saveMerchantRule.textContent = "Сохранить правило";
+        elements.cancelMerchantRuleEdit.hidden = false;
+        elements.merchantRuleCanonicalName.focus();
+    } else if (button.dataset.action === "delete-merchant-rule") {
+        deleteMerchantRule(rule.id);
+    }
+}
+
+function resetMerchantRuleForm() {
+    editingMerchantRuleId = "";
+    elements.merchantRuleEditId.value = "";
+    elements.merchantRuleCanonicalName.value = "";
+    elements.merchantRuleAliases.value = "";
+    elements.merchantRuleSuffixPolicy.value = "none";
+    elements.saveMerchantRule.textContent = "Добавить правило";
+    elements.cancelMerchantRuleEdit.hidden = true;
+}
+
+async function saveMerchantRuleForm(event) {
+    event.preventDefault();
+    const canonicalName = elements.merchantRuleCanonicalName.value.trim();
+    const aliases = elements.merchantRuleAliases.value
+        .split(/[\n,;]/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+    if (!canonicalName || aliases.length === 0) {
+        showError("Укажите каноническое название и хотя бы один вариант.");
+        return;
+    }
+    await runBusy(async () => {
+        const ruleId = editingMerchantRuleId;
+        const path = ruleId
+            ? `/api/agent/preferences/merchant-rules/${encodeURIComponent(ruleId)}`
+            : "/api/agent/preferences/merchant-rules";
+        const method = ruleId ? "PUT" : "POST";
+        const preferences = await api(
+            path,
+            jsonOptions(method, {
+                canonical_name: canonicalName,
+                aliases,
+                suffix_policy: elements.merchantRuleSuffixPolicy.value,
+            }),
+        );
+        lastPreferences = preferences;
+        renderPreferences(preferences);
+        resetMerchantRuleForm();
+        showSuccess(ruleId ? "Merchant rule обновлено." : "Merchant rule добавлено.");
+    });
+}
+
+async function deleteMerchantRule(ruleId) {
+    if (!window.confirm("Удалить canonical merchant rule? Это действие нельзя отменить.")) return;
+    await runBusy(async () => {
+        const preferences = await api(
+            `/api/agent/preferences/merchant-rules/${encodeURIComponent(ruleId)}`,
+            { method: "DELETE" },
+        );
+        lastPreferences = preferences;
+        renderPreferences(preferences);
+        resetMerchantRuleForm();
+        showSuccess("Merchant rule удалено.");
+    });
 }
 
 function renderCategoryManager() {
@@ -1010,6 +1484,39 @@ function renderMemoryCandidate(candidate) {
     }
     return item;
 }
+function renderMerchantCanonicalCandidate(candidate) {
+    const item = document.createElement("section");
+    item.className = "memory-candidate";
+    const title = document.createElement("strong");
+    title.textContent = "Предложение правила названия";
+    const canonical = document.createElement("p");
+    canonical.textContent = `Каноническое название: ${candidate.canonical_name}`;
+    const aliases = document.createElement("p");
+    aliases.textContent = `Варианты: ${(candidate.aliases || []).join(", ")}`;
+    const suffix = document.createElement("small");
+    suffix.textContent = candidate.suffix_policy === "numeric_terminal"
+        ? "Политика суффикса: допускается числовой суффикс."
+        : "Политика суффикса: точное совпадение.";
+    const reason = document.createElement("small");
+    reason.textContent = `Почему: ${candidate.reason}`;
+    item.append(title, canonical, aliases, suffix, reason);
+    if (candidate.status === "accepted") {
+        const accepted = document.createElement("small");
+        accepted.className = "candidate-status";
+        accepted.textContent = activeState?.draft
+            ? "Правило сохранено и применено к draft."
+            : "Правило сохранено и применено к preview.";
+        item.append(accepted);
+    } else {
+        const accept = document.createElement("button");
+        accept.type = "button";
+        accept.className = "secondary-button compact-button";
+        accept.textContent = "Принять правило";
+        accept.addEventListener("click", () => acceptMerchantCanonicalCandidate(candidate.id));
+        item.append(accept);
+    }
+    return item;
+}
 
 
 function renderMemoryTrace() {
@@ -1230,6 +1737,7 @@ function renderSessionList() {
 async function createSession() {
     await runBusy(async () => {
         const state = await api("/api/agent/sessions", { method: "POST" });
+        await refreshTbankSession();
         await loadSessions();
         setActiveState(state);
         closeDrawer();
@@ -1240,11 +1748,13 @@ async function createSession() {
 
 async function openSession(id) {
     await runBusy(async () => {
+        await refreshTbankSession();
         setActiveState(await api(`/api/agent/sessions/${encodeURIComponent(id)}`));
         closeDrawer();
         showSuccess("Сессия открыта.");
     });
 }
+
 
 function setActiveState(
     state,
@@ -1256,7 +1766,6 @@ function setActiveState(
     memoryProjection = null;
     expandedMemoryLayer = null;
     memoryProjectionRequest += 1;
-    workingDraft = new Map();
     workingDraft = new Map();
     dirtyFields = new Map();
     for (const row of state.draft?.transactions || []) {
@@ -1296,11 +1805,11 @@ function editorFromRow(row) {
         posted_at_iso: transaction.posted_at || null,
         direction: transaction.direction,
         amount: minorToMajor(transaction.amount_minor, transaction.currency),
-        currency: transaction.currency,
+        currency: normalizeCurrencyCode(transaction.currency),
         merchant: transaction.merchant,
         description: row.description || "",
         category_id: transaction.category_id || "",
-        card_last4: transaction.card_last4 || "",
+        source_label: transaction.source_label || "Счёт / карта",
     };
 }
 
@@ -1332,6 +1841,7 @@ function renderEmptyState() {
     taskInvariantCatalog = { system: [] };
     renderTaskInvariants();
     renderReceiptStatus();
+    activeMcpPreview = null;
 }
 
 function renderActiveState() {
@@ -1345,6 +1855,7 @@ function renderActiveState() {
     elements.toolbarTitle.textContent = activeState.session.title;
     populateConfigControls(activeState.session.config);
     renderContextManagement();
+    activeMcpPreview = null;
     renderMessages();
 
     renderFacts();
@@ -1604,6 +2115,36 @@ async function acceptMemoryCandidate(candidateId) {
         showSuccess("Кандидат добавлен в подтверждённые решения.");
     }, true);
 }
+async function acceptMerchantCanonicalCandidate(candidateId) {
+    if (!activeState) return;
+    await runBusy(async () => {
+        const payload = await api(
+            `/api/agent/sessions/${encodeURIComponent(activeState.session.id)}` +
+                `/merchant-canonical-candidates/${encodeURIComponent(candidateId)}/accept`,
+            jsonOptions("POST", {
+                revision: activeState.session.revision,
+                preview_id: activeMcpPreview?.id || null,
+            }),
+        );
+        setActiveState(payload.state || payload);
+        if (payload.mcp_preview) {
+            renderMcpPreview(payload.mcp_preview);
+        }
+        await loadSessions();
+        renderPreferences(await api("/api/agent/preferences"));
+        const hasDraft = Boolean(payload.state?.draft);
+        const hasPreview = Boolean(payload.mcp_preview);
+        showSuccess(
+            hasDraft && hasPreview
+                ? "Правило сохранено; draft и preview обновлены."
+                : hasDraft
+                    ? "Правило сохранено и применено к текущему draft."
+                    : hasPreview
+                        ? "Правило сохранено и применено к preview."
+                        : "Правило сохранено.",
+        );
+    }, true);
+}
 
 async function saveConfirmedDecision(decisionId, input) {
     const text = input.value.trim();
@@ -1676,9 +2217,296 @@ async function forkActiveSession() {
     });
 }
 
+function renderMcpPreview(preview) {
+    activeMcpPreview = preview || null;
+    renderMessages();
+}
+
+function renderInlineMcpPreview(preview) {
+    const section = document.createElement("section");
+    section.className = "mcp-inline-preview";
+    section.setAttribute("aria-labelledby", "mcp-preview-title");
+
+    const heading = document.createElement("h3");
+    heading.id = "mcp-preview-title";
+    heading.textContent = "Операции из MCP";
+    const note = document.createElement("p");
+    note.className = "control-note";
+    note.textContent =
+        `Получено операций: ${(preview.transactions || []).length}. ` +
+        "Проверьте результат; черновик изменится только после принятия.";
+
+    const tableWrap = document.createElement("div");
+    tableWrap.className = "mcp-inline-preview-table-wrap";
+    const table = document.createElement("table");
+    table.className = "mcp-inline-preview-table";
+    const header = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    for (const label of ["Дата", "Сумма", "Merchant", "Описание", "Категория", "Источник"]) {
+        const cell = document.createElement("th");
+        cell.scope = "col";
+        cell.textContent = label;
+        headerRow.append(cell);
+    }
+    header.append(headerRow);
+
+    const body = document.createElement("tbody");
+    for (const transaction of preview.transactions || []) {
+        const row = document.createElement("tr");
+        const date = document.createElement("td");
+        date.textContent = formatTransactionDate(transaction.occurred_at);
+        const amount = document.createElement("td");
+        const currency = normalizeCurrencyCode(transaction.currency);
+        amount.className = transaction.amount_minor < 0 ? "amount-expense" : "amount-income";
+        amount.textContent = `${minorToMajor(transaction.amount_minor, currency)} ${currency}`;
+        const merchant = document.createElement("td");
+        merchant.textContent = transaction.merchant || "Без названия";
+        const description = document.createElement("td");
+        description.textContent = transaction.description || "";
+        const category = document.createElement("td");
+        const categoryValue = categoryCatalog.find((item) => item.id === transaction.category_id);
+        category.textContent = categoryValue
+            ? categoryDisplayPath(categoryValue.id)
+            : "Не выбрана";
+        if (transaction.category_issue) {
+            category.append(errorText(transaction.category_issue));
+        }
+        const source = document.createElement("td");
+        source.textContent = transaction.source_label || "Счёт / карта";
+        row.append(date, amount, merchant, description, category, source);
+        body.append(row);
+    }
+    table.append(header, body);
+    tableWrap.append(table);
+
+    const actions = document.createElement("div");
+    actions.className = "message-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "secondary-button";
+    cancel.textContent = "Отменить";
+    cancel.addEventListener("click", cancelMcpPreview);
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.textContent = "Принять операции";
+    confirm.addEventListener("click", confirmMcpPreview);
+    actions.append(cancel, confirm);
+    section.append(heading, note, tableWrap, actions);
+    return section;
+}
+
+async function confirmMcpPreview() {
+    if (!activeState || !activeMcpPreview) return;
+    await runBusy(async () => {
+        const state = await api(
+            `/api/agent/sessions/${encodeURIComponent(activeState.session.id)}/mcp-previews/` +
+                `${encodeURIComponent(activeMcpPreview.id)}/confirm`,
+            jsonOptions("POST", { revision: activeState.session.revision }),
+        );
+        setActiveState(state);
+        showSuccess("Операции добавлены в черновик. Проверьте категории и ошибки.");
+    }, true);
+}
+
+async function cancelMcpPreview() {
+    if (!activeState || !activeMcpPreview) return;
+    await runBusy(async () => {
+        await api(
+            `/api/agent/sessions/${encodeURIComponent(activeState.session.id)}/mcp-previews/` +
+                `${encodeURIComponent(activeMcpPreview.id)}`,
+            { method: "DELETE" },
+        );
+        activeMcpPreview = null;
+        renderMessages();
+        showSuccess("Предварительный просмотр отменён; черновик не изменён.");
+    });
+}
+
+
+function renderMarkdown(parent, markdown) {
+    const lines = String(markdown || "").replace(/\r\n?/g, "\n").split("\n");
+    let index = 0;
+    let paragraph = [];
+    let list = null;
+
+    const flushParagraph = () => {
+        if (paragraph.length === 0) return;
+        const block = document.createElement("p");
+        paragraph.forEach((line, lineIndex) => {
+            if (lineIndex > 0) block.append(document.createElement("br"));
+            appendInlineMarkdown(block, line);
+        });
+        parent.append(block);
+        paragraph = [];
+    };
+    const flushList = () => {
+        if (!list) return;
+        parent.append(list.element);
+        list = null;
+    };
+    const flushText = () => {
+        flushParagraph();
+        flushList();
+    };
+
+    while (index < lines.length) {
+        const line = lines[index];
+        if (line.trim() === "") {
+            flushText();
+            index += 1;
+            continue;
+        }
+
+        const fence = line.match(/^\s*```(?:[A-Za-z0-9_-]+)?\s*$/);
+        if (fence) {
+            flushText();
+            index += 1;
+            const codeLines = [];
+            while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) {
+                codeLines.push(lines[index]);
+                index += 1;
+            }
+            if (index < lines.length) index += 1;
+            const pre = document.createElement("pre");
+            const code = document.createElement("code");
+            code.textContent = codeLines.join("\n");
+            pre.append(code);
+            parent.append(pre);
+            continue;
+        }
+
+        const heading = line.match(/^\s*(#{1,6})\s+(.+)$/);
+        if (heading) {
+            flushText();
+            const title = document.createElement(`h${heading[1].length}`);
+            appendInlineMarkdown(title, heading[2]);
+            parent.append(title);
+            index += 1;
+            continue;
+        }
+
+        if (isMarkdownTableSeparator(lines[index + 1])) {
+            flushText();
+            const table = document.createElement("table");
+            const head = document.createElement("thead");
+            const headRow = document.createElement("tr");
+            for (const cellText of markdownTableCells(line)) {
+                const cell = document.createElement("th");
+                cell.scope = "col";
+                appendInlineMarkdown(cell, cellText);
+                headRow.append(cell);
+            }
+            head.append(headRow);
+            table.append(head);
+            const body = document.createElement("tbody");
+            index += 2;
+            while (index < lines.length && lines[index].includes("|") && lines[index].trim() !== "") {
+                const row = document.createElement("tr");
+                for (const cellText of markdownTableCells(lines[index])) {
+                    const cell = document.createElement("td");
+                    appendInlineMarkdown(cell, cellText);
+                    row.append(cell);
+                }
+                body.append(row);
+                index += 1;
+            }
+            table.append(body);
+            parent.append(table);
+            continue;
+        }
+
+        const unordered = line.match(/^\s{0,3}[-*+]\s+(.+)$/);
+        const ordered = line.match(/^\s{0,3}\d+[.)]\s+(.+)$/);
+        if (unordered || ordered) {
+            flushParagraph();
+            const orderedList = Boolean(ordered);
+            if (!list || list.ordered !== orderedList) {
+                flushList();
+                list = {
+                    ordered: orderedList,
+                    element: document.createElement(orderedList ? "ol" : "ul"),
+                };
+            }
+            const item = document.createElement("li");
+            appendInlineMarkdown(item, (unordered || ordered)[1]);
+            list.element.append(item);
+            index += 1;
+            continue;
+        }
+
+        if (/^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+            flushText();
+            parent.append(document.createElement("hr"));
+            index += 1;
+            continue;
+        }
+
+        flushList();
+        paragraph.push(line);
+        index += 1;
+    }
+    flushText();
+}
+
+function isMarkdownTableSeparator(line) {
+    if (!line || !line.includes("|")) return false;
+    const cells = markdownTableCells(line);
+    return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function markdownTableCells(line) {
+    let value = String(line || "").trim();
+    if (value.startsWith("|")) value = value.slice(1);
+    if (value.endsWith("|")) value = value.slice(0, -1);
+    return value.split("|").map((cell) => cell.trim());
+}
+
+function appendInlineMarkdown(parent, source) {
+    const text = String(source || "");
+    const tokenPattern = /(`[^`]*`|!\[[^\]]*\]\([^)]*\)|\[[^\]]+\]\([^)]*\)|\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_)/g;
+    let cursor = 0;
+    for (const match of text.matchAll(tokenPattern)) {
+        const token = match[0];
+        const offset = match.index || 0;
+        if (offset > cursor) parent.append(document.createTextNode(text.slice(cursor, offset)));
+        if (token.startsWith("`")) {
+            const code = document.createElement("code");
+            code.textContent = token.slice(1, -1);
+            parent.append(code);
+        } else if (token.startsWith("![")) {
+            const alt = token.match(/^!\[([^\]]*)\]/)?.[1] || "";
+            parent.append(document.createTextNode(alt));
+        } else if (token.startsWith("[")) {
+            const link = token.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
+            if (!link) {
+                parent.append(document.createTextNode(token));
+            } else {
+                const anchor = document.createElement("a");
+                anchor.href = link[2];
+                anchor.target = "_blank";
+                anchor.rel = "noopener noreferrer";
+                anchor.textContent = link[1];
+                parent.append(anchor);
+            }
+        } else {
+            const emphasis = document.createElement(
+                token.startsWith("**") || token.startsWith("__") ? "strong" : "em",
+            );
+            const trim = token.startsWith("**") || token.startsWith("__") ? 2 : 1;
+            emphasis.textContent = token.slice(trim, -trim);
+            parent.append(emphasis);
+        }
+        cursor = offset + token.length;
+    }
+    if (cursor < text.length) parent.append(document.createTextNode(text.slice(cursor)));
+}
+
 function renderMessages() {
     elements.messageList.replaceChildren();
     const messages = activeState.messages || [];
+    const latestAssistantId = [...messages]
+        .reverse()
+        .find((message) => message.role === "assistant")?.id;
     if (messages.length === 0 && !activeState.summary) {
         const empty = document.createElement("p");
         empty.className = "muted";
@@ -1691,8 +2519,9 @@ function renderMessages() {
         item.className = `message ${message.role}`;
         const role = document.createElement("strong");
         role.textContent = message.role === "user" ? "Вы" : "Агент";
-        const content = document.createElement("p");
-        content.textContent = message.display_text;
+        const content = document.createElement("div");
+        content.className = "message-content";
+        renderMarkdown(content, message.display_text);
         const copyActions = document.createElement("div");
         copyActions.className = "message-copy-actions";
         const copy = document.createElement("button");
@@ -1708,6 +2537,14 @@ function renderMessages() {
                 .filter((candidate) => candidate.source_message_id === message.id);
             for (const candidate of candidates) {
                 item.append(renderMemoryCandidate(candidate));
+            }
+            const merchantCanonicalCandidates = (activeState.merchant_canonical_candidates || [])
+                .filter((candidate) => candidate.source_message_id === message.id);
+            for (const candidate of merchantCanonicalCandidates) {
+                item.append(renderMerchantCanonicalCandidate(candidate));
+            }
+            if (message.id === latestAssistantId && activeMcpPreview) {
+                item.append(renderInlineMcpPreview(activeMcpPreview));
             }
         }
         elements.messageList.append(item);
@@ -1848,15 +2685,19 @@ async function sendMessage(event) {
         return;
     }
     await runBusy(async () => {
-        const state = await api(
+        const payload = await api(
             `/api/agent/sessions/${encodeURIComponent(activeState.session.id)}/messages`,
             jsonOptions("POST", { revision: activeState.session.revision, text }),
         );
+        const state = payload.state || payload;
         if (!state.last_error) elements.message.value = "";
         setActiveState(state);
+        renderMcpPreview(payload.mcp_preview || null);
         await loadSessions();
         if (state.last_error) {
             showError(state.last_error);
+        } else if (payload.mcp_preview) {
+            showSuccess("Операции получены. Проверьте preview в сообщении и подтвердите импорт.");
         } else {
             showSuccess("Ответ агента получен. Черновик обновлён.");
         }
@@ -1988,6 +2829,13 @@ function createOperationCard(row) {
 
     const grid = document.createElement("div");
     grid.className = "operation-grid";
+    const descriptionField = fieldControl(
+        "Описание",
+        textInput("description", editor.description, 500),
+        row,
+        "description",
+        editor.included,
+    );
     grid.append(
         fieldControl("Дата и время операции", transactionDateInput("occurred_at", editor.occurred_at), row, "occurred_at", editor.included),
         fieldControl("Дата проводки", transactionDateInput("posted_at", editor.posted_at), row, "posted_at", editor.included),
@@ -1995,10 +2843,11 @@ function createOperationCard(row) {
         fieldControl("Сумма", amountInput(editor.amount), row, "amount_minor", editor.included),
         fieldControl("Валюта", readOnlyInput("currency", editor.currency), row, "currency", editor.included),
         fieldControl("Магазин или получатель", textInput("merchant", editor.merchant), row, "merchant", editor.included),
-        fieldControl("Описание", textInput("description", editor.description, 500), row, "description", editor.included),
+        descriptionField,
         fieldControl("Категория", categorySelect(editor.category_id, editor.direction), row, "category_id", editor.included),
-        fieldControl("Последние 4 цифры карты (необязательно)", textInput("card_last4", editor.card_last4, 4), row, "card_last4", editor.included),
+        fieldControl("Счёт / карта", readOnlyInput("source_label", editor.source_label), row, "source_label", editor.included),
     );
+    const itemDetails = transactionItemsDetails(row.transaction.items);
 
     const generalErrors = editor.included ? (row.field_errors?._transaction || []) : [];
     const footer = document.createElement("div");
@@ -2007,7 +2856,9 @@ function createOperationCard(row) {
     errorBox.className = "operation-errors";
     for (const error of generalErrors) errorBox.append(errorText(error));
     footer.append(errorBox, saveOperationButton(row.id, "Сохранить операцию"));
-    card.append(header, grid, footer);
+    card.append(header, grid);
+    if (itemDetails) card.append(itemDetails);
+    card.append(footer);
     return card;
 }
 
@@ -2020,7 +2871,7 @@ function createOperationTable(rows) {
     const headerRow = document.createElement("tr");
     for (const label of [
         "Включить", "ID", "Дата и время", "Дата проводки", "Тип", "Сумма",
-        "Валюта", "Магазин или получатель", "Описание", "Категория", "Карта", "",
+        "Валюта", "Магазин или получатель", "Описание", "Категория", "Счёт / карта", "",
     ]) {
         const cell = document.createElement("th");
         cell.scope = "col";
@@ -2049,6 +2900,15 @@ function createOperationTableRow(row) {
     id.className = "transaction-id";
     id.textContent = row.id;
     tableRow.append(tableCell(id));
+    const descriptionCell = tableFieldCell(
+        "Описание",
+        textInput("description", editor.description, 500),
+        row,
+        "description",
+        editor.included,
+    );
+    const itemDetails = transactionItemsDetails(row.transaction.items);
+    if (itemDetails) descriptionCell.append(itemDetails);
     tableRow.append(
         tableFieldCell("Дата и время", transactionDateInput("occurred_at", editor.occurred_at), row, "occurred_at", editor.included),
         tableFieldCell("Дата проводки", transactionDateInput("posted_at", editor.posted_at), row, "posted_at", editor.included),
@@ -2056,10 +2916,11 @@ function createOperationTableRow(row) {
         tableFieldCell("Сумма", amountInput(editor.amount), row, "amount_minor", editor.included),
         tableFieldCell("Валюта", readOnlyInput("currency", editor.currency), row, "currency", editor.included),
         tableFieldCell("Магазин или получатель", textInput("merchant", editor.merchant), row, "merchant", editor.included),
-        tableFieldCell("Описание", textInput("description", editor.description, 500), row, "description", editor.included),
+        descriptionCell,
         tableFieldCell("Категория", categorySelect(editor.category_id, editor.direction), row, "category_id", editor.included),
-        tableFieldCell("Последние 4 цифры карты", textInput("card_last4", editor.card_last4, 4), row, "card_last4", editor.included),
+        tableFieldCell("Счёт / карта", readOnlyInput("source_label", editor.source_label), row, "source_label", editor.included),
     );
+
     const action = document.createElement("div");
     for (const error of editor.included ? (row.field_errors?._transaction || []) : []) {
         action.append(errorText(error));
@@ -2067,6 +2928,28 @@ function createOperationTableRow(row) {
     action.append(saveOperationButton(row.id, "Сохранить"));
     tableRow.append(tableCell(action));
     return tableRow;
+}
+function transactionItemsDetails(items) {
+    if (!Array.isArray(items) || items.length === 0) return null;
+    const details = document.createElement("details");
+    details.className = "transaction-items";
+    const summary = document.createElement("summary");
+    summary.textContent = `Позиции чека (${items.length})`;
+    details.append(summary);
+    const list = document.createElement("ul");
+    for (const item of items) {
+        const line = document.createElement("li");
+        const quantity = Number(item.quantity);
+        const sum = Number(item.sum_minor);
+        line.textContent =
+            `${item.name || "Позиция"} · ${Number.isFinite(quantity) ? quantity : "?"} × ` +
+            `${minorToMajor(Number(item.price_minor) || 0, item.currency || "RUB")} ` +
+            `${item.currency || "RUB"} = ` +
+            `${minorToMajor(Number.isFinite(sum) ? sum : 0, item.currency || "RUB")} ${item.currency || "RUB"}`;
+        list.append(line);
+    }
+    details.append(list);
+    return details;
 }
 
 function tableCell(content) {
@@ -2195,11 +3078,22 @@ function categorySelect(selected, direction) {
     return select;
 }
 
+function normalizeCurrencyCode(currency) {
+    const value = String(currency || "").trim().toUpperCase();
+    return {
+        "643": "RUB",
+        "840": "USD",
+        "978": "EUR",
+        "826": "GBP",
+        "156": "CNY",
+    }[value] || value;
+}
+
 function currencyFractionDigits(currency) {
     try {
         return new Intl.NumberFormat("ru-RU", {
             style: "currency",
-            currency,
+            currency: normalizeCurrencyCode(currency),
         }).resolvedOptions().maximumFractionDigits;
     } catch (_) {
         return 2;
@@ -2245,7 +3139,6 @@ async function saveOperationEditor(editorElement) {
         merchant: editor.merchant,
         description: editor.description,
         category_id: editor.category_id || null,
-        card_last4: editor.card_last4 || null,
     };
     await runBusy(async () => {
         const state = await api(
