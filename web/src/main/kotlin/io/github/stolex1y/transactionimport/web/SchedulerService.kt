@@ -81,8 +81,13 @@ private const val MAX_TRANSACTIONS_PER_RUN = MAX_BANK_PAGES * BANK_PAGE_SIZE
 private const val MAX_SOURCE_RESPONSE_CHARS = 1_000_000
 private const val MAX_WORKER_DELAY_MS = 30_000L
 private val CURRENCY_PATTERN = Regex("^[A-Z]{3}$")
+private val RAW_RECEIPT_REFERENCE_PATTERN =
+    Regex("""(?i)\b(?:receipt|чек)[-_][A-Za-z0-9][A-Za-z0-9_-]{0,199}\b""")
+private const val REDACTED_RECEIPT_REFERENCE = "[идентификатор чека скрыт]"
 private const val MATCH_TIMEOUT_MS = 15_000L
 private const val SOURCE_CALL_TIMEOUT_MS = 30_000L
+private fun sanitizeSourceText(value: String): String =
+    RAW_RECEIPT_REFERENCE_PATTERN.replace(value.trim(), REDACTED_RECEIPT_REFERENCE)
 private const val RUN_LEASE_REFRESH_MS = 5 * 60_000L
 
 @Serializable
@@ -770,10 +775,13 @@ class SchedulerService(
             val amount = objectValue["amount_minor"]?.jsonPrimitive?.longOrNull
                 ?.takeIf { it != Long.MIN_VALUE }
                 ?: throw IllegalStateException("Банк вернул операцию без корректной суммы.")
-            val merchant = objectValue["merchant"]?.jsonPrimitive?.contentOrNull?.trim()
+            val description = sanitizeSourceText(
+                objectValue["description"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            )
+            val merchant = objectValue["merchant"]?.jsonPrimitive?.contentOrNull
+                ?.let(::sanitizeSourceText)
                 ?.takeIf(String::isNotBlank)
-                ?: objectValue["description"]?.jsonPrimitive?.contentOrNull?.trim()
-                    ?.takeIf(String::isNotBlank)
+                ?: description.takeIf(String::isNotBlank)
                 ?: throw IllegalStateException("Банк вернул операцию без продавца.")
             require(merchant.length <= 200) { "Банк вернул слишком длинное имя продавца." }
             val ref = objectValue["transaction_ref"]?.jsonPrimitive?.contentOrNull
@@ -800,7 +808,7 @@ class SchedulerService(
                 amountMinor = amount,
                 currency = currency,
                 merchant = merchant,
-                description = objectValue["description"]?.jsonPrimitive?.contentOrNull.orEmpty().take(1_000),
+                description = description.take(1_000),
                 sourceLabel = accountName.take(200),
                 sourceRef = ref,
             )

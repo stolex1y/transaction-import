@@ -58,6 +58,9 @@ private const val MAX_NATIVE_RESULT_ITEMS = 200
 private const val MAX_NATIVE_CANDIDATES = 500
 private const val MAX_NATIVE_JSON_DEPTH = 8
 private val NATIVE_CURRENCY_PATTERN = Regex("^[A-Z]{3}$")
+private val RAW_RECEIPT_REFERENCE_PATTERN =
+    Regex("""(?i)\b(?:receipt|чек)[-_][A-Za-z0-9][A-Za-z0-9_-]{0,199}\b""")
+private const val REDACTED_RECEIPT_REFERENCE = "[идентификатор чека скрыт]"
 @Serializable
 data class McpPreviewTransaction(
     @SerialName("occurred_at") val occurredAt: String,
@@ -989,13 +992,16 @@ class NativeMcpAgent(
 
         return "Счёт / карта"
     }
+    private fun sanitizeSourceText(value: String): String =
+        RAW_RECEIPT_REFERENCE_PATTERN.replace(value.trim(), REDACTED_RECEIPT_REFERENCE)
 
     private fun transactionDescription(transaction: JsonObject): String =
-        transaction["description"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        sanitizeSourceText(transaction["description"]?.jsonPrimitive?.contentOrNull.orEmpty())
 
     private fun transactionMerchant(transaction: JsonObject): String =
-        humanLabel(transaction["merchant"]?.jsonPrimitive?.contentOrNull)
-            ?: humanLabel(transactionDescription(transaction))
+        humanLabel(
+            sanitizeSourceText(transaction["merchant"]?.jsonPrimitive?.contentOrNull.orEmpty()),
+        ) ?: humanLabel(transactionDescription(transaction))
             ?: "Операция"
 
     private fun humanLabel(value: String?): String? =

@@ -70,8 +70,10 @@ class SchedulerServiceTest {
             )
 
             val session = dependencies.agent.getSession(first.targetSessionId!!)
-            val transaction = assertNotNull(session.draft).transactions.single().transaction
+            val item = assertNotNull(session.draft).transactions.single()
+            val transaction = item.transaction
             assertEquals("transaction-ref-001", transaction.sourceRef)
+            assertEquals("Синтетический чек [идентификатор чека скрыт]", item.description)
             now = epoch("2026-09-11")
             val second = scheduler.runNow(created.id)
             assertEquals(0, assertNotNull(second.lastResult).transactionCount)
@@ -110,7 +112,7 @@ class SchedulerServiceTest {
                         TbankToolCallResponse(
                             tool = tool,
                             text = """
-                                {"account_name":"Основной счёт","transactions":[{"transaction_ref":"transaction-ref-001","date":"2026-09-10T10:00:00Z","amount_minor":-1,"currency":"RUB","merchant":"Кофе","description":"Утренний кофе"}]}
+                                {"account_name":"Основной счёт","transactions":[{"transaction_ref":"transaction-ref-001","date":"2026-09-10T10:00:00Z","amount_minor":-1,"currency":"RUB","merchant":"Кофе","description":"Синтетический чек receipt-key-private"}]}
                             """.trimIndent(),
                         )
                     } else {
