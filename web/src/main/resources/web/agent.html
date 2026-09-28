@@ -10,13 +10,20 @@
 <body class="agent-body">
 <div class="agent-app">
     <header class="agent-toolbar">
-        <button id="open-session-drawer" class="icon-button" type="button" aria-controls="session-drawer" aria-expanded="false">
-            <span>Сессии</span>
-        </button>
         <div class="agent-brand">
             <span class="eyebrow">Smart Expense Agent</span>
             <strong id="toolbar-session-title">Импорт операций</strong>
         </div>
+        <nav id="panel-navigation" class="panel-navigation" aria-label="Основные панели">
+            <button id="open-session-drawer" class="panel-tab active" type="button"
+                    data-app-panel="sessions" aria-pressed="true">Сессии</button>
+            <button id="show-scheduler-panel" class="panel-tab" type="button"
+                    data-app-panel="scheduler" aria-pressed="false">Фоновые задачи</button>
+            <button id="show-mcp-panel" class="panel-tab" type="button"
+                    data-app-panel="mcp" aria-pressed="false">MCP</button>
+            <button id="show-settings-panel" class="panel-tab" type="button"
+                    data-app-panel="settings" aria-pressed="false">Настройки</button>
+        </nav>
         <div class="toolbar-actions">
             <button id="theme-toggle" class="secondary-button compact-button" type="button">Светлая тема</button>
             <button id="new-session" class="compact-button" type="button">Новый импорт</button>
@@ -24,25 +31,25 @@
     </header>
 
     <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
-    <aside id="session-drawer" class="session-drawer" aria-label="Сессии и общие настройки" aria-hidden="true">
-        <div class="drawer-heading">
+    <aside id="session-drawer" class="session-drawer" aria-label="Сессии" aria-hidden="false">
+        <div class="drawer-heading" data-app-content="sessions">
             <h2>Сессии</h2>
-            <button id="close-session-drawer" class="icon-only-button" type="button" aria-label="Закрыть список сессий">×</button>
         </div>
-        <button id="drawer-new-session" type="button">Новый импорт</button>
-        <div id="session-list" class="session-list">
+        <button id="drawer-new-session" data-app-content="sessions" type="button">Новый импорт</button>
+        <div id="session-list" class="session-list" data-app-content="sessions">
             <p class="muted">Загружаем сессии…</p>
         </div>
-        <button id="delete-session" class="danger-button" type="button" hidden>Удалить выбранную сессию</button>
-        <section class="mcp-catalog" aria-labelledby="mcp-catalog-title">
+        <button id="delete-session" class="danger-button" data-app-content="sessions"
+                type="button" hidden>Удалить выбранную сессию</button>
+        <section class="mcp-catalog" data-app-content="mcp" aria-labelledby="mcp-catalog-title">
             <div class="section-heading">
-                <h2 id="mcp-catalog-title">MCP-серверы</h2>
+                <h2 id="mcp-catalog-title">MCP</h2>
                 <button id="refresh-mcp-catalog" class="compact-button" type="button">Обновить</button>
             </div>
             <p id="mcp-catalog-status" class="control-note">Проверяем подключение…</p>
             <div id="mcp-catalog-list" class="mcp-catalog-list"></div>
         </section>
-        <section class="scheduler-panel" aria-labelledby="scheduler-title">
+        <section class="scheduler-panel" data-app-content="scheduler" aria-labelledby="scheduler-title">
             <div class="section-heading">
                 <h2 id="scheduler-title">Фоновый импорт</h2>
                 <button id="refresh-scheduler" class="compact-button" type="button">Обновить</button>
@@ -50,6 +57,7 @@
             <p id="scheduler-status" class="control-note">
                 Настройте периодическое чтение операций и чеков в одну SQLite-сессию.
             </p>
+            <p class="control-note">Часовой пояс фиксируется по системной настройке сервера при создании; период измеряется в прошедших минутах.</p>
             <form id="scheduler-form" class="category-form">
                 <label for="scheduler-name">Название задания</label>
                 <input id="scheduler-name" maxlength="120" value="Ежедневный импорт" required>
@@ -59,14 +67,12 @@
                 <input id="scheduler-start-date" type="date" value="2026-09-01" required>
                 <label for="scheduler-interval">Период, минут</label>
                 <input id="scheduler-interval" type="number" min="1" max="43200" value="1440" required>
-                <label for="scheduler-time-zone">Часовой пояс</label>
-                <input id="scheduler-time-zone" value="UTC" maxlength="80" required>
                 <button id="scheduler-submit" type="submit">Создать фоновое задание</button>
             </form>
             <div id="scheduler-task-list" class="scheduler-task-list"></div>
             <div id="scheduler-history" class="scheduler-history"></div>
         </section>
-        <section class="tbank-panel" aria-labelledby="tbank-title">
+        <section class="tbank-panel" data-app-content="mcp" aria-labelledby="tbank-title">
             <div class="section-heading">
                 <h2 id="tbank-title">Т-Банк MCP</h2>
                 <span id="tbank-session-status" class="mcp-server-status">не выполнен login</span>
@@ -116,14 +122,46 @@
         </section>
 
 
-        <form id="preferences-form" class="preferences-form">
+        <section id="receipts-panel" class="receipts-panel" data-app-content="mcp" aria-labelledby="receipts-title">
+            <div class="section-heading">
+                <h2 id="receipts-title">Чеки</h2>
+                <span id="receipts-auth-status" class="mcp-server-status">Проверяем авторизацию…</span>
+            </div>
+            <p id="receipts-auth-detail" class="control-note">Для входа откроется официальный сайт ФНС. Телефон, CAPTCHA и SMS-код вводятся только в отдельном окне браузера.</p>
+            <div class="category-form-actions">
+                <button id="receipts-browser-login" type="button">Войти в ФНС</button>
+                <button id="receipts-refresh-session" class="secondary-button compact-button" type="button">Обновить статус</button>
+                <button id="receipts-session-retry" class="secondary-button compact-button" type="button" hidden>Обновить авторизацию</button>
+                <button id="receipts-logout" class="danger-button" type="button" hidden>Выйти из ФНС</button>
+            </div>
+            <form id="receipts-search-form" class="category-form">
+                <h3>Поиск чеков</h3>
+                <label for="receipts-from">Дата от</label>
+                <input id="receipts-from" type="date" required>
+                <label for="receipts-to">Дата до</label>
+                <input id="receipts-to" type="date" required>
+                <label for="receipts-seller">Продавец (необязательно)</label>
+                <input id="receipts-seller" maxlength="120" autocomplete="off">
+                <button id="receipts-search-submit" type="submit">Найти чеки</button>
+            </form>
+            <p id="receipts-search-status" class="control-note" aria-live="polite"></p>
+            <div id="receipts-summary-list" class="receipts-summary-list"></div>
+            <section id="receipt-detail-panel" class="receipt-detail-panel" aria-labelledby="receipt-detail-title" hidden>
+                <h3 id="receipt-detail-title">Детали чека</h3>
+                <div id="receipt-detail"></div>
+            </section>
+        </section>
+
+        
+        
+        <form id="preferences-form" class="preferences-form" data-app-content="settings">
             <h2>Общие инструкции</h2>
             <label for="global-user-prompt">Инструкции для всех сессий</label>
             <textarea id="global-user-prompt" rows="6" maxlength="8000" placeholder="Например: не выбирай переводы между моими счетами"></textarea>
             <p class="control-note">Инструкции применяются к следующим сообщениям во всех сессиях.</p>
             <button id="save-preferences" class="secondary-button" type="submit">Сохранить инструкции</button>
         </form>
-        <section class="merchant-rules" aria-labelledby="merchant-rules-title">
+        <section class="merchant-rules" data-app-content="settings" aria-labelledby="merchant-rules-title">
             <h2 id="merchant-rules-title">Канонические названия магазинов</h2>
             <p class="control-note">Правила принадлежат текущему профилю и применяются до и после ответа модели.</p>
             <form id="merchant-rule-form" class="category-form">
@@ -145,7 +183,7 @@
             </form>
             <div id="merchant-rule-list" class="category-list"></div>
         </section>
-        <section class="category-manager" aria-labelledby="categories-title">
+        <section class="category-manager" data-app-content="settings" aria-labelledby="categories-title">
             <h2 id="categories-title">Категории операций</h2>
             <p class="control-note">Общий справочник для всех сессий. В операции выбираются только конечные категории.</p>
             <form id="category-form" class="category-form">
@@ -168,19 +206,24 @@
             </form>
             <div id="category-list" class="category-list"></div>
         </section>
-        <section class="task-invariants" aria-labelledby="task-invariants-title">
+        <section class="task-invariants" data-app-content="settings" aria-labelledby="task-invariants-title">
             <h2 id="task-invariants-title">Системные инварианты</h2>
             <p class="control-note">Эти правила зафиксированы приложением и не редактируются пользовательскими инструкциями.</p>
             <div id="system-invariant-list" class="invariant-list"></div>
         </section>
-        <section class="confirmed-decisions" aria-labelledby="decisions-title">
+        <section class="confirmed-decisions" data-app-content="settings" aria-labelledby="decisions-title">
             <h2 id="decisions-title">Подтверждённые решения</h2>
             <p class="control-note">Появляются из кандидатов в сообщениях агента после явного подтверждения.</p>
             <ul id="confirmed-decisions-list" class="confirmed-decisions-list"></ul>
         </section>
     </aside>
 
-    <main class="agent-main">
+    <main class="agent-main" data-app-content="sessions">
+        <section id="session-not-found" class="panel empty-state" hidden>
+            <h1>Сессия не найдена</h1>
+            <p class="muted">Сессия по этой ссылке не существует или была удалена. Другую сессию автоматически не открываем.</p>
+            <button id="not-found-new-session" type="button">Создать новую сессию</button>
+        </section>
         <section id="empty-session" class="panel empty-state">
             <h1>Импорт банковских операций</h1>
             <p class="muted">Создайте сессию и вставьте выписку. Агент подготовит редактируемые операции.</p>
@@ -214,6 +257,16 @@
                 </div>
                 <p id="session-config-note" class="control-note">Изменения применяются к следующим сообщениям; диалог и черновик сохраняются.</p>
                 <p id="context-strategy-note" class="control-note">Стратегия контекста загружается вместе с сессией.</p>
+            </section>
+            <section id="linked-scheduler-tasks" class="panel linked-scheduler-tasks" hidden
+                     aria-labelledby="linked-scheduler-tasks-title">
+                <div class="section-heading">
+                    <div>
+                        <h2 id="linked-scheduler-tasks-title">Связанные фоновые задачи</h2>
+                        <p class="control-note">Перейдите к карточке задания, чтобы проверить статус, историю или запустить его вручную.</p>
+                    </div>
+                </div>
+                <div id="linked-scheduler-task-list" class="linked-scheduler-task-list"></div>
             </section>
             <section class="panel receipt-state-panel" aria-labelledby="receipt-state-title">
                 <div class="section-heading">

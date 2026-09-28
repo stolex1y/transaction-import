@@ -17,6 +17,9 @@ import io.github.stolex1y.transactionimport.core.ResponseMessage
 import io.github.stolex1y.transactionimport.core.SmartExpenseAgent
 import io.github.stolex1y.transactionimport.core.Usage
 import io.github.stolex1y.transactionimport.persistence.SqliteImportSessionRepository
+import io.github.stolex1y.transactionimport.persistence.SqliteSchedulerRepository
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.concurrent.atomic.AtomicInteger
 
 class FakeAgentGateway(
@@ -159,6 +162,9 @@ fun fakeAgentDependencies(
         summaryBatchMessages = 4,
         summaryMaxTokens = 1_024,
     ),
+    receiptsProxy: ReceiptsProxyService? = null,
+    schedulerAccountAvailable: Boolean = false,
+    schedulerNowEpochMs: () -> Long = { System.currentTimeMillis() },
 ): AgentWebDependencies {
     val catalog = ProviderCatalog(
         providers = listOf(
@@ -198,11 +204,90 @@ fun fakeAgentDependencies(
         runtimeConfig = runtime,
         configValidator = { catalog.resolve(it) },
     )
+    val scheduler = SchedulerService(
+        repository = SqliteSchedulerRepository(databasePath),
+        agent = agent,
+        mcpTools = object : McpToolProvider {
+            override suspend fun allowedTools() = emptyList<McpCallableTool>()
+
+            override suspend fun callConfiguredTool(
+                serverId: String,
+                tool: String,
+                arguments: kotlinx.serialization.json.JsonObject,
+            ): TbankToolCallResponse {
+                if (!schedulerAccountAvailable) {
+                    return TbankToolCallResponse(tool = tool, isError = true, text = "fake source unavailable")
+                }
+                return when (serverId to tool) {
+                    "tbank-transactions" to "list-accounts" -> TbankToolCallResponse(
+                        tool = tool,
+                        text = """{"accounts":[{"account_ref":"fixture-account","name":"Synthetic account"}]}""",
+                    )
+                    "tbank-transactions" to "get-account-transactions" -> {
+                        val transactionList = when (arguments["from"]?.jsonPrimitive?.contentOrNull) {
+                            "2026-09-10" ->
+                                """[{"transaction_ref":"fixture-transaction-1","date":"2026-09-10T10:00:00Z","amount_minor":-499,"currency":"RUB","merchant":"Browser scheduled purchase","description":"Browser scheduled purchase"}]"""
+                            "2026-09-11" ->
+                                """[{"transaction_ref":"fixture-transaction-2","date":"2026-09-11T10:00:00Z","amount_minor":-350,"currency":"RUB","merchant":"Second scheduled purchase","description":"Second scheduled purchase"}]"""
+                            else -> "[]"
+                        }
+                        TbankToolCallResponse(
+                            tool = tool,
+                            text = """{"account_name":"Synthetic account","transactions":$transactionList}""",
+                        )
+                    }
+                    "receipts" to "search-receipts" -> {
+                        val second = arguments["query"]?.jsonPrimitive?.contentOrNull == "Second scheduled purchase"
+                        val receiptKey = if (second) "fixture-receipt-private-2" else "fixture-receipt-private"
+                        val merchant = if (second) "Second scheduled purchase" else "Browser scheduled purchase"
+                        val receivedAt = if (second) "2026-09-11T10:05:00Z" else "2026-09-10T10:05:00Z"
+                        val amountMinor = if (second) 350 else 499
+                        TbankToolCallResponse(
+                            tool = tool,
+                            text = """{"receipts":[{"receipt_key":"$receiptKey","merchant":"$merchant","received_at":"$receivedAt","amount_minor":$amountMinor,"currency":"RUB"}],"has_more":false}""",
+                        )
+                    }
+                    "receipts" to "get-receipt" -> {
+                        val receiptKey = arguments["receipt_key"]?.jsonPrimitive?.contentOrNull
+                        val second = receiptKey == "fixture-receipt-private-2"
+                        val merchant = if (second) "Second scheduled purchase" else "Browser scheduled purchase"
+                        val receivedAt = if (second) "2026-09-11T10:05:00Z" else "2026-09-10T10:05:00Z"
+                        val amountMinor = if (second) 350 else 499
+                        val itemName = if (second) "Second imported item" else "Imported item"
+                        TbankToolCallResponse(
+                            tool = tool,
+                            text = """{"receipt_key":"$receiptKey","date_time":"$receivedAt","total_minor":$amountMinor,"currency":"RUB","items":[{"name":"$itemName","quantity":1,"price_minor":$amountMinor,"sum_minor":$amountMinor}]}""",
+                        )
+                    }
+                    else -> TbankToolCallResponse(tool = tool, isError = true, text = "unexpected fake source tool")
+                }
+            }
+        },
+        gatewayResolver = AgentGatewayResolver { gateway },
+        runtimeConfig = runtime,
+        nowEpochMs = schedulerNowEpochMs,
+        matchSelector = ReceiptMatchSelector { _, _, choices ->
+            choices.singleOrNull()?.let { ReceiptSelectionResponseView(it.alias, 0.96) }
+        },
+    )
     return AgentWebDependencies(
         agent = agent,
         catalog = catalog,
         runtimeConfig = runtime,
         availableProviderIds = setOf("fake"),
         newSessionTitle = { "Тестовый импорт" },
+        scheduler = scheduler,
+        tbankMcp = object : TbankMcpProvider by UnavailableTbankMcpProvider {
+            override suspend fun callTool(request: TbankToolCallRequest) =
+                if (schedulerAccountAvailable && request.tool == "list-accounts") {
+                    TbankToolCallResponse(
+                        tool = request.tool,
+                        text = """{"accounts":[{"account_ref":"fixture-account","name":"Synthetic account"}]}""",
+                    )
+                } else {
+                    UnavailableTbankMcpProvider.callTool(request)
+                }
+        },
+        receiptsProxy = receiptsProxy,
     )
 }

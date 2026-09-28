@@ -3,6 +3,7 @@ package io.github.stolex1y.transactionimport.web
 import io.github.stolex1y.transactionimport.core.AgentResponseException
 import io.github.stolex1y.transactionimport.core.InvariantViolationException
 import io.github.stolex1y.transactionimport.core.ProviderUnavailableException
+import io.github.stolex1y.transactionimport.core.LinkedSchedulerTasksChangedException
 import io.github.stolex1y.transactionimport.core.RevisionConflictException
 import io.github.stolex1y.transactionimport.core.SessionNotFoundException
 import io.ktor.serialization.kotlinx.json.json
@@ -51,6 +52,12 @@ fun Application.module(agentDependencies: AgentWebDependencies? = null) {
         exception<RevisionConflictException> { call, cause ->
             call.respond(HttpStatusCode.Conflict, ErrorResponse(cause.message ?: "Конфликт ревизий."))
         }
+        exception<LinkedSchedulerTasksChangedException> { call, cause ->
+            call.respond(
+                HttpStatusCode.Conflict,
+                ErrorResponse(cause.message ?: "Связанные фоновые задачи изменились."),
+            )
+        }
         exception<ProviderUnavailableException> { call, cause ->
             call.respond(
                 HttpStatusCode.ServiceUnavailable,
@@ -85,6 +92,12 @@ fun Application.module(agentDependencies: AgentWebDependencies? = null) {
 
     routing {
         get("/agent") {
+            call.respondText(
+                text = loadResource("web/agent.html"),
+                contentType = ContentType.Text.Html,
+            )
+        }
+        get("/agent/sessions/{id}") {
             call.respondText(
                 text = loadResource("web/agent.html"),
                 contentType = ContentType.Text.Html,

@@ -14,6 +14,7 @@ import io.github.stolex1y.transactionimport.core.TransactionDirection
 import io.github.stolex1y.transactionimport.core.SYSTEM_TASK_INVARIANTS
 import io.github.stolex1y.transactionimport.core.TaskInvariant
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.call
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
@@ -32,9 +33,49 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import java.net.URI
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import java.util.Locale
+
 private const val MAX_SCHEDULER_ACCOUNT_RESPONSE_CHARS = 1_000_000
+
+private val LOOPBACK_ORIGIN_HOSTS = setOf("127.0.0.1", "localhost")
+
+private fun ApplicationCall.hasTrustedLoopbackOrigin(): Boolean {
+    val request = this.request
+    val fetchSite = request.headers["Sec-Fetch-Site"]
+    if (fetchSite.equals("cross-site", ignoreCase = true)) return false
+    val targetHost = request.headers["Host"] ?: return false
+    val targetUri = runCatching { URI("http://$targetHost") }.getOrNull() ?: return false
+    val targetHostName = targetUri.host?.lowercase(Locale.ROOT) ?: return false
+    val targetPort = targetUri.port
+    if (
+        targetHostName !in LOOPBACK_ORIGIN_HOSTS ||
+        (targetPort != -1 && targetPort !in 1..65535) ||
+        targetUri.rawUserInfo != null ||
+        targetUri.rawQuery != null ||
+        targetUri.rawFragment != null ||
+        (!targetUri.rawPath.isNullOrEmpty() && targetUri.rawPath != "/")
+    ) {
+        return false
+    }
+    val origin = request.headers["Origin"] ?: return true
+    val originUri = runCatching { URI(origin) }.getOrNull() ?: return false
+    val originHost = originUri.host?.lowercase(Locale.ROOT) ?: return false
+    val originPort = originUri.port
+    return originUri.scheme.equals("http", ignoreCase = true) &&
+        originHost in LOOPBACK_ORIGIN_HOSTS &&
+        originHost == targetHostName &&
+        (originPort == -1 || originPort in 1..65535) &&
+        effectiveOriginPort(originUri) == effectiveOriginPort(targetUri) &&
+        originUri.rawUserInfo == null &&
+        originUri.rawQuery == null &&
+        originUri.rawFragment == null &&
+        (originUri.rawPath.isNullOrEmpty() || originUri.rawPath == "/")
+}
+
+private fun effectiveOriginPort(uri: URI): Int = if (uri.port == -1) 80 else uri.port
 
 class AgentWebDependencies(
     val agent: SmartExpenseAgent,
@@ -48,6 +89,7 @@ class AgentWebDependencies(
     val tbankMcp: TbankMcpProvider = UnavailableTbankMcpProvider,
     val nativeMcpAgent: NativeMcpAgent? = null,
     val scheduler: SchedulerService? = null,
+    val receiptsProxy: ReceiptsProxyService? = null,
 )
 
 @Serializable
@@ -112,6 +154,7 @@ data class SetAllIncludedRequest(
 @Serializable
 data class DeleteImportSessionRequest(
     val revision: Long,
+    @SerialName("expected_linked_task_ids") val expectedLinkedTaskIds: List<String>,
 )
 
 @Serializable
@@ -170,7 +213,6 @@ data class CreateSchedulerTaskRequest(
     @SerialName("account_refs") val accountRefs: List<String>,
     @SerialName("start_date") val startDate: String,
     @SerialName("interval_minutes") val intervalMinutes: Long,
-    @SerialName("time_zone") val timeZone: String = "UTC",
 )
 
 @Serializable
@@ -218,6 +260,42 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
         call.respond(dependencies.requireAgentRuntime().mcpCatalog.catalog())
     }
 
+    post("/api/agent/receipts/browser-login") {
+        if (!call.hasTrustedLoopbackOrigin()) {
+            call.respond(HttpStatusCode.Forbidden)
+            return@post
+        }
+        call.respond(dependencies.requireAgentRuntime().requireReceiptsProxy().browserLogin())
+    }
+    get("/api/agent/receipts/session") {
+        call.respond(dependencies.requireAgentRuntime().requireReceiptsProxy().session())
+    }
+    post("/api/agent/receipts/session/retry") {
+        if (!call.hasTrustedLoopbackOrigin()) {
+            call.respond(HttpStatusCode.Forbidden)
+            return@post
+        }
+        call.respond(dependencies.requireAgentRuntime().requireReceiptsProxy().retrySession())
+    }
+    post("/api/agent/receipts/logout") {
+        if (!call.hasTrustedLoopbackOrigin()) {
+            call.respond(HttpStatusCode.Forbidden)
+            return@post
+        }
+        call.respond(dependencies.requireAgentRuntime().requireReceiptsProxy().logout())
+    }
+    post("/api/agent/receipts/search") {
+        if (!call.hasTrustedLoopbackOrigin()) {
+            call.respond(HttpStatusCode.Forbidden)
+            return@post
+        }
+        val request = call.receive<ReceiptSearchRequest>()
+        call.respond(dependencies.requireAgentRuntime().requireReceiptsProxy().search(request))
+    }
+    get("/api/agent/receipts/{alias}") {
+        val alias = call.parameters["alias"].requiredPathParameter("alias")
+        call.respond(dependencies.requireAgentRuntime().requireReceiptsProxy().detail(alias))
+    }
     get("/api/agent/scheduler/accounts") {
         val runtime = dependencies.requireAgentRuntime()
         val response = runtime.tbankMcp.callTool(TbankToolCallRequest("list-accounts"))
@@ -258,7 +336,6 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
                 accountRefs = request.accountRefs,
                 startDate = request.startDate,
                 intervalMinutes = request.intervalMinutes,
-                timeZone = request.timeZone,
             ),
         )
     }
@@ -586,7 +663,12 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
     delete("/api/agent/sessions/{id}") {
         val id = call.parameters["id"].requiredPathParameter("id")
         val request = call.receive<DeleteImportSessionRequest>()
-        dependencies.requireAgentRuntime().agent.deleteSession(id, request.revision)
+        val runtime = dependencies.requireAgentRuntime()
+        runtime.requireScheduler().deleteLinkedSession(
+            id,
+            request.revision,
+            request.expectedLinkedTaskIds,
+        )
         call.respond(HttpStatusCode.NoContent)
     }
 
@@ -618,6 +700,8 @@ private fun MerchantCanonicalCandidateAcceptanceResponse.withoutOpaqueSourceRefs
     copy(state = state.withoutOpaqueSourceRefs())
 private fun AgentWebDependencies.requireScheduler(): SchedulerService =
     scheduler ?: throw ProviderUnavailableException("Scheduler service не настроен.")
+private fun AgentWebDependencies.requireReceiptsProxy(): ReceiptsProxyService =
+    receiptsProxy ?: throw ProviderUnavailableException("Receipts MCP service не настроен.")
 
 private fun parseSchedulerAccounts(text: String): List<SchedulerAccountResponse> {
     val payload = runCatching { Json.parseToJsonElement(text) }.getOrElse {

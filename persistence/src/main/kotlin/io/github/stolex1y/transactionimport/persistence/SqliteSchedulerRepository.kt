@@ -5,6 +5,9 @@ import io.github.stolex1y.transactionimport.core.SchedulerRepository
 import io.github.stolex1y.transactionimport.core.SchedulerRunHistory
 import io.github.stolex1y.transactionimport.core.SchedulerRunStatus
 import io.github.stolex1y.transactionimport.core.SchedulerTask
+import io.github.stolex1y.transactionimport.core.RevisionConflictException
+import io.github.stolex1y.transactionimport.core.SessionNotFoundException
+import io.github.stolex1y.transactionimport.core.LinkedSchedulerTasksChangedException
 import io.github.stolex1y.transactionimport.core.SchedulerTaskStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -134,7 +137,8 @@ class SqliteSchedulerRepository(
         }
         val updated = current.copy(targetSessionId = sessionId)
         validateTask(updated)
-        require(updateTaskRow(this, updated, runClaimId = runId) == 1) {
+        check(updateTaskRow(this, updated, runClaimId = runId) == 1) {
+            "Scheduler run claim потерян при связывании session: $taskId."
         }
         updated
     }
@@ -160,7 +164,8 @@ class SqliteSchedulerRepository(
             lastError = null,
             lastResult = result,
         )
-        require(updateTaskRow(this, updated, runClaimId = result.runId, clearRunClaim = true) == 1) {
+        check(updateTaskRow(this, updated, runClaimId = result.runId, clearRunClaim = true) == 1) {
+            "Scheduler run claim потерян перед фиксацией результата: $taskId."
         }
         insertRun(
             this,
@@ -192,10 +197,67 @@ class SqliteSchedulerRepository(
             ),
             lastError = run.error?.take(500),
         )
-        require(updateTaskRow(this, updated, runClaimId = run.runId, clearRunClaim = true) == 1) {
+        check(updateTaskRow(this, updated, runClaimId = run.runId, clearRunClaim = true) == 1) {
+            "Scheduler run claim потерян перед фиксацией ошибки: $taskId."
         }
         insertRun(this, run.copy(error = run.error?.take(500)))
         updated
+    }
+
+    override suspend fun deleteLinkedSession(
+        sessionId: String,
+        expectedRevision: Long,
+        expectedLinkedTaskIds: List<String>,
+    ) = transaction {
+        val actualRevision = prepareStatement(
+            "SELECT revision FROM import_sessions WHERE id = ?",
+        ).use { statement ->
+            statement.setString(1, sessionId)
+            statement.executeQuery().use { rows ->
+                if (rows.next()) rows.getLong("revision") else null
+            }
+        } ?: throw SessionNotFoundException(sessionId)
+        if (actualRevision != expectedRevision) {
+            throw RevisionConflictException(expectedRevision, actualRevision)
+        }
+        val actualLinkedTaskIds = prepareStatement(
+            "SELECT id FROM scheduler_tasks WHERE target_session_id = ? ORDER BY id",
+        ).use { statement ->
+            statement.setString(1, sessionId)
+            statement.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(rows.getString("id")) }
+            }
+        }
+        if (actualLinkedTaskIds != expectedLinkedTaskIds.sorted()) {
+            throw LinkedSchedulerTasksChangedException()
+        }
+        prepareStatement(
+            """
+            DELETE FROM scheduler_runs
+            WHERE task_id IN (
+                SELECT id FROM scheduler_tasks WHERE target_session_id = ?
+            )
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, sessionId)
+            statement.executeUpdate()
+        }
+        prepareStatement(
+            "DELETE FROM scheduler_tasks WHERE target_session_id = ?",
+        ).use { statement ->
+            statement.setString(1, sessionId)
+            statement.executeUpdate()
+        }
+        val deletedSession = prepareStatement(
+            "DELETE FROM import_sessions WHERE id = ? AND revision = ?",
+        ).use { statement ->
+            statement.setString(1, sessionId)
+            statement.setLong(2, expectedRevision)
+            statement.executeUpdate()
+        }
+        if (deletedSession != 1) {
+            throw RevisionConflictException(expectedRevision, actualRevision)
+        }
     }
 
     override suspend fun history(taskId: String, limit: Int): List<SchedulerRunHistory> = database {

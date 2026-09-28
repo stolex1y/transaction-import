@@ -12,7 +12,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.JsonObject
 import java.net.ServerSocket
+import java.time.ZoneId
+import java.time.LocalDate
 import java.nio.file.Files
 import kotlin.io.path.deleteIfExists
 import kotlin.test.Test
@@ -433,7 +436,7 @@ class AgentBrowserTest {
                         waitForAgentInitialized(page)
                         assertEquals(0, page.locator("#download-memory-report").count())
 
-                        page.locator("#open-session-drawer").click()
+                        page.locator("#show-settings-panel").click()
                         page.locator("#global-user-prompt").fill("Профиль для memory browser")
                         page.locator("#save-preferences").click()
                         page.waitForFunction(
@@ -448,6 +451,7 @@ class AgentBrowserTest {
                             "() => document.querySelector('#agent-status')?.textContent === 'Merchant rule добавлено.'",
                         )
                         assertTrue(page.locator("#merchant-rule-list").textContent().contains("У дома"))
+                        page.locator("#open-session-drawer").click()
                         page.locator("#drawer-new-session").click()
                         page.locator("#agent-workspace").waitFor()
                         assertEquals(1, page.locator("#memory-layer-list .memory-layer").count())
@@ -482,7 +486,7 @@ class AgentBrowserTest {
                         assertEquals(0, page.locator(".memory-candidate button").count())
                         assertTrue(page.locator(".candidate-status").textContent().contains("Добавлено"))
 
-                        page.locator("#open-session-drawer").click()
+                        page.locator("#show-settings-panel").click()
                         val decisionInput = page.locator("#confirmed-decisions-list input.decision-editor")
                         assertEquals(
                             "Исключать переводы между своими счетами",
@@ -507,7 +511,7 @@ class AgentBrowserTest {
                                 .contains("Подтверждённых решений пока нет."),
                         )
 
-                        page.locator("#close-session-drawer").click()
+                        page.locator("#open-session-drawer").click()
                         page.locator("#agent-message").fill("Уточнение browser draft")
                         page.locator("#send-message").click()
                         page.waitForFunction(
@@ -799,11 +803,11 @@ class AgentBrowserTest {
                         assertEquals(0, page.locator("#task-stage").count())
                         assertEquals(0, page.locator("#task-transition-actions").count())
 
-                        page.locator("#open-session-drawer").click()
+                        page.locator("#show-settings-panel").click()
                         page.locator("#system-invariant-list .category-item").first().waitFor()
                         assertEquals(5, page.locator("#system-invariant-list .category-item").count())
                         assertEquals(0, page.locator("#profile-name").count())
-                        page.locator("#close-session-drawer").click()
+                        page.locator("#open-session-drawer").click()
 
                         page.locator("#agent-message").fill("Синтетическая выписка")
                         page.locator("#send-message").click()
@@ -971,6 +975,1235 @@ class AgentBrowserTest {
         } finally {
             server.stop(1_000, 1_000)
             database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun navigationKeepsFourPanelsIndependentAndSessionUrlsStable() {
+        val database = Files.createTempFile("agent-browser-navigation-", ".sqlite")
+        val gateway = FakeAgentGateway()
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        val baseUrl = "http://127.0.0.1:$port"
+                        page.navigate("$baseUrl/agent")
+                        waitForAgentInitialized(page)
+
+                        val settingsSurfaceSelectors = listOf(
+                            "#preferences-form",
+                            "#merchant-rule-form",
+                            "#merchant-rule-list",
+                            "#category-form",
+                            "#category-list",
+                            "#system-invariant-list",
+                            "#confirmed-decisions-list",
+                        )
+                        page.locator("#show-mcp-panel").click()
+                        assertTrue(page.locator("#receipts-panel").isVisible)
+                        assertFalse(page.locator("#session-list").isVisible)
+                        assertEquals(
+                            0,
+                            page.locator(
+                                "#receipts-panel input[type='tel'], #receipts-panel input[type='password'], " +
+                                    "#receipts-panel input[name='phone'], #receipts-panel input[name='otp']",
+                            ).count(),
+                        )
+                        settingsSurfaceSelectors.forEach { selector ->
+                            assertFalse(page.locator(selector).isVisible)
+                        }
+                        page.locator("#show-scheduler-panel").click()
+                        assertTrue(page.locator("#scheduler-form").isVisible)
+                        assertFalse(page.locator("#receipts-panel").isVisible)
+                        assertEquals(0, page.locator("#scheduler-time-zone").count())
+                        settingsSurfaceSelectors.forEach { selector ->
+                            assertFalse(page.locator(selector).isVisible)
+                        }
+                        page.locator("#show-settings-panel").click()
+                        assertTrue(page.locator("#preferences-form").isVisible)
+                        settingsSurfaceSelectors.forEach { selector ->
+                            assertTrue(page.locator(selector).isVisible)
+                        }
+                        assertFalse(page.locator("#scheduler-form").isVisible)
+                        page.locator("#open-session-drawer").click()
+                        assertTrue(page.locator("#empty-session").isVisible)
+                        settingsSurfaceSelectors.forEach { selector ->
+                            assertFalse(page.locator(selector).isVisible)
+                        }
+
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        val firstPath = page.evaluate("() => window.location.pathname").toString()
+                        assertTrue(firstPath.matches(Regex("/agent/sessions/[^/]+")))
+                        page.locator("#agent-message").fill("Первая сессия")
+                        page.locator("#send-message").click()
+                        page.locator("#operation-table").waitFor()
+
+                        page.locator("#new-session").click()
+                        page.waitForFunction(
+                            "expected => window.location.pathname !== expected",
+                            firstPath,
+                        )
+                        waitForSessionReady(page)
+                        val secondPath = page.evaluate("() => window.location.pathname").toString()
+                        assertTrue(secondPath.matches(Regex("/agent/sessions/[^/]+")))
+                        assertFalse(firstPath == secondPath)
+                        page.locator("#agent-message").fill("Вторая сессия")
+                        page.locator("#send-message").click()
+                        page.locator("#operation-table").waitFor()
+
+                        page.goBack()
+                        page.waitForFunction("expected => window.location.pathname === expected", firstPath)
+                        page.waitForFunction(
+                            "expected => document.querySelector('#message-list')?.textContent.includes(expected)",
+                            "Первая сессия",
+                        )
+                        assertFalse(page.locator("#message-list").textContent().contains("Вторая сессия"))
+                        page.goForward()
+                        page.waitForFunction("expected => window.location.pathname === expected", secondPath)
+                        page.waitForFunction(
+                            "expected => document.querySelector('#message-list')?.textContent.includes(expected)",
+                            "Вторая сессия",
+                        )
+                        page.reload()
+                        waitForSessionReady(page)
+                        assertEquals(secondPath, page.evaluate("() => window.location.pathname").toString())
+                        assertTrue(page.locator("#message-list").textContent().contains("Вторая сессия"))
+
+                        val unknownPath = "/agent/sessions/not-a-real-session"
+                        page.navigate("$baseUrl$unknownPath")
+                        page.locator("#session-not-found").waitFor()
+                        assertTrue(page.locator("#session-not-found").isVisible)
+                        assertFalse(page.locator("#agent-workspace").isVisible)
+                        assertEquals(unknownPath, page.evaluate("() => window.location.pathname").toString())
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun backNavigationWinsOverPendingSessionCreationAndOpen() {
+        val database = Files.createTempFile("agent-browser-pending-navigation-", ".sqlite")
+        val gateway = FakeAgentGateway()
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        val firstSessionId = page.evaluate("() => sessionIdFromLocation()").toString()
+
+                        page.locator("#new-session").click()
+                        page.waitForFunction(
+                            "expected => window.location.pathname !== expected",
+                            "/agent/sessions/$firstSessionId",
+                        )
+                        waitForSessionReady(page)
+                        val secondSessionId = page.evaluate("() => sessionIdFromLocation()").toString()
+                        assertTrue(firstSessionId != secondSessionId)
+
+                        page.evaluate(
+                            """
+                                () => {
+                                  const originalFetch = window.fetch.bind(window);
+                                  let creationHeld = false;
+                                  let releaseCreation;
+                                  const creationGate = new Promise(resolve => { releaseCreation = resolve; });
+                                  window.__pendingCreateStarted = false;
+                                  window.__releasePendingCreate = () => releaseCreation();
+                                  window.fetch = (input, init) => {
+                                    const url = typeof input === 'string' ? input : input.url;
+                                    const path = new URL(url, window.location.href).pathname;
+                                    const method = (init?.method ||
+                                      (input instanceof Request ? input.method : 'GET')).toUpperCase();
+                                    if (!creationHeld && method === 'POST' && path === '/api/agent/sessions') {
+                                      creationHeld = true;
+                                      window.__pendingCreateStarted = true;
+                                      return creationGate.then(() => originalFetch(input, init));
+                                    }
+                                    return originalFetch(input, init);
+                                  };
+                                }
+                            """.trimIndent(),
+                        )
+                        page.evaluate("() => { window.__pendingCreate = createSession(); }")
+                        page.waitForFunction("() => window.__pendingCreateStarted === true")
+                        page.goBack()
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected && " +
+                                "activeState?.session.id === expected",
+                            firstSessionId,
+                        )
+                        page.evaluate("() => window.__releasePendingCreate()")
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-app')?.getAttribute('aria-busy') === 'false'",
+                        )
+                        assertEquals(
+                            firstSessionId,
+                            page.evaluate("() => activeState?.session.id").toString(),
+                        )
+                        assertEquals(3, page.evaluate("() => sessions.length").toString().toInt())
+                        assertEquals(
+                            "/agent/sessions/$firstSessionId",
+                            page.evaluate("() => window.location.pathname").toString(),
+                        )
+
+                        page.goForward()
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected && " +
+                                "activeState?.session.id === expected",
+                            secondSessionId,
+                        )
+                        page.evaluate(
+                            """
+                                id => {
+                                  const originalFetch = window.fetch.bind(window);
+                                  let openHeld = false;
+                                  let releaseOpen;
+                                  const openGate = new Promise(resolve => { releaseOpen = resolve; });
+                                  window.__pendingOpenStarted = false;
+                                  window.__releasePendingOpen = () => releaseOpen();
+                                  window.fetch = (input, init) => {
+                                    const url = typeof input === 'string' ? input : input.url;
+                                    const path = new URL(url, window.location.href).pathname;
+                                    const method = (init?.method ||
+                                      (input instanceof Request ? input.method : 'GET')).toUpperCase();
+                                    if (!openHeld && method === 'GET' &&
+                                      path === '/api/agent/sessions/' + encodeURIComponent(id)) {
+                                      openHeld = true;
+                                      window.__pendingOpenStarted = true;
+                                      return openGate.then(() => originalFetch(input, init));
+                                    }
+                                    return originalFetch(input, init);
+                                  };
+                                  window.__pendingOpen = openSession(id);
+                                }
+                            """.trimIndent(),
+                            secondSessionId,
+                        )
+                        page.waitForFunction("() => window.__pendingOpenStarted === true")
+                        page.goBack()
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected && " +
+                                "activeState?.session.id === expected",
+                            firstSessionId,
+                        )
+                        page.evaluate("() => window.__releasePendingOpen()")
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-app')?.getAttribute('aria-busy') === 'false'",
+                        )
+                        assertEquals(
+                            firstSessionId,
+                            page.evaluate("() => activeState?.session.id").toString(),
+                        )
+                        assertEquals(
+                            "/agent/sessions/$firstSessionId",
+                            page.evaluate("() => window.location.pathname").toString(),
+                        )
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 1_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun failedHistoryLoadClearsPreviousSessionWorkspace() {
+        val database = Files.createTempFile("agent-browser-history-failure-", ".sqlite")
+        val gateway = FakeAgentGateway()
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        val firstSessionId = page.evaluate("() => sessionIdFromLocation()").toString()
+
+                        page.locator("#new-session").click()
+                        page.waitForFunction(
+                            "expected => window.location.pathname !== expected",
+                            "/agent/sessions/$firstSessionId",
+                        )
+                        waitForSessionReady(page)
+                        assertTrue(page.locator("#agent-workspace").isVisible)
+
+                        page.evaluate(
+                            """
+                                id => {
+                                  const originalFetch = window.fetch.bind(window);
+                                  let failed = false;
+                                  window.fetch = (input, init) => {
+                                    const url = typeof input === 'string' ? input : input.url;
+                                    const path = new URL(url, window.location.href).pathname;
+                                    const method = (init?.method ||
+                                      (input instanceof Request ? input.method : 'GET')).toUpperCase();
+                                    if (!failed && method === 'GET' &&
+                                      path === '/api/agent/sessions/' + encodeURIComponent(id)) {
+                                      failed = true;
+                                      return Promise.resolve(new Response(
+                                        JSON.stringify({ error: 'synthetic history failure' }),
+                                        { status: 503, headers: { 'Content-Type': 'application/json' } },
+                                      ));
+                                    }
+                                    return originalFetch(input, init);
+                                  };
+                                }
+                            """.trimIndent(),
+                            firstSessionId,
+                        )
+                        page.goBack()
+                        page.waitForFunction(
+                            "() => window.location.pathname.endsWith('" + firstSessionId + "') && " +
+                                "document.querySelector('.agent-toast.error')?.textContent === " +
+                                "'synthetic history failure'",
+                        )
+                        assertEquals(null, page.evaluate("() => activeState"))
+                        assertTrue(page.locator("#empty-session").isVisible)
+                        assertTrue(page.locator("#agent-workspace").isHidden)
+                        assertTrue(page.locator("#delete-session").isHidden)
+                        assertTrue(page.locator("#send-message").isDisabled)
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 1_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun receiptsSearchAndDetailsStayReadOnlyAndNeverRenderRawKeys() {
+        val database = Files.createTempFile("agent-browser-receipts-", ".sqlite")
+        val gateway = FakeAgentGateway()
+        val receipts = BrowserReceiptsFixture()
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(
+                agentDependencies = fakeAgentDependencies(
+                    database.toString(),
+                    gateway,
+                    receiptsProxy = ReceiptsProxyService(receipts),
+                ),
+            )
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        val before = page.evaluate(
+                            """
+                                async () => {
+                                  const id = window.location.pathname.split("/").pop();
+                                  const response = await fetch('/api/agent/sessions/' + encodeURIComponent(id));
+                                  const state = await response.json();
+                                  return JSON.stringify({ revision: state.session.revision, draft: state.draft });
+                                }
+                            """.trimIndent(),
+                        ).toString()
+
+                        page.locator("#show-mcp-panel").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#receipts-auth-detail')?.textContent" +
+                                ".includes('Проверочная session живёт только в памяти.')",
+                        )
+                        page.locator("#receipts-from").fill("2026-09-10")
+                        page.locator("#receipts-to").fill("2026-09-10")
+                        page.locator("#receipts-seller").fill("Кофейня")
+                        page.locator("#receipts-search-submit").click()
+                        page.locator("#receipts-summary-list .receipt-summary").waitFor()
+                        assertEquals(1, page.locator("#receipts-summary-list .receipt-summary").count())
+                        assertTrue(page.locator("#receipts-summary-list").textContent().contains("Кофейня у дома"))
+                        assertFalse(page.locator("#receipts-panel").textContent().contains(BrowserReceiptsFixture.RAW_KEY))
+
+                        page.locator("#receipts-summary-list .receipt-summary").click()
+                        page.locator("#receipt-detail-panel").waitFor()
+                        page.waitForFunction(
+                            "() => document.querySelector('#receipt-detail')?.textContent.includes('Кофе')",
+                        )
+                        assertTrue(page.locator("#receipt-detail").textContent().contains("Кофе"))
+                        assertTrue(page.locator("#receipt-detail").textContent().contains("499"))
+                        assertFalse(
+                            page.evaluate("() => document.querySelector('#receipts-panel').outerHTML")
+                                .toString().contains(BrowserReceiptsFixture.RAW_KEY),
+                        )
+                        val after = page.evaluate(
+                            """
+                                async () => {
+                                  const id = window.location.pathname.split("/").pop();
+                                  const response = await fetch('/api/agent/sessions/' + encodeURIComponent(id));
+                                  const state = await response.json();
+                                  return JSON.stringify({ revision: state.session.revision, draft: state.draft });
+                                }
+                            """.trimIndent(),
+                        ).toString()
+                        assertEquals(before, after)
+                        assertEquals(1, receipts.searchCalls)
+                        assertEquals(1, receipts.detailCalls)
+                        assertEquals(0, gateway.requests.size)
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun schedulerLinkedSessionChatsAndPreservesManualEditsAcrossRuns() {
+        val database = Files.createTempFile("agent-browser-linked-task-", ".sqlite")
+        val gateway = FakeAgentGateway()
+        var schedulerNow = LocalDate.parse("2026-09-10")
+            .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(
+                agentDependencies = fakeAgentDependencies(
+                    database.toString(),
+                    gateway,
+                    schedulerAccountAvailable = true,
+                    schedulerNowEpochMs = { schedulerNow },
+                ),
+            )
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#show-scheduler-panel").click()
+                        page.waitForFunction(
+                            "() => Array.from(document.querySelector('#scheduler-accounts').options)" +
+                                ".some(option => option.value === 'fixture-account')",
+                        )
+                        page.locator("#scheduler-accounts").selectOption("fixture-account")
+                        page.locator("#scheduler-name").fill("Linked task")
+                        page.locator("#scheduler-start-date").fill("2026-09-10")
+                        page.locator("#scheduler-interval").fill("60")
+                        page.locator("#scheduler-submit").click()
+                        page.locator(".scheduler-task a[data-session-id]").waitFor()
+                        val taskCard = page.locator(".scheduler-task")
+                        assertTrue(taskCard.textContent().contains("часовой пояс ${ZoneId.systemDefault().id}"))
+                        val linkedSessionId =
+                            page.locator(".scheduler-task a[data-session-id]").getAttribute("data-session-id")!!
+                        page.locator(".scheduler-task a[data-session-id]").click()
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected",
+                            linkedSessionId,
+                        )
+                        waitForSessionReady(page)
+                        assertTrue(page.locator("#agent-message").isVisible)
+                        assertFalse(page.locator("#draft-panel").isVisible)
+                        page.locator("#agent-message").fill("Обсудить импорт до первого фонового запуска")
+                        page.locator("#send-message").click()
+                        page.locator("#operation-table").waitFor()
+                        assertTrue(page.locator("#message-list").textContent().contains("Обсудить импорт"))
+                        assertTrue(page.locator("#linked-scheduler-tasks").isVisible)
+                        assertTrue(page.locator("#linked-scheduler-task-list").textContent().contains("Linked task"))
+
+                        page.locator("#linked-scheduler-task-list button[data-linked-task-id]").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-app')?.dataset.activePanel === 'scheduler'",
+                        )
+                        val taskId = page.evaluate(
+                            """() => document.querySelector('.scheduler-task')?.dataset.taskId""",
+                        ).toString()
+                        val schedulerCard = page.locator(".scheduler-task[data-task-id='$taskId']")
+                        assertTrue(schedulerCard.isVisible)
+                        schedulerCard.locator("button[data-scheduler-action='run']").click()
+                        page.waitForFunction(
+                            """id => {
+                                const card = [...document.querySelectorAll('.scheduler-task')]
+                                  .find(item => item.dataset.taskId === id);
+                                return card?.textContent.includes('Последний запуск:') || false;
+                            }""",
+                            taskId,
+                        )
+                        schedulerCard.locator("a[data-session-id]").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-app')?.dataset.activePanel === 'sessions' && " +
+                                "!document.querySelector('#agent-workspace')?.hidden",
+                        )
+                        waitForSessionReady(page)
+                        assertEquals(
+                            linkedSessionId,
+                            page.evaluate("() => window.location.pathname.split('/').pop()").toString(),
+                        )
+                        val operationRows = page.locator("#operation-table tbody tr")
+                        var importedIndex = -1
+                        for (index in 0 until operationRows.count()) {
+                            if (operationRows.nth(index).locator("input[name='merchant']").inputValue() ==
+                                "Browser scheduled purchase"
+                            ) {
+                                importedIndex = index
+                                break
+                            }
+                        }
+                        assertTrue(importedIndex >= 0, "The scheduled operation must be in the linked session draft.")
+                        val importedRow = operationRows.nth(importedIndex)
+                        importedRow.locator("input[name='merchant']").fill("Магазин после ручной правки")
+                        importedRow.locator("input[name='description']").fill("Описание сохранено вручную")
+                        importedRow.locator("button[data-action='save-operation']").click()
+                        page.waitForFunction(
+                            """() => [...document.querySelectorAll('#operation-table tbody tr')].some(row =>
+                                row.querySelector("input[name='merchant']")?.value === 'Магазин после ручной правки' &&
+                                row.querySelector("input[name='description']")?.value === 'Описание сохранено вручную')""",
+                        )
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-toast.success')?.textContent === 'Операция сохранена.'",
+                        )
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-app')?.getAttribute('aria-busy') === 'false'",
+                        )
+
+                        page.locator("#show-scheduler-panel").click()
+                        schedulerNow = LocalDate.parse("2026-09-11")
+                            .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+                        page.locator(".scheduler-task[data-task-id='$taskId'] button[data-scheduler-action='run']").click()
+                        page.waitForFunction(
+                            """async id => {
+                                const response = await fetch(
+                                  '/api/agent/scheduler/tasks/' + encodeURIComponent(id) + '/history?limit=20'
+                                );
+                                return (await response.json()).length === 2;
+                            }""",
+                            taskId,
+                        )
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-app')?.getAttribute('aria-busy') === 'false'",
+                        )
+                        page.locator(".scheduler-task[data-task-id='$taskId'] a[data-session-id]").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-app')?.dataset.activePanel === 'sessions' && " +
+                                "!document.querySelector('#agent-workspace')?.hidden",
+                        )
+                        waitForSessionReady(page)
+                        assertEquals(
+                            linkedSessionId,
+                            page.evaluate("() => window.location.pathname.split('/').pop()").toString(),
+                        )
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-toast.success')?.textContent === 'Сессия открыта.'",
+                        )
+                        val operationRowsAfterSecond = page.locator("#operation-table tbody tr")
+                        val operationFields = (0 until operationRowsAfterSecond.count()).map { index ->
+                            val row = operationRowsAfterSecond.nth(index)
+                            row.locator("input[name='merchant']").inputValue() to
+                                row.locator("input[name='description']").inputValue()
+                        }
+                        assertTrue(
+                            ("Магазин после ручной правки" to "Описание сохранено вручную") in operationFields,
+                            "Session table lost edited fields: $operationFields",
+                        )
+                        assertTrue(
+                            operationFields.any { it.first == "Second scheduled purchase" },
+                            "Second run result is missing from the linked session: $operationFields",
+                        )
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun deletingLinkedSessionWarnsAndKeepsUnrelatedTaskAndSession() {
+        val database = Files.createTempFile("agent-browser-linked-delete-", ".sqlite")
+        val gateway = FakeAgentGateway()
+        val schedulerNow = LocalDate.parse("2026-09-10")
+            .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(
+                agentDependencies = fakeAgentDependencies(
+                    database.toString(),
+                    gateway,
+                    schedulerAccountAvailable = true,
+                    schedulerNowEpochMs = { schedulerNow },
+                ),
+            )
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#show-scheduler-panel").click()
+                        page.waitForFunction(
+                            "() => Array.from(document.querySelector('#scheduler-accounts').options)" +
+                                ".some(option => option.value === 'fixture-account')",
+                        )
+                        fun createTask(name: String) {
+                            page.locator("#scheduler-accounts").selectOption("fixture-account")
+                            page.locator("#scheduler-name").fill(name)
+                            page.locator("#scheduler-start-date").fill("2026-09-10")
+                            page.locator("#scheduler-interval").fill("60")
+                            page.locator("#scheduler-submit").click()
+                            page.waitForFunction(
+                                """expected => [...document.querySelectorAll('.scheduler-task h3')]
+                                    .some(heading => heading.textContent.includes(expected))""",
+                                name,
+                            )
+                        }
+                        createTask("Linked task")
+                        createTask("Unrelated task")
+                        val linkedTaskId = page.evaluate(
+                            """() => [...document.querySelectorAll('.scheduler-task')]
+                                .find(card => card.querySelector('h3')?.textContent.includes('Linked task'))
+                                ?.dataset.taskId""",
+                        ).toString()
+                        val unrelatedTaskId = page.evaluate(
+                            """() => [...document.querySelectorAll('.scheduler-task')]
+                                .find(card => card.querySelector('h3')?.textContent.includes('Unrelated task'))
+                                ?.dataset.taskId""",
+                        ).toString()
+                        val linkedCard = page.locator(".scheduler-task[data-task-id='$linkedTaskId']")
+                        val unrelatedCard = page.locator(".scheduler-task[data-task-id='$unrelatedTaskId']")
+                        val linkedSessionId = linkedCard.locator("a[data-session-id]").getAttribute("data-session-id")!!
+                        val unrelatedSessionId =
+                            unrelatedCard.locator("a[data-session-id]").getAttribute("data-session-id")!!
+                        linkedCard.locator("button[data-scheduler-action='run']").click()
+                        page.waitForFunction(
+                            """id => [...document.querySelectorAll('.scheduler-task')]
+                                .find(card => card.dataset.taskId === id)?.textContent.includes('Последний запуск:')""",
+                            linkedTaskId,
+                        )
+                        unrelatedCard.locator("button[data-scheduler-action='run']").click()
+                        page.waitForFunction(
+                            """id => [...document.querySelectorAll('.scheduler-task')]
+                                .find(card => card.dataset.taskId === id)?.textContent.includes('Последний запуск:')""",
+                            unrelatedTaskId,
+                        )
+                        val historyBeforeDelete = JSON.parseToJsonElement(
+                            page.evaluate(
+                                """
+                                    async () => {
+                                      const linked = await (await fetch(
+                                        '/api/agent/scheduler/tasks/' + encodeURIComponent('$linkedTaskId') + '/history?limit=20'
+                                      )).json();
+                                      const unrelated = await (await fetch(
+                                        '/api/agent/scheduler/tasks/' + encodeURIComponent('$unrelatedTaskId') + '/history?limit=20'
+                                      )).json();
+                                      return JSON.stringify({ linked: linked.length, unrelated: unrelated.length });
+                                    }
+                                """.trimIndent(),
+                            ).toString(),
+                        ).jsonObject
+                        assertEquals(1, historyBeforeDelete["linked"]!!.jsonPrimitive.content.toInt())
+                        assertEquals(1, historyBeforeDelete["unrelated"]!!.jsonPrimitive.content.toInt())
+
+                        linkedCard.locator("a[data-session-id]").click()
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected",
+                            linkedSessionId,
+                        )
+                        page.locator("#open-session-drawer").click()
+                        page.locator("#session-list .session-item:has-text('Unrelated task')").waitFor()
+                        val confirmations = mutableListOf<String>()
+                        var dismissUnexpectedConfirmation = true
+                        var deleteRequestCount = 0
+                        page.onDialog { dialog ->
+                            confirmations += dialog.message()
+                            if (dismissUnexpectedConfirmation) dialog.dismiss() else dialog.accept()
+                        }
+                        page.onRequest { request ->
+                            if (request.method() == "DELETE" && request.url().contains("/api/agent/sessions/")) {
+                                deleteRequestCount += 1
+                            }
+                        }
+                        page.evaluate(
+                            """
+                                () => {
+                                  const originalFetch = window.fetch.bind(window);
+                                  let releaseTaskList;
+                                  let releaseSessionRefresh;
+                                  const taskListGate = new Promise(resolve => { releaseTaskList = resolve; });
+                                  const sessionRefreshGate = new Promise(resolve => { releaseSessionRefresh = resolve; });
+                                  let taskListHeld = false;
+                                  let sessionRefreshHeld = false;
+                                  window.__schedulerTaskListStarted = false;
+                                  window.__sessionRefreshStarted = false;
+                                  window.__releaseSchedulerTaskList = () => releaseTaskList();
+                                  window.__releaseSessionRefresh = () => releaseSessionRefresh();
+                                  window.fetch = (input, init) => {
+                                    const url = typeof input === 'string' ? input : input.url;
+                                    const path = new URL(url, window.location.href).pathname;
+                                    if (!taskListHeld && path === '/api/agent/scheduler/tasks') {
+                                      taskListHeld = true;
+                                      window.__schedulerTaskListStarted = true;
+                                      return taskListGate.then(() => originalFetch(input, init));
+                                    }
+                                    if (!sessionRefreshHeld && path === '/api/agent/tbank/session') {
+                                      sessionRefreshHeld = true;
+                                      window.__sessionRefreshStarted = true;
+                                      return sessionRefreshGate.then(() => originalFetch(input, init));
+                                    }
+                                    return originalFetch(input, init);
+                                  };
+                                }
+                            """.trimIndent(),
+                        )
+                        page.locator("#delete-session").click()
+                        page.waitForFunction("() => window.__schedulerTaskListStarted === true")
+                        page.locator("#session-list .session-item:has-text('Unrelated task')").click()
+                        page.waitForFunction("() => window.__sessionRefreshStarted === true")
+                        page.evaluate("() => window.__releaseSchedulerTaskList()")
+                        page.waitForFunction(
+                            "() => document.body.textContent.includes('Дождитесь завершения текущей операции; сессия не удалена.')",
+                        )
+                        assertEquals(emptyList(), confirmations)
+                        assertEquals(0, deleteRequestCount)
+                        page.evaluate("() => window.__releaseSessionRefresh()")
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected",
+                            unrelatedSessionId,
+                        )
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-toast.success')?.textContent === 'Сессия открыта.'",
+                        )
+                        page.locator("#session-list .session-item:has-text('Linked task')").click()
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected",
+                            linkedSessionId,
+                        )
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-toast.success')?.textContent === 'Сессия открыта.'",
+                        )
+                        dismissUnexpectedConfirmation = false
+                        page.evaluate(
+                            """
+                                () => {
+                                  const originalFetch = window.fetch.bind(window);
+                                  let releaseTaskList;
+                                  const taskListGate = new Promise(resolve => { releaseTaskList = resolve; });
+                                  let held = false;
+                                  window.__schedulerTaskListStarted = false;
+                                  window.__releaseSchedulerTaskList = () => releaseTaskList();
+                                  window.fetch = (input, init) => {
+                                    const url = typeof input === 'string' ? input : input.url;
+                                    if (!held && new URL(url, window.location.href).pathname ===
+                                      '/api/agent/scheduler/tasks') {
+                                      held = true;
+                                      window.__schedulerTaskListStarted = true;
+                                      return taskListGate.then(() => originalFetch(input, init));
+                                    }
+                                    return originalFetch(input, init);
+                                  };
+                                }
+                            """.trimIndent(),
+                        )
+                        page.locator("#delete-session").click()
+                        page.waitForFunction("() => window.__schedulerTaskListStarted === true")
+                        page.locator("#session-list .session-item:has-text('Unrelated task')").click()
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected",
+                            unrelatedSessionId,
+                        )
+                        val deleteResponse = page.waitForResponse(
+                            { response ->
+                                response.request().method() == "DELETE" &&
+                                    response.url().endsWith("/api/agent/sessions/$linkedSessionId")
+                            },
+                            { page.evaluate("() => window.__releaseSchedulerTaskList()") },
+                        )
+                        assertEquals(204, deleteResponse.status(), "DELETE body ${deleteResponse.request().postData()}")
+                        assertEquals(1, deleteRequestCount)
+                        page.waitForFunction(
+                            """async id => (await fetch('/api/agent/sessions/' + encodeURIComponent(id))).status === 404""",
+                            linkedSessionId,
+                        )
+                        assertEquals(
+                            unrelatedSessionId,
+                            page.evaluate("() => window.location.pathname.split('/').pop()").toString(),
+                        )
+                        assertEquals(1, confirmations.size)
+                        assertTrue(confirmations.single().contains("Linked task"))
+                        assertTrue(confirmations.single().contains("история их запусков"))
+                        assertFalse(confirmations.single().contains("Unrelated task"))
+
+                        val snapshot = page.evaluate(
+                            """
+                                async () => {
+                                  const tasks = await (await fetch('/api/agent/scheduler/tasks')).json();
+                                  const sessions = await (await fetch('/api/agent/sessions')).json();
+                                  const linkedHistory = await (await fetch(
+                                    '/api/agent/scheduler/tasks/' + encodeURIComponent('$linkedTaskId') + '/history?limit=20'
+                                  )).json();
+                                  const unrelatedHistory = await (await fetch(
+                                    '/api/agent/scheduler/tasks/' + encodeURIComponent('$unrelatedTaskId') + '/history?limit=20'
+                                  )).json();
+                                  const linkedSession = await fetch(
+                                    '/api/agent/sessions/' + encodeURIComponent('$linkedSessionId')
+                                  );
+                                  const unrelatedSession = await fetch(
+                                    '/api/agent/sessions/' + encodeURIComponent('$unrelatedSessionId')
+                                  );
+                                  return JSON.stringify({
+                                    taskIds: tasks.map(task => task.id),
+                                    sessionIds: sessions.map(session => session.id),
+                                    linkedHistory,
+                                    unrelatedHistory,
+                                    linkedSessionStatus: linkedSession.status,
+                                    unrelatedSessionStatus: unrelatedSession.status,
+                                  });
+                                }
+                            """.trimIndent(),
+                        ).toString()
+                        val result = JSON.parseToJsonElement(snapshot).jsonObject
+                        assertEquals(
+                            listOf(unrelatedTaskId),
+                            result["taskIds"]!!.jsonArray.map { it.jsonPrimitive.content },
+                            "DELETE ${deleteResponse.url()} ${deleteResponse.request().postData()}; linked task $linkedTaskId; linked session $linkedSessionId; state $result",
+                        )
+                        assertEquals(emptyList(), result["linkedHistory"]!!.jsonArray)
+                        assertEquals(1, result["unrelatedHistory"]!!.jsonArray.size)
+                        assertEquals(
+                            listOf(unrelatedSessionId),
+                            result["sessionIds"]!!.jsonArray.map { it.jsonPrimitive.content },
+                        )
+                        assertEquals("404", result["linkedSessionStatus"]!!.jsonPrimitive.content)
+                        assertEquals("200", result["unrelatedSessionStatus"]!!.jsonPrimitive.content)
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun deletingCurrentSessionPreservesBackAndForwardNavigationDuringRefresh() {
+        val database = Files.createTempFile("agent-browser-delete-navigation-", ".sqlite")
+        val gateway = FakeAgentGateway()
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        val baseUrl = "http://127.0.0.1:$port"
+                        page.navigate("$baseUrl/agent")
+                        waitForAgentInitialized(page)
+
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        val deletedSessionId = page.evaluate("() => sessionIdFromLocation()").toString()
+                        page.locator("#new-session").click()
+                        page.waitForFunction(
+                            "expected => window.location.pathname !== '/agent/sessions/' + expected",
+                            deletedSessionId,
+                        )
+                        waitForSessionReady(page)
+                        val secondSessionId = page.evaluate("() => sessionIdFromLocation()").toString()
+                        page.locator("#new-session").click()
+                        page.waitForFunction(
+                            "expected => window.location.pathname !== '/agent/sessions/' + expected",
+                            secondSessionId,
+                        )
+                        waitForSessionReady(page)
+                        val thirdSessionId = page.evaluate("() => sessionIdFromLocation()").toString()
+
+                        val orderedSessionIds = JSON.parseToJsonElement(
+                            page.evaluate(
+                                """
+                                    async () => JSON.stringify(
+                                      (await (await fetch('/api/agent/sessions')).json()).map(session => session.id)
+                                    )
+                                """.trimIndent(),
+                            ).toString(),
+                        ).jsonArray.map { it.jsonPrimitive.content }
+                        assertEquals(3, orderedSessionIds.size)
+                        val remainingSessionIds = orderedSessionIds.filterNot { it == deletedSessionId }
+                        val selectedSessionId = remainingSessionIds.last()
+                        assertTrue(remainingSessionIds.first() != selectedSessionId)
+                        val targetIndex = orderedSessionIds.indexOf(deletedSessionId)
+                        assertTrue(targetIndex >= 0)
+
+                        page.locator("#open-session-drawer").click()
+                        page.locator("#session-list .session-item").nth(targetIndex).click()
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected",
+                            deletedSessionId,
+                        )
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-toast.success')?.textContent === 'Сессия открыта.'",
+                        )
+
+                        val confirmations = mutableListOf<String>()
+                        page.onDialog { dialog ->
+                            confirmations += dialog.message()
+                            dialog.accept()
+                        }
+                        page.evaluate(
+                            """
+                                () => {
+                                  const originalFetch = window.fetch.bind(window);
+                                  let deletionCompleted = false;
+                                  let sessionListHeld = false;
+                                  let thirdSessionHeld = false;
+                                  let deletedSessionHeld = false;
+                                  let releaseSessionList;
+                                  let releaseThirdSession;
+                                  let releaseDeletedSession;
+                                  const sessionListGate = new Promise(resolve => { releaseSessionList = resolve; });
+                                  const thirdSessionGate = new Promise(resolve => { releaseThirdSession = resolve; });
+                                  const deletedSessionGate = new Promise(resolve => { releaseDeletedSession = resolve; });
+                                  window.__postDeleteSessionListStarted = false;
+                                  window.__thirdSessionFetchStarted = false;
+                                  window.__deletedSessionFetchStarted = false;
+                                  window.__releasePostDeleteSessionList = () => releaseSessionList();
+                                  window.__releaseThirdSessionFetch = () => releaseThirdSession();
+                                  window.__releaseDeletedSessionFetch = () => releaseDeletedSession();
+                                  window.fetch = (input, init) => {
+                                    const url = typeof input === 'string' ? input : input.url;
+                                    const path = new URL(url, window.location.href).pathname;
+                                    const method = (init?.method ||
+                                      (input instanceof Request ? input.method : 'GET')).toUpperCase();
+                                    if (method === 'DELETE' &&
+                                      path === '/api/agent/sessions/' + '$deletedSessionId') {
+                                      return originalFetch(input, init).then(response => {
+                                        deletionCompleted = response.status === 204;
+                                        return response;
+                                      });
+                                    }
+                                    if (deletionCompleted && method === 'GET' &&
+                                      path === '/api/agent/sessions/' + '$thirdSessionId' && !thirdSessionHeld) {
+                                      thirdSessionHeld = true;
+                                      window.__thirdSessionFetchStarted = true;
+                                      return thirdSessionGate.then(() => originalFetch(input, init));
+                                    }
+                                    if (deletionCompleted && method === 'GET' &&
+                                      path === '/api/agent/sessions/' + '$deletedSessionId' &&
+                                      !deletedSessionHeld) {
+                                      deletedSessionHeld = true;
+                                      window.__deletedSessionFetchStarted = true;
+                                      return deletedSessionGate.then(() => originalFetch(input, init));
+                                    }
+                                    if (deletionCompleted && method === 'GET' &&
+                                      path === '/api/agent/sessions' && !sessionListHeld) {
+                                      sessionListHeld = true;
+                                      window.__postDeleteSessionListStarted = true;
+                                      return sessionListGate.then(() => originalFetch(input, init));
+                                    }
+                                    return originalFetch(input, init);
+                                  };
+                                }
+                            """.trimIndent(),
+                        )
+                        val deleteResponse = page.waitForResponse(
+                            { response ->
+                                response.request().method() == "DELETE" &&
+                                    response.url().endsWith("/api/agent/sessions/$deletedSessionId")
+                            },
+                            { page.locator("#delete-session").click() },
+                        )
+                        assertEquals(204, deleteResponse.status())
+                        page.waitForFunction("() => window.__postDeleteSessionListStarted === true")
+
+                        page.goBack()
+                        page.waitForFunction("() => window.__thirdSessionFetchStarted === true")
+                        page.goBack()
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected",
+                            secondSessionId,
+                        )
+                        page.waitForFunction(
+                            "expected => activeState?.session.id === expected",
+                            secondSessionId,
+                        )
+                        assertTrue(page.locator("#new-session").isDisabled)
+
+                        val staleSessionResponse = page.waitForResponse(
+                            { response ->
+                                response.request().method() == "GET" &&
+                                    response.url().endsWith("/api/agent/sessions/$thirdSessionId")
+                            },
+                            { page.evaluate("() => window.__releaseThirdSessionFetch()") },
+                        )
+                        assertEquals(200, staleSessionResponse.status())
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected && " +
+                                "activeState?.session.id === expected",
+                            secondSessionId,
+                        )
+                        assertTrue(page.locator("#new-session").isDisabled)
+
+                        if (selectedSessionId == thirdSessionId) {
+                            page.goForward()
+                            page.waitForFunction(
+                                "expected => window.location.pathname === '/agent/sessions/' + expected",
+                                thirdSessionId,
+                            )
+                            page.waitForFunction(
+                                "expected => activeState?.session.id === expected",
+                                thirdSessionId,
+                            )
+                        }
+                        if (selectedSessionId != thirdSessionId) {
+                            page.goForward()
+                            page.waitForFunction(
+                                "expected => window.location.pathname === '/agent/sessions/' + expected",
+                                thirdSessionId,
+                            )
+                            page.waitForFunction(
+                                "expected => activeState?.session.id === expected",
+                                thirdSessionId,
+                            )
+                        }
+                        page.goForward()
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected",
+                            deletedSessionId,
+                        )
+                        page.waitForFunction("() => window.__deletedSessionFetchStarted === true")
+
+                        if (selectedSessionId != thirdSessionId) {
+                            page.goBack()
+                            page.waitForFunction(
+                                "expected => window.location.pathname === '/agent/sessions/' + expected",
+                                thirdSessionId,
+                            )
+                            page.waitForFunction(
+                                "expected => activeState?.session.id === expected",
+                                thirdSessionId,
+                            )
+                        }
+                        page.goBack()
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected && " +
+                                "activeState?.session.id === expected",
+                            selectedSessionId,
+                        )
+                        assertTrue(page.locator("#session-not-found").isHidden)
+                        val staleNotFoundResponse = page.waitForResponse(
+                            { response ->
+                                response.request().method() == "GET" &&
+                                    response.url().endsWith("/api/agent/sessions/$deletedSessionId")
+                            },
+                            { page.evaluate("() => window.__releaseDeletedSessionFetch()") },
+                        )
+                        assertEquals(404, staleNotFoundResponse.status())
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected && " +
+                                "activeState?.session.id === expected",
+                            selectedSessionId,
+                        )
+                        assertTrue(page.locator("#session-not-found").isHidden)
+                        assertTrue(page.locator("#new-session").isDisabled)
+
+                        page.evaluate("() => window.__releasePostDeleteSessionList()")
+                        page.waitForFunction(
+                            "expected => window.location.pathname === '/agent/sessions/' + expected && " +
+                                "activeState?.session.id === expected",
+                            selectedSessionId,
+                        )
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-toast.success')?.textContent === " +
+                                "'Сессия и связанные фоновые задачи удалены.'",
+                        )
+
+                        assertEquals(1, confirmations.size)
+                        assertTrue(confirmations.single().contains("Удалить сессию"))
+                        assertEquals(
+                            selectedSessionId,
+                            page.evaluate("() => activeState?.session.id").toString(),
+                        )
+                        val sessionsAfterDelete = JSON.parseToJsonElement(
+                            page.evaluate(
+                                """
+                                    async () => JSON.stringify(
+                                      (await (await fetch('/api/agent/sessions')).json()).map(session => session.id)
+                                    )
+                                """.trimIndent(),
+                            ).toString(),
+                        ).jsonArray.map { it.jsonPrimitive.content }
+                        assertFalse(deletedSessionId in sessionsAfterDelete)
+                        assertTrue(selectedSessionId in sessionsAfterDelete)
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun deletingCurrentSessionShowsEmptyStateWhenRefreshFails() {
+        val database = Files.createTempFile("agent-browser-delete-refresh-failure-", ".sqlite")
+        val gateway = FakeAgentGateway()
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        val deletedSessionId = page.evaluate("() => sessionIdFromLocation()").toString()
+
+                        val confirmations = mutableListOf<String>()
+                        page.onDialog { dialog ->
+                            confirmations += dialog.message()
+                            dialog.accept()
+                        }
+                        page.evaluate(
+                            """
+                                () => {
+                                  const originalFetch = window.fetch.bind(window);
+                                  let deletionCompleted = false;
+                                  window.fetch = (input, init) => {
+                                    const url = typeof input === 'string' ? input : input.url;
+                                    const path = new URL(url, window.location.href).pathname;
+                                    const method = (init?.method ||
+                                      (input instanceof Request ? input.method : 'GET')).toUpperCase();
+                                    if (method === 'DELETE' &&
+                                      path === '/api/agent/sessions/' + '$deletedSessionId') {
+                                      return originalFetch(input, init).then(response => {
+                                        deletionCompleted = response.status === 204;
+                                        return response;
+                                      });
+                                    }
+                                    if (deletionCompleted && method === 'GET' &&
+                                      path === '/api/agent/sessions') {
+                                      return Promise.resolve(new Response(
+                                        JSON.stringify({ message: 'synthetic refresh failure' }),
+                                        { status: 503, headers: { 'Content-Type': 'application/json' } },
+                                      ));
+                                    }
+                                    return originalFetch(input, init);
+                                  };
+                                }
+                            """.trimIndent(),
+                        )
+                        val deleteResponse = page.waitForResponse(
+                            { response ->
+                                response.request().method() == "DELETE" &&
+                                    response.url().endsWith("/api/agent/sessions/$deletedSessionId")
+                            },
+                            { page.locator("#delete-session").click() },
+                        )
+                        assertEquals(204, deleteResponse.status())
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-toast.error')?.textContent === " +
+                                "'Сессия удалена, но интерфейс не обновился. Перезагрузите страницу.'",
+                        )
+
+                        assertEquals(
+                            "/agent",
+                            page.evaluate("() => window.location.pathname").toString(),
+                        )
+                        assertTrue(page.evaluate("() => activeState === null") as Boolean)
+                        assertTrue(page.locator("#empty-session").isVisible)
+                        assertTrue(page.locator("#agent-workspace").isHidden)
+                        assertTrue(page.locator("#delete-session").isHidden)
+                        assertTrue(page.locator("#session-not-found").isHidden)
+                        assertEquals(1, confirmations.size)
+                        assertEquals(
+                            "404",
+                            page.evaluate(
+                                """async id => (await fetch('/api/agent/sessions/' + encodeURIComponent(id))).status""",
+                                deletedSessionId,
+                            ).toString(),
+                        )
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    private class BrowserReceiptsFixture : ReceiptsMcpProvider {
+        var searchCalls = 0
+        var detailCalls = 0
+
+        override suspend fun browserLogin() =
+            ReceiptsAuthStatus(authenticated = false, status = "authenticating")
+
+        override suspend fun receiptsSession() =
+            ReceiptsAuthStatus(
+                authenticated = true,
+                status = "active",
+                persistenceStatus = "memory_only",
+                persistenceMessage = "Проверочная session живёт только в памяти.",
+            )
+
+        override suspend fun receiptsRetrySession() =
+            ReceiptsAuthStatus(authenticated = true, status = "active")
+
+        override suspend fun receiptsLogout() =
+            ReceiptsAuthStatus(authenticated = false, status = "login_required")
+
+        override suspend fun callReceiptTool(
+            tool: String,
+            arguments: JsonObject,
+        ): TbankToolCallResponse = when (tool) {
+            "search-receipts" -> {
+                searchCalls += 1
+                TbankToolCallResponse(
+                    tool = tool,
+                    text = """{"receipts":[{"receipt_key":"$RAW_KEY","merchant":"Кофейня у дома","received_at":"2026-09-10T10:00:00Z","amount_minor":49900,"currency":"RUB"}],"has_more":false}""",
+                )
+            }
+            "get-receipt" -> {
+                detailCalls += 1
+                TbankToolCallResponse(
+                    tool = tool,
+                    text = """{"receipt_key":"$RAW_KEY","date_time":"2026-09-10T10:00:00Z","fiscal_document_number":"123","total_minor":49900,"currency":"RUB","items":[{"name":"Кофе","quantity":1,"price_minor":49900,"sum_minor":49900}]}""",
+                )
+            }
+            else -> TbankToolCallResponse(tool = tool, isError = true, text = "unexpected receipt tool")
+        }
+
+        companion object {
+            const val RAW_KEY = "browser-receipt-raw-secret"
         }
     }
 

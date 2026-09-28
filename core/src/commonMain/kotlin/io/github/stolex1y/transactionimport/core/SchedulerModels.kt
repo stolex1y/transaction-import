@@ -78,6 +78,11 @@ interface SchedulerRepository {
     suspend fun create(task: SchedulerTask): SchedulerTask
     suspend fun list(): List<SchedulerTask>
     suspend fun get(id: String): SchedulerTask?
+    suspend fun deleteLinkedSession(
+        sessionId: String,
+        expectedRevision: Long,
+        expectedLinkedTaskIds: List<String>,
+    )
     suspend fun update(task: SchedulerTask): SchedulerTask
     suspend fun claimRun(
         taskId: String,
@@ -113,3 +118,7 @@ interface SchedulerRepository {
     ): SchedulerTask
     suspend fun history(taskId: String, limit: Int = 20): List<SchedulerRunHistory>
 }
+
+class LinkedSchedulerTasksChangedException : IllegalStateException(
+    "Связанные фоновые задачи изменились. Проверьте их список и подтвердите удаление повторно.",
+)

@@ -18,6 +18,7 @@ import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequestParams
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -39,6 +40,7 @@ private const val LIST_TIMEOUT_MS = 5_000L
 private const val CALL_TIMEOUT_MS = 30_000L
 private const val TBANK_SERVER_ID = "tbank-transactions"
 private const val LEGACY_TBANK_SERVER_ID = "bank-transactions"
+private const val RECEIPTS_SERVER_ID = "receipts"
 
 @Serializable
 data class McpToolCatalog(
@@ -172,7 +174,7 @@ class McpCatalogService private constructor(
     private val states: MutableMap<String, McpServerCatalog>,
     private val connections: MutableMap<String, ActiveMcpConnection>,
     private val logicalServers: Map<String, McpLogicalServer>,
-) : McpCatalogProvider, TbankMcpProvider, McpToolProvider, AutoCloseable {
+): McpCatalogProvider, TbankMcpProvider, McpToolProvider, ReceiptsMcpProvider, AutoCloseable {
     private val mutex = Mutex()
 
     private var tbankMode = "fake"
@@ -318,6 +320,81 @@ class McpCatalogService private constructor(
             TbankSessionResponse(authenticated = false, mode = tbankMode)
         }
     }
+
+    override suspend fun browserLogin(): ReceiptsAuthStatus =
+        receiptAuth("/receipts/browser-login", post = true)
+
+    override suspend fun receiptsSession(): ReceiptsAuthStatus =
+        receiptAuth("/receipts/session", post = false)
+
+    override suspend fun receiptsRetrySession(): ReceiptsAuthStatus =
+        receiptAuth("/receipts/session/retry", post = true)
+
+    override suspend fun receiptsLogout(): ReceiptsAuthStatus =
+        receiptAuth("/receipts/logout", post = true)
+
+    override suspend fun callReceiptTool(
+        tool: String,
+        arguments: JsonObject,
+    ): TbankToolCallResponse = callConfiguredTool(RECEIPTS_SERVER_ID, tool, arguments)
+
+    private suspend fun receiptAuth(path: String, post: Boolean): ReceiptsAuthStatus = mutex.withLock {
+        val canRetryRefresh = path == "/receipts/session/retry"
+        val config = configs.firstOrNull { it.id == RECEIPTS_SERVER_ID && it.enabled }
+            ?: return@withLock unavailableReceiptAuth(retryable = canRetryRefresh)
+        try {
+            val response = if (post) {
+                httpClient.post(serviceUrl(config, path))
+            } else {
+                httpClient.get(serviceUrl(config, path))
+            }
+            if (!response.status.isSuccess()) {
+                return@withLock unavailableReceiptAuth(retryable = canRetryRefresh)
+            }
+            response.body<ReceiptsAuthStatus>().sanitized()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            unavailableReceiptAuth(retryable = canRetryRefresh)
+        }
+    }
+
+    private fun ReceiptsAuthStatus.sanitized(): ReceiptsAuthStatus {
+        val safeStatuses = setOf(
+            "authenticating",
+            "active",
+            "login_required",
+            "recoverable_error",
+            "logout_failed",
+        )
+        val safeStatus = status.takeIf(safeStatuses::contains) ?: "recoverable_error"
+        return copy(
+            authenticated = authenticated && safeStatus == "active",
+            status = safeStatus,
+            retryable = retryable && safeStatus == "recoverable_error",
+            retryAfterSeconds = retryAfterSeconds.coerceIn(0L, 3_600L),
+            persistenceStatus = persistenceStatus.takeIf {
+                it in setOf(
+                    "available",
+                    "stored",
+                    "persisted",
+                    "memory_only",
+                    "not_configured",
+                    "unavailable",
+                    "error",
+                )
+            } ?: "unknown",
+            persistenceMessage = safeReceiptAuthMessage(persistenceMessage),
+            message = safeReceiptAuthMessage(message),
+        )
+    }
+
+    private fun unavailableReceiptAuth(retryable: Boolean) = ReceiptsAuthStatus(
+        authenticated = false,
+        status = "recoverable_error",
+        retryable = retryable,
+        persistenceStatus = "unknown",
+    )
 
     override suspend fun allowedTools(): List<McpCallableTool> = mutex.withLock {
         configs.asSequence()

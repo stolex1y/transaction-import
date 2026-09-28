@@ -224,8 +224,14 @@ class SchedulerService(
         accountRefs: List<String>,
         startDate: String,
         intervalMinutes: Long,
-        timeZone: String,
     ): SchedulerTask {
+        val normalizedName = name.trim()
+        require(normalizedName.isNotEmpty() && normalizedName.length <= 120) {
+            "Название scheduler task должно быть от 1 до 120 символов."
+        }
+        require(intervalMinutes in 1..43_200) {
+            "Период scheduler task должен быть от 1 минуты до 30 дней."
+        }
         val normalizedAccounts = accountRefs.map(String::trim).filter(String::isNotBlank).distinct()
         require(normalizedAccounts.isNotEmpty()) { "Нужно выбрать хотя бы один счёт." }
         require(normalizedAccounts.size <= MAX_ACCOUNTS) { "Выбрано слишком много счетов." }
@@ -235,24 +241,48 @@ class SchedulerService(
         } catch (_: DateTimeException) {
             throw IllegalArgumentException("start_date должен иметь формат YYYY-MM-DD.")
         }
-        val zone = try {
-            ZoneId.of(timeZone.trim())
-        } catch (_: DateTimeException) {
-            throw IllegalArgumentException("time_zone задан некорректно.")
+        return runMutex.withLock {
+            // Complete both durable writes together before propagating cancellation.
+            withContext(NonCancellable) {
+                val zone = ZoneId.systemDefault()
+                val now = nowEpochMs()
+                val next = maxOf(now, LocalDate.parse(normalizedDate).atStartOfDay(zone).toInstant().toEpochMilli())
+                val session = agent.createSession(
+                    title = normalizedName,
+                    config = runtimeConfig.defaultAgentConfig(),
+                    contextManagement = runtimeConfig.sessionContextManagement(),
+                )
+                try {
+                    repository.create(
+                        SchedulerTask(
+                            id = idGenerator(),
+                            name = normalizedName,
+                            accountRefs = normalizedAccounts,
+                            startDate = normalizedDate,
+                            intervalMinutes = intervalMinutes,
+                            timeZone = zone.id,
+                            targetSessionId = session.session.id,
+                            nextRunAtEpochMs = next,
+                        ),
+                    )
+                } catch (error: Throwable) {
+                    try {
+                        agent.deleteSession(session.session.id, session.session.revision)
+                    } catch (cleanupError: Throwable) {
+                        error.addSuppressed(cleanupError)
+                    }
+                    throw error
+                }
+            }
         }
-        val now = nowEpochMs()
-        val next = maxOf(now, LocalDate.parse(normalizedDate).atStartOfDay(zone).toInstant().toEpochMilli())
-        return repository.create(
-            SchedulerTask(
-                id = idGenerator(),
-                name = name.trim(),
-                accountRefs = normalizedAccounts,
-                startDate = normalizedDate,
-                intervalMinutes = intervalMinutes,
-                timeZone = zone.id,
-                nextRunAtEpochMs = next,
-            ),
-        )
+    }
+
+    suspend fun deleteLinkedSession(
+        sessionId: String,
+        expectedRevision: Long,
+        expectedLinkedTaskIds: List<String>,
+    ) = runMutex.withLock {
+        repository.deleteLinkedSession(sessionId, expectedRevision, expectedLinkedTaskIds)
     }
     private suspend fun validateAccountRefs(accountRefs: List<String>) {
         val response = try {

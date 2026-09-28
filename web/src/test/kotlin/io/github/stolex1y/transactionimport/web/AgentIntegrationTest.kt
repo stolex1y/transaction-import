@@ -3,6 +3,7 @@ package io.github.stolex1y.transactionimport.web
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.post
+import io.ktor.client.request.header
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
@@ -14,6 +15,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import io.github.stolex1y.transactionimport.core.SchedulerRunHistory
+import io.github.stolex1y.transactionimport.core.SchedulerRunStatus
+import io.github.stolex1y.transactionimport.core.SchedulerTask
+import io.github.stolex1y.transactionimport.persistence.SqliteSchedulerRepository
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import kotlin.io.path.deleteIfExists
@@ -41,6 +46,283 @@ class AgentIntegrationTest {
             database.deleteIfExists()
         }
     }
+
+    @Test
+    fun deletingSessionRemovesLinkedTasksAndHistoryButPreservesUnrelatedRecords() {
+        val database = Files.createTempFile("agent-linked-delete-", ".sqlite")
+        try {
+            val dependencies = fakeAgentDependencies(database.toString())
+            testApplication {
+                application { module(agentDependencies = dependencies) }
+
+                val linkedSession = client.post("/api/agent/sessions").jsonObject().sessionId()
+                val unrelatedSession = client.post("/api/agent/sessions").jsonObject().sessionId()
+                val repository = SqliteSchedulerRepository(database.toString())
+                val linkedTasks = listOf("linked-task-a", "linked-task-b")
+                for (taskId in linkedTasks) {
+                    repository.create(testSchedulerTask(taskId, linkedSession))
+                    assertEquals(
+                        taskId,
+                        repository.claimRun(
+                            taskId = taskId,
+                            expectedCursorDate = null,
+                            runId = "$taskId-run",
+                            claimedAtEpochMs = 1_000,
+                        )?.id,
+                    )
+                    repository.recordFailure(
+                        taskId = taskId,
+                        expectedCursorDate = null,
+                        run = testSchedulerRun(taskId, "$taskId-run"),
+                    )
+                }
+                repository.create(testSchedulerTask("unrelated-task", unrelatedSession))
+                assertEquals(
+                    "unrelated-task",
+                    repository.claimRun(
+                        taskId = "unrelated-task",
+                        expectedCursorDate = null,
+                        runId = "unrelated-run",
+                        claimedAtEpochMs = 1_000,
+                    )?.id,
+                )
+                repository.recordFailure(
+                    taskId = "unrelated-task",
+                    expectedCursorDate = null,
+                    run = testSchedulerRun("unrelated-task", "unrelated-run"),
+                )
+
+                val session = client.get("/api/agent/sessions/$linkedSession").jsonObject()
+                val revision = session.revision()
+                val rejected = client.delete("/api/agent/sessions/$linkedSession") {
+                    jsonBody(
+                        """{"revision":${revision + 1},"expected_linked_task_ids":["linked-task-a","linked-task-b"]}""",
+                    )
+                }
+                assertEquals(HttpStatusCode.Conflict, rejected.status)
+                assertEquals(linkedTasks.toSet(), repository.list().filter {
+                    it.targetSessionId == linkedSession
+                }.map { it.id }.toSet())
+                assertEquals(1, repository.history(linkedTasks.first()).size)
+
+                val staleTaskSet = client.delete("/api/agent/sessions/$linkedSession") {
+                    jsonBody("""{"revision":$revision,"expected_linked_task_ids":[]}""")
+                }
+                assertEquals(HttpStatusCode.Conflict, staleTaskSet.status)
+                assertEquals(
+                    linkedTasks.toSet(),
+                    repository.list().filter { it.targetSessionId == linkedSession }.map { it.id }.toSet(),
+                )
+                assertEquals(1, repository.history(linkedTasks.first()).size)
+                val deleted = client.delete("/api/agent/sessions/$linkedSession") {
+                    jsonBody("""{"revision":$revision,"expected_linked_task_ids":["linked-task-a","linked-task-b"]}""")
+                }
+                assertEquals(HttpStatusCode.NoContent, deleted.status)
+                assertFalse(client.get("/api/agent/sessions").jsonObjectArray().any {
+                    it.jsonObject["id"]!!.jsonPrimitive.content == linkedSession
+                })
+                assertEquals(null, repository.get(linkedTasks.first()))
+                assertEquals(emptyList(), repository.history(linkedTasks.first()))
+                assertEquals(null, repository.get(linkedTasks.last()))
+                assertEquals(emptyList(), repository.history(linkedTasks.last()))
+                assertEquals("unrelated-task", repository.get("unrelated-task")?.id)
+                assertEquals(1, repository.history("unrelated-task").size)
+                assertTrue(client.get("/api/agent/sessions/$unrelatedSession").status == HttpStatusCode.OK)
+            }
+        } finally {
+            database.deleteIfExists()
+            Files.deleteIfExists(database.resolveSibling(database.fileName.toString() + "-wal"))
+            Files.deleteIfExists(database.resolveSibling(database.fileName.toString() + "-shm"))
+        }
+    }
+
+    @Test
+    fun receiptsProxyKeepsKeysServerSideAndDoesNotTouchSessionOrCallLlm() {
+        val database = Files.createTempFile("agent-receipts-proxy-", ".sqlite")
+        val gateway = FakeAgentGateway()
+        val receipts = FakeReceiptsMcpProvider()
+        try {
+            testApplication {
+                application {
+                    module(
+                        agentDependencies = fakeAgentDependencies(
+                            databasePath = database.toString(),
+                            gateway = gateway,
+                            receiptsProxy = ReceiptsProxyService(receipts),
+                        ),
+                    )
+                }
+
+                val initialStatus = client.get("/api/agent/receipts/session").jsonObject()
+                assertEquals("login_required", initialStatus["status"]!!.jsonPrimitive.content)
+                assertEquals("memory_only", initialStatus["persistence_status"]!!.jsonPrimitive.content)
+                assertFalse(initialStatus.toString().contains("synthetic-secret"))
+                assertEquals(1, receipts.sessionReads)
+                assertEquals(0, receipts.browserLoginStarts)
+                assertEquals(0, receipts.refreshes)
+
+                val rejectedLogin = client.post("/api/agent/receipts/browser-login") {
+                    header("Origin", "https://attacker.example")
+                    header("Sec-Fetch-Site", "cross-site")
+                }
+                assertEquals(HttpStatusCode.Forbidden, rejectedLogin.status)
+                assertEquals(0, receipts.browserLoginStarts)
+
+                val rejectedRebindingLogin = client.post("/api/agent/receipts/browser-login") {
+                    header("Host", "attacker.example")
+                    header("Origin", "http://attacker.example")
+                }
+                assertEquals(HttpStatusCode.Forbidden, rejectedRebindingLogin.status)
+                assertEquals(0, receipts.browserLoginStarts)
+
+                val rejectedOriginlessHostLogin = client.post("/api/agent/receipts/browser-login") {
+                    header("Host", "attacker.example")
+                }
+                assertEquals(HttpStatusCode.Forbidden, rejectedOriginlessHostLogin.status)
+                assertEquals(0, receipts.browserLoginStarts)
+
+                val rejectedMismatchedOrigin = client.post("/api/agent/receipts/browser-login") {
+                    header("Host", "localhost")
+                    header("Origin", "http://127.0.0.1")
+                }
+                assertEquals(HttpStatusCode.Forbidden, rejectedMismatchedOrigin.status)
+                assertEquals(0, receipts.browserLoginStarts)
+
+                val rejectedMismatchedOriginPort = client.post("/api/agent/receipts/browser-login") {
+                    header("Host", "localhost")
+                    header("Origin", "http://localhost:81")
+                }
+                assertEquals(HttpStatusCode.Forbidden, rejectedMismatchedOriginPort.status)
+                assertEquals(0, receipts.browserLoginStarts)
+
+                val loginStart = client.post("/api/agent/receipts/browser-login") {
+                    header("Host", "localhost")
+                }.jsonObject()
+                assertEquals("authenticating", loginStart["status"]!!.jsonPrimitive.content)
+                assertEquals(1, receipts.browserLoginStarts)
+                assertEquals(0, receipts.refreshes)
+                val polled = client.get("/api/agent/receipts/session").jsonObject()
+                assertEquals("authenticating", polled["status"]!!.jsonPrimitive.content)
+                assertEquals(0, receipts.refreshes)
+                assertEquals("Завершите вход в отдельном окне.", polled["message"]!!.jsonPrimitive.content)
+
+                val rejectedRetry = client.post("/api/agent/receipts/session/retry") {
+                    header("Origin", "https://attacker.example")
+                    header("Sec-Fetch-Site", "cross-site")
+                }
+                assertEquals(HttpStatusCode.Forbidden, rejectedRetry.status)
+                assertEquals(0, receipts.refreshes)
+
+                val rejectedOriginlessHostRetry = client.post("/api/agent/receipts/session/retry") {
+                    header("Host", "attacker.example")
+                }
+                assertEquals(HttpStatusCode.Forbidden, rejectedOriginlessHostRetry.status)
+                assertEquals(0, receipts.refreshes)
+
+                val refreshed = client.post("/api/agent/receipts/session/retry") {
+                    header("Host", "localhost")
+                }.jsonObject()
+                assertEquals("active", refreshed["status"]!!.jsonPrimitive.content)
+                assertEquals("persisted", refreshed["persistence_status"]!!.jsonPrimitive.content)
+                assertEquals(1, receipts.refreshes)
+
+                val rejectedLogout = client.post("/api/agent/receipts/logout") {
+                    header("Origin", "https://attacker.example")
+                    header("Sec-Fetch-Site", "cross-site")
+                }
+                assertEquals(HttpStatusCode.Forbidden, rejectedLogout.status)
+                assertEquals(0, receipts.logouts)
+
+                val rejectedOriginlessHostLogout = client.post("/api/agent/receipts/logout") {
+                    header("Host", "attacker.example")
+                }
+                assertEquals(HttpStatusCode.Forbidden, rejectedOriginlessHostLogout.status)
+                assertEquals(0, receipts.logouts)
+                assertTrue(
+                    client.post("/api/agent/receipts/logout") {
+                        header("Host", "localhost")
+                    }.jsonObject()["authenticated"]!!.jsonPrimitive.content.toBoolean().not(),
+                )
+                assertEquals(1, receipts.logouts)
+
+                val created = client.post("/api/agent/sessions").jsonObject()
+                val sessionId = created.sessionId()
+                val chatted = client.post("/api/agent/sessions/$sessionId/messages") {
+                    jsonBody("""{"revision":0,"text":"synthetic receipt proxy baseline"}""")
+                }.jsonObject()
+                val before = client.get("/api/agent/sessions/$sessionId").jsonObject()
+                val callsBeforeSearch = gateway.requests.size
+
+                val rejectedOriginlessHostSearch = client.post("/api/agent/receipts/search") {
+                    header("Host", "attacker.example")
+                    jsonBody("""{"from":"2026-09-01","to":"2026-09-02"}""")
+                }
+                assertEquals(HttpStatusCode.Forbidden, rejectedOriginlessHostSearch.status)
+                assertTrue(receipts.searchArguments.isEmpty())
+
+                val rejectedSearch = client.post("/api/agent/receipts/search") {
+                    header("Origin", "https://attacker.example")
+                    header("Sec-Fetch-Site", "cross-site")
+                    jsonBody("""{"from":"2026-09-01","to":"2026-09-02"}""")
+                }
+                assertEquals(HttpStatusCode.Forbidden, rejectedSearch.status)
+                assertTrue(receipts.searchArguments.isEmpty())
+
+                val searchWithoutSeller = client.post("/api/agent/receipts/search") {
+                    header("Host", "localhost")
+                    jsonBody("""{"from":"2026-09-01","to":"2026-09-02"}""")
+                }
+                assertEquals(HttpStatusCode.OK, searchWithoutSeller.status)
+                val searchText = searchWithoutSeller.bodyAsText()
+                val search = JSON.parseToJsonElement(searchText).jsonObject
+                val summaries = search["receipts"]!!.jsonArray
+                assertEquals(100, summaries.size)
+                assertEquals(
+                    "RUB",
+                    summaries.first().jsonObject["currency"]!!.jsonPrimitive.content,
+                )
+                assertTrue(search["has_more"]!!.jsonPrimitive.content.toBoolean())
+                assertFalse(searchText.contains(FakeReceiptsMcpProvider.RAW_KEY_PREFIX))
+                assertEquals("2026-09-01", receipts.searchArguments.last()["from"]!!.jsonPrimitive.content)
+                assertEquals("2026-09-02", receipts.searchArguments.last()["to"]!!.jsonPrimitive.content)
+                assertFalse(receipts.searchArguments.last().containsKey("query"))
+                assertEquals(0, receipts.detailCalls)
+
+                val searchWithSeller = client.post("/api/agent/receipts/search") {
+                    header("Host", "localhost")
+                    jsonBody("""{"from":"2026-09-01","to":"2026-09-02","seller":"Пекарня"}""")
+                }
+                assertEquals(HttpStatusCode.OK, searchWithSeller.status)
+                assertEquals("Пекарня", receipts.searchArguments.last()["query"]!!.jsonPrimitive.content)
+                assertFalse(searchWithSeller.bodyAsText().contains(FakeReceiptsMcpProvider.RAW_KEY_PREFIX))
+
+                val alias = summaries.first().jsonObject["receipt_alias"]!!.jsonPrimitive.content
+                val detailResponse = client.get("/api/agent/receipts/$alias")
+                assertEquals(HttpStatusCode.OK, detailResponse.status)
+                val detailText = detailResponse.bodyAsText()
+                val detail = JSON.parseToJsonElement(detailText).jsonObject
+                assertEquals("Булочная", detail["merchant"]!!.jsonPrimitive.content)
+                assertEquals(1, detail["items"]!!.jsonArray.size)
+                assertFalse(detailText.contains("receipt_key"))
+                assertFalse(detailText.contains(FakeReceiptsMcpProvider.RAW_KEY_PREFIX))
+                assertEquals(1, receipts.detailCalls)
+
+                val invalidAlias = client.get("/api/agent/receipts/not-a-server-alias")
+                assertEquals(HttpStatusCode.BadRequest, invalidAlias.status)
+                assertEquals(1, receipts.detailCalls)
+                val after = client.get("/api/agent/sessions/$sessionId").jsonObject()
+                assertEquals(before["draft"], after["draft"])
+                assertEquals(before.revision(), after.revision())
+                assertEquals(callsBeforeSearch, gateway.requests.size)
+                assertEquals(chatted.revision(), before.revision())
+            }
+        } finally {
+            database.deleteIfExists()
+            Files.deleteIfExists(database.resolveSibling(database.fileName.toString() + "-wal"))
+            Files.deleteIfExists(database.resolveSibling(database.fileName.toString() + "-shm"))
+        }
+    }
+
 
     @Test
     fun fakeProviderDrivesHttpAgentWorkflowWithoutExternalApi() {
@@ -136,7 +418,7 @@ class AgentIntegrationTest {
                 )
 
                 val deleted = client.delete("/api/agent/sessions/$sessionId") {
-                    jsonBody("""{"revision":3}""")
+                    jsonBody("""{"revision":3,"expected_linked_task_ids":[]}""")
                 }
                 assertEquals(HttpStatusCode.NoContent, deleted.status)
                 assertEquals(0, client.get("/api/agent/sessions").jsonObjectArray().size)
@@ -546,6 +828,102 @@ class AgentIntegrationTest {
             database.deleteIfExists()
         }
     }
+
+    private class FakeReceiptsMcpProvider : ReceiptsMcpProvider {
+        var browserLoginStarts = 0
+        var sessionReads = 0
+        var refreshes = 0
+        var logouts = 0
+        var detailCalls = 0
+        val searchArguments = mutableListOf<JsonObject>()
+        private var status = ReceiptsAuthStatus(
+            authenticated = false,
+            status = "login_required",
+            persistenceStatus = "memory_only",
+            persistenceMessage = "access_token=synthetic-secret",
+        )
+
+        override suspend fun browserLogin(): ReceiptsAuthStatus {
+            browserLoginStarts += 1
+            status = ReceiptsAuthStatus(
+                authenticated = false,
+                status = "authenticating",
+                persistenceStatus = "memory_only",
+                message = "Завершите вход в отдельном окне.",
+            )
+            return status
+        }
+
+        override suspend fun receiptsSession(): ReceiptsAuthStatus {
+            sessionReads += 1
+            return status
+        }
+
+        override suspend fun receiptsRetrySession(): ReceiptsAuthStatus {
+            refreshes += 1
+            status = ReceiptsAuthStatus(
+                authenticated = true,
+                status = "active",
+                persistenceStatus = "persisted",
+            )
+            return status
+        }
+
+        override suspend fun receiptsLogout(): ReceiptsAuthStatus {
+            logouts += 1
+            status = ReceiptsAuthStatus(
+                authenticated = false,
+                status = "login_required",
+                persistenceStatus = "memory_only",
+            )
+            return status
+        }
+
+        override suspend fun callReceiptTool(tool: String, arguments: JsonObject): TbankToolCallResponse =
+            when (tool) {
+                "search-receipts" -> {
+                    searchArguments += arguments
+                    val receiptsJson = (1..101).joinToString(",") { index ->
+                        val currencyField = if (index == 1) "" else ",\"currency\":\"RUB\""
+                        """{"receipt_key":"$RAW_KEY_PREFIX$index","merchant":"Булочная","received_at":"2026-09-01T10:00:00+03:00","amount_minor":4200$currencyField}"""
+                    }
+                    TbankToolCallResponse(
+                        tool = tool,
+                        text = """{"receipts":[$receiptsJson],"has_more":true}""",
+                    )
+                }
+                "get-receipt" -> {
+                    detailCalls += 1
+                    TbankToolCallResponse(
+                        tool = tool,
+                        text = """{"receipt_key":"${RAW_KEY_PREFIX}1","date_time":"2026-09-01T10:00:00+03:00","fiscal_document_number":"100","total_minor":4200,"currency":"RUB","items":[{"name":"Хлеб","quantity":1,"price_minor":4200,"sum_minor":4200,"vat_rate":"20%"}]}""",
+                    )
+                }
+                else -> TbankToolCallResponse(tool = tool, isError = true, text = "unexpected tool")
+            }
+
+        companion object {
+            const val RAW_KEY_PREFIX = "raw-receipt-key-secret-"
+        }
+    }
+
+    private fun testSchedulerTask(id: String, sessionId: String) = SchedulerTask(
+        id = id,
+        name = id,
+        accountRefs = listOf("opaque-account"),
+        startDate = "2026-09-01",
+        intervalMinutes = 60,
+        targetSessionId = sessionId,
+    )
+
+    private fun testSchedulerRun(taskId: String, runId: String) = SchedulerRunHistory(
+        taskId = taskId,
+        runId = runId,
+        status = SchedulerRunStatus.FAILED,
+        startedAtEpochMs = 1_000,
+        finishedAtEpochMs = 2_000,
+        error = "synthetic test failure",
+    )
 
     private fun io.ktor.client.request.HttpRequestBuilder.jsonBody(value: String) {
         contentType(ContentType.Application.Json)

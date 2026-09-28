@@ -1,9 +1,8 @@
 const elements = {
     app: document.querySelector(".agent-app"),
-    openDrawer: document.querySelector("#open-session-drawer"),
-    closeDrawer: document.querySelector("#close-session-drawer"),
+    panelNavigation: document.querySelector("#panel-navigation"),
     drawer: document.querySelector("#session-drawer"),
-    drawerBackdrop: document.querySelector("#drawer-backdrop"),
+    main: document.querySelector(".agent-main"),
     newSession: document.querySelector("#new-session"),
     drawerNewSession: document.querySelector("#drawer-new-session"),
     emptyNewSession: document.querySelector("#empty-new-session"),
@@ -18,10 +17,27 @@ const elements = {
     schedulerAccounts: document.querySelector("#scheduler-accounts"),
     schedulerStartDate: document.querySelector("#scheduler-start-date"),
     schedulerInterval: document.querySelector("#scheduler-interval"),
-    schedulerTimeZone: document.querySelector("#scheduler-time-zone"),
     schedulerSubmit: document.querySelector("#scheduler-submit"),
     schedulerTaskList: document.querySelector("#scheduler-task-list"),
     schedulerHistory: document.querySelector("#scheduler-history"),
+    linkedSchedulerTasks: document.querySelector("#linked-scheduler-tasks"),
+    linkedSchedulerTaskList: document.querySelector("#linked-scheduler-task-list"),
+    receiptsPanel: document.querySelector("#receipts-panel"),
+    receiptsAuthStatus: document.querySelector("#receipts-auth-status"),
+    receiptsAuthDetail: document.querySelector("#receipts-auth-detail"),
+    receiptsBrowserLogin: document.querySelector("#receipts-browser-login"),
+    receiptsRefreshSession: document.querySelector("#receipts-refresh-session"),
+    receiptsSessionRetry: document.querySelector("#receipts-session-retry"),
+    receiptsLogout: document.querySelector("#receipts-logout"),
+    receiptsSearchForm: document.querySelector("#receipts-search-form"),
+    receiptsFrom: document.querySelector("#receipts-from"),
+    receiptsTo: document.querySelector("#receipts-to"),
+    receiptsSeller: document.querySelector("#receipts-seller"),
+    receiptsSearchSubmit: document.querySelector("#receipts-search-submit"),
+    receiptsSearchStatus: document.querySelector("#receipts-search-status"),
+    receiptsSummaryList: document.querySelector("#receipts-summary-list"),
+    receiptDetailPanel: document.querySelector("#receipt-detail-panel"),
+    receiptDetail: document.querySelector("#receipt-detail"),
     tbankLoginForm: document.querySelector("#tbank-login-form"),
     tbankPhone: document.querySelector("#tbank-phone"),
     tbankOtpStep: document.querySelector("#tbank-otp-step"),
@@ -62,6 +78,8 @@ const elements = {
     saveCategory: document.querySelector("#save-category"),
     cancelCategoryEdit: document.querySelector("#cancel-category-edit"),
     categoryList: document.querySelector("#category-list"),
+    notFoundNewSession: document.querySelector("#not-found-new-session"),
+    sessionNotFound: document.querySelector("#session-not-found"),
     themeToggle: document.querySelector("#theme-toggle"),
     toolbarTitle: document.querySelector("#toolbar-session-title"),
     emptySession: document.querySelector("#empty-session"),
@@ -108,11 +126,15 @@ const ACTIVE_SESSION_KEY = "smart-expense-active-session";
 const VIEW_KEY = "smart-expense-operation-view";
 const MOBILE_VIEW = window.matchMedia("(max-width: 760px)");
 let catalog = { providers: [], categories: [] };
+const ACTIVE_PANEL_KEY = "smart-expense-active-panel";
 let mcpCatalog = { servers: [] };
 let tbankSession = { authenticated: false };
+let receiptsAuthState = null;
+let receiptsStatusPollTimer = null;
 let categoryCatalog = [];
 let sessions = [];
 let activeState = null;
+let sessionNavigationVersion = 0;
 let memoryProjection = null;
 let memoryProjectionRequest = 0;
 let expandedMemoryLayer = null;
@@ -120,6 +142,8 @@ let editingCategoryId = "";
 let editingMerchantRuleId = "";
 let lastPreferences = null;
 let busy = false;
+let operationBusy = false;
+let navigationLoading = false;
 let activeMcpPreview = null;
 let preferredView = localStorage.getItem(VIEW_KEY) === "cards" ? "cards" : "table";
 let workingDraft = new Map();
@@ -145,17 +169,25 @@ ensureMcpElements();
 initializeTheme();
 elements.schedulerRefresh?.addEventListener("click", loadSchedulerPanel);
 elements.schedulerForm?.addEventListener("submit", createSchedulerTask);
+elements.linkedSchedulerTaskList?.addEventListener("click", openLinkedSchedulerTask);
 elements.schedulerTaskList?.addEventListener("click", handleSchedulerTaskClick);
 elements.themeToggle.addEventListener("click", toggleTheme);
-elements.openDrawer.addEventListener("click", openDrawer);
-elements.closeDrawer.addEventListener("click", closeDrawer);
-elements.drawerBackdrop.addEventListener("click", closeDrawer);
-document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeDrawer();
-});
-for (const button of [elements.newSession, elements.drawerNewSession, elements.emptyNewSession]) {
-    button.addEventListener("click", createSession);
+elements.panelNavigation?.addEventListener("click", handleAppPanelNavigation);
+for (const button of [
+    elements.newSession,
+    elements.drawerNewSession,
+    elements.emptyNewSession,
+    elements.notFoundNewSession,
+]) {
+    button?.addEventListener("click", createSession);
 }
+elements.receiptsBrowserLogin?.addEventListener("click", handleReceiptsBrowserLogin);
+elements.receiptsRefreshSession?.addEventListener("click", refreshReceiptsSession);
+elements.receiptsSessionRetry?.addEventListener("click", handleReceiptsSessionRetry);
+elements.receiptsLogout?.addEventListener("click", handleReceiptsLogout);
+elements.receiptsSearchForm?.addEventListener("submit", searchReceipts);
+elements.receiptsSummaryList?.addEventListener("click", handleReceiptSummaryClick);
+window.addEventListener("popstate", handlePopState);
 elements.mcpRefresh?.addEventListener("click", loadMcpCatalog);
 elements.tbankLoginForm?.addEventListener("submit", handleTbankLogin);
 elements.tbankResend?.addEventListener("click", handleTbankResend);
@@ -198,6 +230,13 @@ initialize();
 
 async function initialize() {
     setBusy(true);
+    const requestedSessionId = sessionIdFromLocation();
+    const initialPanel = requestedSessionId
+        ? "sessions"
+        : ["sessions", "scheduler", "mcp", "settings"].includes(localStorage.getItem(ACTIVE_PANEL_KEY))
+            ? localStorage.getItem(ACTIVE_PANEL_KEY)
+            : "sessions";
+    selectAppPanel(initialPanel, false);
     try {
         const [providerCatalog, preferences, storedSessions, storedCategories, loadedMcpCatalog, loadedTbankSession] = await Promise.all([
             api("/api/agent/providers"),
@@ -217,14 +256,28 @@ async function initialize() {
         renderPreferences(preferences);
         renderCategoryManager();
         void loadSchedulerPanel();
+        void refreshReceiptsSession();
         renderSessionList();
         if (tbankSession.authenticated) {
             await loadTbankAccounts();
+        }
+        if (requestedSessionId !== null) {
+            try {
+                setActiveState(await api(`/api/agent/sessions/${encodeURIComponent(requestedSessionId)}`));
+            } catch (error) {
+                if (error.status === 404) {
+                    renderSessionNotFound();
+                    return;
+                }
+                throw error;
+            }
+            return;
         }
         const remembered = localStorage.getItem(ACTIVE_SESSION_KEY);
         const initial = sessions.find((session) => session.id === remembered) || sessions[0];
         if (initial) {
             setActiveState(await api(`/api/agent/sessions/${encodeURIComponent(initial.id)}`));
+            if (initialPanel === "sessions") navigateToSession(initial.id, true);
         } else {
             renderEmptyState();
         }
@@ -236,12 +289,292 @@ async function initialize() {
     }
 }
 
+function sessionIdFromLocation() {
+    const match = window.location.pathname.match(/^\/agent\/sessions\/([^/]+)\/?$/);
+    if (!match) return null;
+    try {
+        return decodeURIComponent(match[1]);
+    } catch (_) {
+        return "";
+    }
+}
+
+function navigateToSession(sessionId, replace = false) {
+    const path = `/agent/sessions/${encodeURIComponent(sessionId)}`;
+    if (window.location.pathname === path) return;
+    const update = replace ? "replaceState" : "pushState";
+    window.history[update]({ sessionId }, "", path);
+    sessionNavigationVersion += 1;
+}
+
+function handleAppPanelNavigation(event) {
+    const button = event.target.closest("button[data-app-panel]");
+    if (button) selectAppPanel(button.dataset.appPanel);
+}
+
+function selectAppPanel(panel, persist = true) {
+    if (!["sessions", "scheduler", "mcp", "settings"].includes(panel)) return;
+    elements.app.dataset.activePanel = panel;
+    for (const button of elements.panelNavigation.querySelectorAll("[data-app-panel]")) {
+        const selected = button.dataset.appPanel === panel;
+        button.classList.toggle("active", selected);
+        button.setAttribute("aria-pressed", String(selected));
+    }
+    for (const content of document.querySelectorAll("[data-app-content]")) {
+        content.hidden = content.dataset.appContent !== panel;
+    }
+    elements.newSession.hidden = panel !== "sessions";
+    if (persist) localStorage.setItem(ACTIVE_PANEL_KEY, panel);
+    if (persist && panel === "scheduler") void loadSchedulerPanel();
+    if (persist && panel === "mcp") {
+        void loadMcpCatalog();
+        void refreshReceiptsSession();
+        if (tbankSession.authenticated) void loadTbankAccounts();
+    }
+}
+
+async function handlePopState() {
+    const navigationVersion = ++sessionNavigationVersion;
+    const sessionId = sessionIdFromLocation();
+    selectAppPanel("sessions", false);
+    if (sessionId === null) {
+        renderEmptyState();
+        setNavigationLoading(false);
+        return;
+    }
+    setNavigationLoading(true);
+    try {
+        const state = await api(`/api/agent/sessions/${encodeURIComponent(sessionId)}`);
+        if (
+            sessionNavigationVersion !== navigationVersion ||
+            sessionIdFromLocation() !== sessionId
+        ) {
+            return;
+        }
+        setActiveState(state);
+    } catch (error) {
+        if (
+            sessionNavigationVersion !== navigationVersion ||
+            sessionIdFromLocation() !== sessionId
+        ) {
+            return;
+        }
+        if (error.status === 404) {
+            renderSessionNotFound();
+        } else {
+            renderEmptyState();
+            showError(error.message);
+        }
+    } finally {
+        if (
+            sessionNavigationVersion === navigationVersion &&
+            sessionIdFromLocation() === sessionId
+        ) {
+            setNavigationLoading(false);
+        }
+    }
+}
+
 async function refreshTbankSession() {
     tbankSession = await api("/api/agent/tbank/session");
     renderTbankSession();
     if (tbankSession.authenticated) {
         await loadTbankAccounts();
     }
+}
+
+async function refreshReceiptsSession() {
+    if (!elements.receiptsAuthStatus) return;
+    try {
+        renderReceiptsAuth(await api("/api/agent/receipts/session"));
+    } catch (_) {
+        if (!receiptsAuthState) {
+            renderReceiptsAuth(null);
+        } else {
+            elements.receiptsAuthDetail.textContent =
+                "Не удалось обновить статус; последнее известное состояние сохранено.";
+            scheduleReceiptStatusPoll();
+        }
+    }
+}
+
+function renderReceiptsAuth(status) {
+    const allowedStatuses = new Set([
+        "authenticating",
+        "active",
+        "login_required",
+        "recoverable_error",
+        "logout_failed",
+    ]);
+    const statusCode = allowedStatuses.has(status?.status) ? status.status : "recoverable_error";
+    receiptsAuthState = {
+        authenticated: statusCode === "active" && status?.authenticated === true,
+        retryable: statusCode === "recoverable_error" && status?.retryable === true,
+        status: statusCode,
+    };
+    const labels = {
+        authenticating: "Вход выполняется",
+        active: "Авторизация активна",
+        login_required: "Нужно войти",
+        recoverable_error: "Сервис временно недоступен",
+        logout_failed: "Не удалось завершить выход",
+    };
+    const details = {
+        authenticating: "Продолжите вход в отдельном официальном окне ФНС. Не вводите код в это приложение.",
+        active: "Авторизация готова. Можно искать чеки за выбранный период.",
+        login_required: "Нажмите «Войти в ФНС» и завершите вход в отдельном окне.",
+        recoverable_error: "Обновите статус или явно повторите проверку авторизации.",
+        logout_failed: "Повторите выход, чтобы удалить сохранённую авторизацию.",
+    };
+    const message = typeof status?.message === "string" ? status.message.trim().slice(0, 240) : "";
+    const persistenceStatus = status?.persistence_status;
+    const persistenceMessage = typeof status?.persistence_message === "string"
+        ? status.persistence_message.trim().slice(0, 240)
+        : "";
+    let persistenceNote = persistenceMessage;
+    if (!persistenceNote) {
+        switch (persistenceStatus) {
+            case "persisted":
+                persistenceNote = "Сессия сохранена в системном хранилище.";
+                break;
+            case "memory_only":
+                persistenceNote = "Сессия доступна только до перезапуска; затем потребуется повторный вход.";
+                break;
+            case "unavailable":
+                persistenceNote = "Системное хранилище учётных данных недоступно.";
+                break;
+        }
+    }
+    elements.receiptsAuthStatus.textContent = labels[statusCode];
+    elements.receiptsAuthStatus.className = `mcp-server-status ${statusCode === "active" ? "connected" : ""}`;
+    elements.receiptsAuthDetail.textContent =
+        [details[statusCode], message, persistenceNote].filter(Boolean).join(" ");
+    elements.receiptsSessionRetry.hidden = !receiptsAuthState.retryable;
+    elements.receiptsLogout.hidden = !receiptsAuthState.authenticated && statusCode !== "logout_failed";
+    elements.receiptsBrowserLogin.disabled = statusCode === "authenticating";
+    scheduleReceiptStatusPoll();
+}
+
+function scheduleReceiptStatusPoll() {
+    if (receiptsStatusPollTimer) clearTimeout(receiptsStatusPollTimer);
+    receiptsStatusPollTimer = null;
+    if (receiptsAuthState?.status !== "authenticating") return;
+    receiptsStatusPollTimer = setTimeout(() => void refreshReceiptsSession(), 2_000);
+}
+
+async function handleReceiptsBrowserLogin() {
+    elements.receiptsBrowserLogin.disabled = true;
+    elements.receiptsAuthDetail.textContent = "Открываем отдельное окно официального сайта ФНС…";
+    try {
+        renderReceiptsAuth(await api("/api/agent/receipts/browser-login", { method: "POST" }));
+    } catch (_) {
+        elements.receiptsAuthDetail.textContent =
+            "Не удалось запустить вход; последнее известное состояние авторизации сохранено.";
+    } finally {
+        if (receiptsAuthState?.status !== "authenticating") {
+            elements.receiptsBrowserLogin.disabled = false;
+        }
+    }
+}
+
+async function handleReceiptsSessionRetry() {
+    elements.receiptsSessionRetry.disabled = true;
+    try {
+        renderReceiptsAuth(await api("/api/agent/receipts/session/retry", { method: "POST" }));
+    } catch (_) {
+        elements.receiptsAuthDetail.textContent =
+            "Не удалось выполнить явное обновление авторизации; последнее состояние сохранено.";
+    } finally {
+        elements.receiptsSessionRetry.disabled = !receiptsAuthState?.retryable;
+    }
+}
+
+async function handleReceiptsLogout() {
+    elements.receiptsLogout.disabled = true;
+    try {
+        renderReceiptsAuth(await api("/api/agent/receipts/logout", { method: "POST" }));
+    } catch (_) {
+        elements.receiptsAuthDetail.textContent =
+            "Не удалось завершить выход; последнее известное состояние сохранено.";
+    } finally {
+        elements.receiptsLogout.disabled =
+            !receiptsAuthState?.authenticated && receiptsAuthState?.status !== "logout_failed";
+    }
+}
+
+async function searchReceipts(event) {
+    event.preventDefault();
+    const seller = elements.receiptsSeller.value.trim();
+    const request = {
+        from: elements.receiptsFrom.value,
+        to: elements.receiptsTo.value,
+    };
+    if (seller) request.seller = seller;
+    elements.receiptsSearchSubmit.disabled = true;
+    elements.receiptsSearchStatus.textContent = "Ищем чеки…";
+    elements.receiptsSummaryList.replaceChildren();
+    elements.receiptDetailPanel.hidden = true;
+    try {
+        const result = await api("/api/agent/receipts/search", jsonOptions("POST", request));
+        renderReceiptSummaries(result);
+    } catch (error) {
+        elements.receiptsSearchStatus.textContent = `Поиск не выполнен: ${error.message}`;
+        elements.receiptsSearchStatus.className = "control-note error";
+    } finally {
+        elements.receiptsSearchSubmit.disabled = false;
+    }
+}
+
+function renderReceiptSummaries(result) {
+    elements.receiptsSummaryList.replaceChildren();
+    elements.receiptsSearchStatus.className = "control-note";
+    elements.receiptsSearchStatus.textContent = result.receipts.length
+        ? `${result.receipts.length} чеков${result.has_more ? " (показана ограниченная часть)" : ""}.`
+        : "Чеки за выбранный период не найдены.";
+    for (const receipt of result.receipts) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "receipt-summary";
+        button.dataset.receiptAlias = receipt.receipt_alias;
+        button.textContent =
+            `${receipt.merchant} · ${receipt.received_at} · ` +
+            `${minorToMajor(receipt.amount_minor, receipt.currency)} ${receipt.currency} · Детали`;
+        elements.receiptsSummaryList.append(button);
+    }
+}
+
+async function handleReceiptSummaryClick(event) {
+    const button = event.target.closest("button[data-receipt-alias]");
+    if (!button) return;
+    button.disabled = true;
+    elements.receiptDetailPanel.hidden = false;
+    elements.receiptDetail.textContent = "Загружаем детали…";
+    try {
+        const detail = await api(`/api/agent/receipts/${encodeURIComponent(button.dataset.receiptAlias)}`);
+        renderReceiptDetail(detail);
+    } catch (error) {
+        elements.receiptDetail.textContent = `Детали недоступны: ${error.message}`;
+    } finally {
+        button.disabled = false;
+    }
+}
+
+function renderReceiptDetail(detail) {
+    elements.receiptDetail.replaceChildren();
+    const summary = document.createElement("p");
+    summary.textContent =
+        `${detail.merchant} · ${detail.date_time} · ` +
+        `${minorToMajor(detail.total_minor, detail.currency)} ${detail.currency}`;
+    const items = document.createElement("ul");
+    for (const receiptItem of detail.items) {
+        const item = document.createElement("li");
+        item.textContent =
+            `${receiptItem.name} · ${receiptItem.quantity} × ` +
+            `${minorToMajor(receiptItem.price_minor, detail.currency)} = ` +
+            `${minorToMajor(receiptItem.sum_minor, detail.currency)} ${detail.currency}`;
+        items.append(item);
+    }
+    elements.receiptDetail.append(summary, items);
 }
 
 async function handleTbankSessionRetry() {
@@ -333,6 +666,7 @@ function renderSchedulerAccounts() {
 function renderSchedulerTasks() {
     if (!elements.schedulerTaskList) return;
     elements.schedulerTaskList.replaceChildren();
+    renderLinkedSchedulerTasks();
     if (schedulerState.tasks.length === 0) {
         const empty = document.createElement("p");
         empty.className = "muted";
@@ -343,6 +677,7 @@ function renderSchedulerTasks() {
     for (const task of schedulerState.tasks) {
         const article = document.createElement("article");
         article.className = "scheduler-task";
+        article.id = `scheduler-task-${task.id}`;
         article.dataset.taskId = task.id;
         const heading = document.createElement("h3");
         heading.textContent = task.name;
@@ -355,11 +690,18 @@ function renderSchedulerTasks() {
         const nextRun = task.next_run_at_epoch_ms == null
             ? "не запланирован"
             : formatDate(task.next_run_at_epoch_ms);
-        const targetSession = task.target_session_id || "будет создана при первом успехе";
         meta.textContent =
             `Счета: ${task.account_refs.length}; окно с ${task.cursor_date || task.start_date}; ` +
             `период ${task.interval_minutes} мин; часовой пояс ${task.time_zone}; ` +
-            `следующий запуск: ${nextRun}; target session: ${targetSession}.`;
+            `следующий запуск: ${nextRun}.`;
+        const sessionLink = document.createElement("a");
+        if (task.target_session_id) {
+            sessionLink.href = `/agent/sessions/${encodeURIComponent(task.target_session_id)}`;
+            sessionLink.dataset.sessionId = task.target_session_id;
+            sessionLink.textContent = "Открыть связанную сессию";
+        } else {
+            sessionLink.textContent = "Интерактивная сессия появится при первом запуске";
+        }
         const result = document.createElement("p");
         result.className = "control-note";
         if (task.last_error) {
@@ -381,10 +723,55 @@ function renderSchedulerTasks() {
             schedulerButton("run", "Запустить сейчас"),
             schedulerButton("history", "История"),
         );
-        article.append(heading, meta, result, actions);
+        article.append(heading, meta, sessionLink, result, actions);
         elements.schedulerTaskList.append(article);
     }
 }
+
+function renderLinkedSchedulerTasks() {
+    if (!elements.linkedSchedulerTasks || !elements.linkedSchedulerTaskList) return;
+    const tasks = schedulerState.tasks.filter(
+        (task) => task.target_session_id === activeState?.session.id,
+    );
+    elements.linkedSchedulerTaskList.replaceChildren();
+    elements.linkedSchedulerTasks.hidden = tasks.length === 0;
+    for (const task of tasks) {
+        const item = document.createElement("article");
+        item.className = "linked-scheduler-task";
+        const details = document.createElement("div");
+        const heading = document.createElement("h3");
+        heading.textContent = task.name;
+        const status = document.createElement("p");
+        status.className = "control-note";
+        status.textContent = task.status === "active" ? "Фоновая задача активна." : "Фоновая задача приостановлена.";
+        details.append(heading, status);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "secondary-button compact-button";
+        button.dataset.linkedTaskId = task.id;
+        button.textContent = "Открыть задачу";
+        item.append(details, button);
+        elements.linkedSchedulerTaskList.append(item);
+    }
+}
+
+async function openLinkedSchedulerTask(event) {
+    const button = event.target.closest("button[data-linked-task-id]");
+    if (!button) return;
+    const taskId = button.dataset.linkedTaskId;
+    selectAppPanel("scheduler", false);
+    localStorage.setItem(ACTIVE_PANEL_KEY, "scheduler");
+    await loadSchedulerPanel();
+    const card = document.getElementById(`scheduler-task-${taskId}`);
+    if (!card) {
+        showError("Связанное фоновое задание больше не существует.");
+        return;
+    }
+    card.scrollIntoView({ block: "center", behavior: "smooth" });
+    card.classList.add("linked-task-target");
+    setTimeout(() => card.classList.remove("linked-task-target"), 1_500);
+}
+
 
 function schedulerButton(action, text) {
     const button = document.createElement("button");
@@ -409,14 +796,20 @@ async function createSchedulerTask(event) {
             account_refs: accountRefs,
             start_date: elements.schedulerStartDate.value,
             interval_minutes: Number(elements.schedulerInterval.value),
-            time_zone: elements.schedulerTimeZone.value.trim(),
         }));
         await loadSchedulerPanel();
+        await loadSessions();
         showSuccess("Фоновое задание создано.");
     });
 }
 
 async function handleSchedulerTaskClick(event) {
+    const sessionLink = event.target.closest("a[data-session-id]");
+    if (sessionLink) {
+        event.preventDefault();
+        void openSession(sessionLink.dataset.sessionId);
+        return;
+    }
     const button = event.target.closest("button[data-scheduler-action]");
     const article = button?.closest("[data-task-id]");
     if (!button || !article) return;
@@ -491,21 +884,6 @@ function renderSchedulerHistory(history) {
     }
 }
 
-function openDrawer() {
-    elements.drawer.classList.add("open");
-    elements.drawer.setAttribute("aria-hidden", "false");
-    elements.openDrawer.setAttribute("aria-expanded", "true");
-    elements.drawerBackdrop.hidden = false;
-    elements.closeDrawer.focus();
-}
-
-function closeDrawer() {
-    if (!elements.drawer.classList.contains("open")) return;
-    elements.drawer.classList.remove("open");
-    elements.drawer.setAttribute("aria-hidden", "true");
-    elements.openDrawer.setAttribute("aria-expanded", "false");
-    elements.drawerBackdrop.hidden = true;
-}
 
 function initializeTheme() {
     const stored = localStorage.getItem(THEME_KEY);
@@ -1735,23 +2113,36 @@ function renderSessionList() {
 }
 
 async function createSession() {
+    const navigationVersion = sessionNavigationVersion;
     await runBusy(async () => {
         const state = await api("/api/agent/sessions", { method: "POST" });
         await refreshTbankSession();
         await loadSessions();
+        if (sessionNavigationVersion !== navigationVersion) return;
         setActiveState(state);
-        closeDrawer();
+        selectAppPanel("sessions");
+        navigateToSession(state.session.id);
         elements.message.focus();
         showSuccess("Новый импорт готов.");
     });
 }
 
 async function openSession(id) {
+    const navigationVersion = sessionNavigationVersion;
     await runBusy(async () => {
-        await refreshTbankSession();
-        setActiveState(await api(`/api/agent/sessions/${encodeURIComponent(id)}`));
-        closeDrawer();
-        showSuccess("Сессия открыта.");
+        try {
+            await refreshTbankSession();
+            if (sessionNavigationVersion !== navigationVersion) return;
+            const state = await api(`/api/agent/sessions/${encodeURIComponent(id)}`);
+            if (sessionNavigationVersion !== navigationVersion) return;
+            setActiveState(state);
+            selectAppPanel("sessions");
+            navigateToSession(id);
+            showSuccess("Сессия открыта.");
+        } catch (error) {
+            if (sessionNavigationVersion !== navigationVersion) return;
+            throw error;
+        }
     });
 }
 
@@ -1825,8 +2216,11 @@ function renderEmptyState() {
     workingDraft = new Map();
     dirtyFields = new Map();
     localStorage.removeItem(ACTIVE_SESSION_KEY);
+    elements.sessionNotFound.hidden = true;
+    elements.toolbarTitle.textContent = "Импорт операций";
     elements.emptySession.hidden = false;
     elements.workspace.hidden = true;
+    if (elements.linkedSchedulerTasks) elements.linkedSchedulerTasks.hidden = true;
     elements.deleteSession.hidden = true;
     elements.forkSession.hidden = true;
     elements.factsPanel.hidden = true;
@@ -1843,9 +2237,17 @@ function renderEmptyState() {
     renderReceiptStatus();
     activeMcpPreview = null;
 }
+function renderSessionNotFound() {
+    renderEmptyState();
+    elements.emptySession.hidden = true;
+    elements.sessionNotFound.hidden = false;
+    elements.toolbarTitle.textContent = "Сессия не найдена";
+}
 
 function renderActiveState() {
+    renderLinkedSchedulerTasks();
     elements.emptySession.hidden = true;
+    elements.sessionNotFound.hidden = true;
     elements.workspace.hidden = false;
     elements.deleteSession.hidden = false;
     elements.activeTitle.textContent = activeState.session.title;
@@ -2177,25 +2579,118 @@ async function deleteConfirmedDecision(decisionId) {
 
 async function deleteSession() {
     if (!activeState) return;
-    const title = activeState.session.title;
-    if (!window.confirm(`Удалить сессию «${title}» вместе с диалогом и черновиком? Это действие нельзя отменить.`)) {
+    if (busy) {
+        showError("Дождитесь завершения текущей операции; сессия не удалена.");
+        return;
+    }
+    const requestedSession = {
+        id: activeState.session.id,
+        title: activeState.session.title,
+        revision: activeState.session.revision,
+    };
+    const id = requestedSession.id;
+    let linkedTasks;
+    try {
+        const tasks = await api("/api/agent/scheduler/tasks");
+        linkedTasks = tasks.filter((task) => task.target_session_id === id);
+    } catch (_) {
+        showError("Не удалось проверить связанные фоновые задачи; сессия не удалена.");
+        return;
+    }
+    if (busy) {
+        showError("Дождитесь завершения текущей операции; сессия не удалена.");
+        return;
+    }
+    const taskNames = linkedTasks.length
+        ? linkedTasks.map((task) => `• ${task.name}`).join("\n")
+        : "Связанных фоновых задач нет.";
+    const warning = linkedTasks.length
+        ? "\n\nВместе с сессией навсегда удалятся перечисленные задачи и вся история их запусков."
+        : "";
+    if (!window.confirm(
+        `Удалить сессию «${requestedSession.title}» вместе с диалогом и черновиком?\n\n` +
+        `Связанные фоновые задачи:\n${taskNames}${warning}\n\nЭто действие нельзя отменить.`,
+    )) {
+        return;
+    }
+    if (busy) {
+        showError("Дождитесь завершения текущей операции; сессия не удалена.");
         return;
     }
     await runBusy(async () => {
-        const id = activeState.session.id;
         await api(
             `/api/agent/sessions/${encodeURIComponent(id)}`,
-            jsonOptions("DELETE", { revision: activeState.session.revision }),
+            jsonOptions("DELETE", {
+                revision: requestedSession.revision,
+                expected_linked_task_ids: linkedTasks.map((task) => task.id),
+            }),
         );
-        activeState = null;
-        localStorage.removeItem(ACTIVE_SESSION_KEY);
-        await loadSessions();
-        if (sessions.length > 0) {
-            setActiveState(await api(`/api/agent/sessions/${encodeURIComponent(sessions[0].id)}`));
-        } else {
-            renderEmptyState();
+        const deletingCurrentSession =
+            activeState?.session.id === id && sessionIdFromLocation() === id;
+        const navigationVersionAtDelete = sessionNavigationVersion;
+        const deletedSessionPath = `/agent/sessions/${encodeURIComponent(id)}`;
+        if (deletingCurrentSession) renderEmptyState();
+        sessions = sessions.filter((session) => session.id !== id);
+        renderSessionList();
+        try {
+            await loadSessions();
+            await loadSchedulerPanel();
+        } catch (error) {
+            if (
+                deletingCurrentSession &&
+                sessionNavigationVersion === navigationVersionAtDelete &&
+                window.location.pathname === deletedSessionPath
+            ) {
+                window.history.replaceState({}, "", "/agent");
+                sessionNavigationVersion += 1;
+                renderEmptyState();
+            }
+            if (deletingCurrentSession) {
+                showError("Сессия удалена, но интерфейс не обновился. Перезагрузите страницу.");
+                return;
+            }
+            throw error;
         }
-        showSuccess("Сессия удалена.");
+        if (
+            deletingCurrentSession &&
+            sessionNavigationVersion === navigationVersionAtDelete &&
+            window.location.pathname === deletedSessionPath
+        ) {
+            if (sessions.length > 0) {
+                const nextId = sessions[0].id;
+                let nextState;
+                try {
+                    nextState = await api(`/api/agent/sessions/${encodeURIComponent(nextId)}`);
+                } catch (_) {
+                    if (
+                        sessionNavigationVersion !== navigationVersionAtDelete ||
+                        window.location.pathname !== deletedSessionPath
+                    ) {
+                        showSuccess("Сессия и связанные фоновые задачи удалены.");
+                        return;
+                    }
+                    window.history.replaceState({}, "", "/agent");
+                    sessionNavigationVersion += 1;
+                    renderEmptyState();
+                    showError("Сессия удалена, но следующую сессию открыть не удалось. Перезагрузите страницу.");
+                    return;
+                }
+                if (
+                    sessionNavigationVersion !== navigationVersionAtDelete ||
+                    window.location.pathname !== deletedSessionPath
+                ) {
+                    showSuccess("Сессия и связанные фоновые задачи удалены.");
+                    return;
+                }
+                setActiveState(nextState);
+                navigateToSession(nextId, true);
+            } else {
+                window.history.replaceState({}, "", "/agent");
+                sessionNavigationVersion += 1;
+                renderEmptyState();
+            }
+        }
+        showSuccess("Сессия и связанные фоновые задачи удалены.");
     });
 }
 
@@ -2212,7 +2707,8 @@ async function forkActiveSession() {
         );
         await loadSessions();
         setActiveState(state);
-        closeDrawer();
+        selectAppPanel("sessions");
+        navigateToSession(state.session.id);
         showSuccess("Создана независимая ветка.");
     });
 }
@@ -2745,7 +3241,7 @@ function updateWorkingDraft(event) {
         holder.classList.add("dirty");
         updateDraftSummary(activeState.draft);
     }
-    setBusy(busy);
+    applyBusyState();
 }
 
 function draftMetrics(draft) {
@@ -2802,7 +3298,7 @@ function renderDraft() {
             elements.draftEditor.append(createOperationCard(row));
         }
     }
-    setBusy(busy);
+    applyBusyState();
 }
 
 function createOperationCard(row) {
@@ -3226,6 +3722,17 @@ async function runBusy(action, reloadOnConflict = false) {
 }
 
 function setBusy(value) {
+    operationBusy = value;
+    applyBusyState();
+}
+
+function setNavigationLoading(value) {
+    navigationLoading = value;
+    applyBusyState();
+}
+
+function applyBusyState() {
+    const value = operationBusy || navigationLoading;
     busy = value;
     elements.app.setAttribute("aria-busy", String(value));
     for (const control of elements.app.querySelectorAll("button, select, input, textarea")) {

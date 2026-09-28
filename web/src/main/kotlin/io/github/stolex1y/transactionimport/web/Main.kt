@@ -122,6 +122,7 @@ fun main() {
             tbankMcp = connectedCatalog,
             nativeMcpAgent = nativeMcpAgent,
             scheduler = scheduler,
+            receiptsProxy = ReceiptsProxyService(connectedCatalog),
         )
         embeddedServer(Netty, host = "127.0.0.1", port = port) {
             module(agentDependencies = agentDependencies)

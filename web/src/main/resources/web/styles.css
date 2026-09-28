@@ -963,6 +963,27 @@ html[data-theme="light"] .agent-body select {
     margin: 0;
 }
 
+.linked-scheduler-task-list {
+    display: grid;
+    gap: 10px;
+}
+
+.linked-scheduler-task {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--agent-border);
+    border-radius: 10px;
+    background: var(--agent-bg);
+}
+
+.linked-scheduler-task h3,
+.linked-scheduler-task p {
+    margin: 0;
+}
+
 .scheduler-trace {
     color: var(--agent-muted);
     font-size: 0.75rem;
@@ -2072,5 +2093,212 @@ html[data-theme="light"] .agent-body select {
 
     .transaction-id {
         text-align: left;
+    }
+}
+.agent-app {
+    display: grid;
+    grid-template-columns: minmax(260px, 330px) minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+    gap: 0;
+}
+
+.agent-toolbar {
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(180px, auto) minmax(0, 1fr) auto;
+}
+
+.panel-navigation {
+    display: flex;
+    min-width: 0;
+    gap: 6px;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+.panel-tab {
+    width: auto;
+    margin: 0;
+    padding: 9px 12px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--agent-muted);
+    white-space: nowrap;
+}
+
+.panel-tab:hover:not(:disabled),
+.panel-tab.active {
+    border-color: var(--agent-border);
+    background: var(--agent-surface);
+    color: var(--agent-text);
+}
+
+.session-drawer {
+    position: static;
+    z-index: auto;
+    grid-column: 1;
+    grid-row: 2;
+    width: auto;
+    max-height: calc(100vh - 72px);
+    overflow-y: auto;
+    padding: 22px;
+    border-right: 1px solid var(--agent-border);
+    box-shadow: none;
+    transform: none;
+    transition: none;
+}
+
+.session-drawer.open {
+    transform: none;
+}
+
+.agent-main {
+    grid-column: 2;
+    grid-row: 2;
+    width: auto;
+    min-width: 0;
+    max-width: 1500px;
+    margin: 0;
+    padding: 24px;
+}
+
+.agent-app:not([data-active-panel="sessions"]) {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+.agent-app:not([data-active-panel="sessions"]) .session-drawer {
+    grid-column: 1;
+    grid-row: 2;
+    width: min(100%, 1100px);
+    max-height: none;
+    margin: 0 auto;
+    overflow: visible;
+    border: 0;
+    background: transparent;
+}
+
+.agent-app:not([data-active-panel="sessions"]) .agent-main {
+    display: none;
+}
+
+.receipts-panel {
+    margin-top: 28px;
+    padding-top: 24px;
+    border-top: 1px solid var(--agent-border);
+}
+
+.receipts-panel h2,
+.receipts-panel h3 {
+    margin-bottom: 8px;
+}
+
+.receipts-panel .category-form {
+    margin-top: 20px;
+}
+
+.receipts-summary-list {
+    display: grid;
+    gap: 8px;
+    margin-top: 14px;
+}
+
+.receipt-summary {
+    width: 100%;
+    margin: 0;
+    padding: 12px 14px;
+    border: 1px solid var(--agent-border);
+    background: var(--agent-surface);
+    color: var(--agent-text);
+    text-align: left;
+}
+
+.receipt-detail-panel {
+    margin-top: 20px;
+    padding: 16px;
+    border: 1px solid var(--agent-border);
+    border-radius: 12px;
+    background: var(--agent-surface);
+}
+
+.receipt-detail-panel ul {
+    display: grid;
+    gap: 8px;
+    padding-left: 22px;
+}
+
+.scheduler-task > a {
+    width: fit-content;
+    color: var(--agent-accent);
+    text-decoration: underline;
+}
+
+.scheduler-task.linked-task-target {
+    outline: 2px solid var(--agent-accent);
+    outline-offset: 3px;
+    scroll-margin: 18px;
+}
+
+@media (max-width: 960px) {
+    .agent-toolbar {
+        grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .panel-navigation {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        justify-content: flex-start;
+    }
+
+    .toolbar-actions {
+        grid-column: 2;
+        grid-row: 1;
+    }
+
+    .agent-app {
+        grid-template-columns: minmax(230px, 290px) minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 720px) {
+    .agent-app,
+    .agent-app:not([data-active-panel="sessions"]) {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .agent-toolbar {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 10px;
+    }
+
+    .panel-navigation,
+    .toolbar-actions {
+        grid-column: 1;
+        grid-row: auto;
+        justify-content: flex-start;
+    }
+
+    .panel-navigation {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+    }
+
+    .session-drawer {
+        grid-column: 1;
+        grid-row: auto;
+        max-height: none;
+        border-right: 0;
+        border-bottom: 1px solid var(--agent-border);
+    }
+
+    .agent-main {
+        grid-column: 1;
+        grid-row: auto;
+        width: 100%;
+        padding: 16px;
+    }
+
+    .agent-app:not([data-active-panel="sessions"]) .session-drawer {
+        grid-row: auto;
+        width: 100%;
+        padding: 16px;
     }
 }
