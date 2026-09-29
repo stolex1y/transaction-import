@@ -22,6 +22,8 @@ import io.github.stolex1y.transactionimport.core.ResponseMessage
 import io.github.stolex1y.transactionimport.core.SmartExpenseAgent
 import io.github.stolex1y.transactionimport.core.Usage
 import io.github.stolex1y.transactionimport.core.TransactionCategory
+import io.github.stolex1y.transactionimport.core.ReceiptAssociation
+import io.github.stolex1y.transactionimport.core.ReceiptAssociationStatus
 import io.github.stolex1y.transactionimport.core.ReceiptStatus
 import io.github.stolex1y.transactionimport.core.UserPreferences
 import kotlinx.coroutines.runBlocking
@@ -63,6 +65,60 @@ class SqliteImportSessionRepositoryTest {
             assertEquals(created.session.revision, restored.session.revision)
             assertEquals(ReceiptStatus.NOT_STARTED, restored.receiptState.status)
             assertNull(restored.receiptState.lastCompliance)
+        } finally {
+            deleteDatabase(database)
+        }
+    }
+
+    @Test
+    fun restoresLegacyUnmatchedReceiptAsNeutralAssociationWithoutDroppingOtherIssues() = runBlocking {
+        val database = Files.createTempFile("transaction-import-legacy-receipt-", ".sqlite")
+        try {
+            createVersionTwoDatabase(database)
+            val repository = SqliteImportSessionRepository(database.absolutePathString())
+
+            fun replaceLegacyRow(issues: String, fieldErrors: String) {
+                val transaction = """
+                    {"source_index":1,"direction":"expense","occurred_at":"2026-01-15T12:10:00","posted_at":null,
+                     "amount_minor":125050,"currency":"RUB","merchant":"DEMO MARKET","category_id":"food.groceries",
+                     "needs_review":true,"issues":$issues}
+                """.trimIndent()
+                DriverManager.getConnection("jdbc:sqlite:${database.absolutePathString()}").use { connection ->
+                    connection.prepareStatement(
+                        "UPDATE draft_transactions SET transaction_json = ?, field_errors_json = ? WHERE session_id = 'legacy-session'",
+                    ).use { statement ->
+                        statement.setString(1, transaction)
+                        statement.setString(2, fieldErrors)
+                        statement.executeUpdate()
+                    }
+                }
+            }
+
+            replaceLegacyRow(
+                issues = """["receipt_unmatched:нет чека с совпадающими суммой, датой и валютой"]""",
+                fieldErrors = """{"category_id":["Нет чека с совпадающими суммой, датой и валютой"]}""",
+            )
+            val receiptOnly = repository.get("legacy-session")!!.draft!!.transactions.single()
+            assertEquals(
+                ReceiptAssociation(ReceiptAssociationStatus.UNMATCHED),
+                receiptOnly.transaction.receiptAssociation,
+            )
+            assertTrue(receiptOnly.transaction.issues.isEmpty())
+            assertFalse(receiptOnly.transaction.needsReview)
+            assertTrue(receiptOnly.fieldErrors.isEmpty())
+
+            replaceLegacyRow(
+                issues = """["receipt_unmatched:нет чека с совпадающими суммой, датой и валютой","bank_warning:проверка источника"]""",
+                fieldErrors = """{"category_id":["Нет чека с совпадающими суммой, датой и валютой","Проверьте банковские данные"]}""",
+            )
+            val withUnrelatedWarning = repository.get("legacy-session")!!.draft!!.transactions.single()
+            assertEquals(ReceiptAssociationStatus.UNMATCHED, withUnrelatedWarning.transaction.receiptAssociation?.status)
+            assertEquals(listOf("bank_warning:проверка источника"), withUnrelatedWarning.transaction.issues)
+            assertTrue(withUnrelatedWarning.transaction.needsReview)
+            assertEquals(
+                mapOf("category_id" to listOf("Проверьте банковские данные")),
+                withUnrelatedWarning.fieldErrors,
+            )
         } finally {
             deleteDatabase(database)
         }

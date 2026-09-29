@@ -457,6 +457,65 @@ class SmartExpenseAgentTest {
     }
 
     @Test
+    fun receiptAssociationAddsOnlyReceiptItemsAndDoesNotBlockNoReceiptExport() = runBlocking {
+        val agent = testAgent(MemoryImportSessionRepository(), QueuedGateway(initialDraftJson))
+        val created = agent.createSession("Receipt association", defaultConfig)
+        val imported = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "Синтетическая выписка",
+        )
+        val originalRows = imported.draft!!.transactions
+        val bankRow = originalRows.first()
+        val noReceiptRow = originalRows.last()
+        val original = bankRow.transaction
+        val updated = agent.recordReceiptAssociation(
+            sessionId = created.session.id,
+            expectedRevision = imported.session.revision,
+            userText = "Привяжи найденный синтетический чек.",
+            assistantText = "Синтетическая проверка завершена.",
+            updates = mapOf(
+                bankRow.id to ReceiptMatchUpdate(
+                    status = ReceiptAssociationStatus.MATCHED,
+                    items = listOf(
+                        TransactionItem(
+                            name = "Синтетические яблоки",
+                            quantity = 1.0,
+                            priceMinor = original.amountMinor,
+                            sumMinor = original.amountMinor,
+                        ),
+                    ),
+                    summary = ReceiptAssociationSummary(
+                        date = "2026-01-15",
+                        merchant = "Синтетический магазин",
+                        amountMinor = original.amountMinor,
+                        currency = original.currency,
+                    ),
+                ),
+                noReceiptRow.id to ReceiptMatchUpdate(ReceiptAssociationStatus.UNMATCHED),
+            ),
+            persistRule = false,
+        )
+        val rows = updated.draft!!.transactions
+        val enriched = rows.first { it.id == bankRow.id }
+        val unmatched = rows.first { it.id == noReceiptRow.id }
+
+        assertEquals(original.merchant, enriched.transaction.merchant)
+        assertEquals(original.categoryId, enriched.transaction.categoryId)
+        assertEquals(original.occurredAt, enriched.transaction.occurredAt)
+        assertEquals(original.amountMinor, enriched.transaction.amountMinor)
+        assertEquals(original.currency, enriched.transaction.currency)
+        assertEquals(bankRow.description, enriched.description)
+        assertEquals(listOf("Синтетические яблоки"), enriched.transaction.items.map(TransactionItem::name))
+        assertEquals(ReceiptAssociationStatus.MATCHED, enriched.transaction.receiptAssociation?.status)
+        assertEquals(ReceiptAssociationStatus.UNMATCHED, unmatched.transaction.receiptAssociation?.status)
+        assertTrue(unmatched.transaction.issues.isEmpty())
+        assertFalse(unmatched.transaction.needsReview)
+        assertEquals(ReceiptStatus.READY_FOR_EXPORT, updated.receiptState.status)
+        assertEquals(2, agent.buildImportBatch(created.session.id).transactions.size)
+    }
+
+    @Test
     fun preservesSourceMerchantWhenModelLeavesItUnknownAndKeepsAmbiguousCategoryOnReview() = runBlocking {
         val gateway = QueuedGateway(
             """{"items":[{"index":0,"merchant":null,"category_id":null},{"index":1,"merchant":null,"category_id":null}]}""",
@@ -2312,6 +2371,34 @@ class SmartExpenseAgentTest {
                 metrics = metric?.let { current.metrics + it } ?: current.metrics,
                 merchantCanonicalCandidates = current.merchantCanonicalCandidates +
                     merchantCanonicalCandidates,
+            ).also { states[sessionId] = it }
+        }
+
+        override suspend fun saveReceiptAssociationExchange(
+            sessionId: String,
+            expectedRevision: Long,
+            userMessage: ConversationMessage,
+            assistantMessage: ConversationMessage,
+            draft: ImportDraft,
+            updatedAtEpochMs: Long,
+            receiptRule: ConfirmedDecision?,
+            receiptState: ReceiptState,
+        ): ImportSessionState {
+            val current = checkedState(sessionId, expectedRevision)
+            require(draft.version == expectedRevision + 1)
+            receiptRule?.let { rule ->
+                preferences = (preferences ?: UserPreferences("")).copy(
+                    confirmedDecisions = (preferences?.confirmedDecisions ?: emptyList()) + rule,
+                )
+            }
+            return current.copy(
+                session = current.session.copy(
+                    revision = expectedRevision + 1,
+                    updatedAtEpochMs = updatedAtEpochMs,
+                ),
+                messages = current.messages + userMessage + assistantMessage,
+                draft = draft,
+                receiptState = receiptState,
             ).also { states[sessionId] = it }
         }
 

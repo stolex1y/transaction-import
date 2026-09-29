@@ -165,6 +165,7 @@ fun fakeAgentDependencies(
     receiptsProxy: ReceiptsProxyService? = null,
     schedulerAccountAvailable: Boolean = false,
     schedulerNowEpochMs: () -> Long = { System.currentTimeMillis() },
+    schedulerMatchSelector: ReceiptMatchSelector? = null,
 ): AgentWebDependencies {
     val catalog = ProviderCatalog(
         providers = listOf(
@@ -237,14 +238,16 @@ fun fakeAgentDependencies(
                         )
                     }
                     "receipts" to "search-receipts" -> {
-                        val second = arguments["query"]?.jsonPrimitive?.contentOrNull == "Second scheduled purchase"
-                        val receiptKey = if (second) "fixture-receipt-private-2" else "fixture-receipt-private"
-                        val merchant = if (second) "Second scheduled purchase" else "Browser scheduled purchase"
-                        val receivedAt = if (second) "2026-09-11T10:05:00Z" else "2026-09-10T10:05:00Z"
-                        val amountMinor = if (second) 350 else 499
+                        val firstReceipt = """{"receipt_key":"fixture-receipt-private","merchant":"Browser scheduled purchase","received_at":"2026-09-10T10:05:00Z","amount_minor":499,"currency":"RUB"}"""
+                        val secondReceipt = """{"receipt_key":"fixture-receipt-private-2","merchant":"Second scheduled purchase","received_at":"2026-09-11T10:05:00Z","amount_minor":350,"currency":"RUB"}"""
+                        val receipts = when (arguments["from"]?.jsonPrimitive?.contentOrNull) {
+                            "2026-09-09" -> firstReceipt
+                            "2026-09-10" -> secondReceipt
+                            else -> "$firstReceipt,$secondReceipt"
+                        }
                         TbankToolCallResponse(
                             tool = tool,
-                            text = """{"receipts":[{"receipt_key":"$receiptKey","merchant":"$merchant","received_at":"$receivedAt","amount_minor":$amountMinor,"currency":"RUB"}],"has_more":false}""",
+                            text = """{"receipts":[$receipts],"has_more":false}""",
                         )
                     }
                     "receipts" to "get-receipt" -> {
@@ -256,7 +259,7 @@ fun fakeAgentDependencies(
                         val itemName = if (second) "Second imported item" else "Imported item"
                         TbankToolCallResponse(
                             tool = tool,
-                            text = """{"receipt_key":"$receiptKey","date_time":"$receivedAt","total_minor":$amountMinor,"currency":"RUB","items":[{"name":"$itemName","quantity":1,"price_minor":$amountMinor,"sum_minor":$amountMinor}]}""",
+                            text = """{"receipt_key":"$receiptKey","date_time":"$receivedAt","total_minor":$amountMinor,"currency":"RUB","merchant":"$merchant","settlement_place":"Синтетическая торговая точка","items":[{"name":"$itemName","quantity":1,"price_minor":$amountMinor,"sum_minor":$amountMinor}]}""",
                         )
                     }
                     else -> TbankToolCallResponse(tool = tool, isError = true, text = "unexpected fake source tool")
@@ -266,7 +269,7 @@ fun fakeAgentDependencies(
         gatewayResolver = AgentGatewayResolver { gateway },
         runtimeConfig = runtime,
         nowEpochMs = schedulerNowEpochMs,
-        matchSelector = ReceiptMatchSelector { _, _, choices ->
+        matchSelector = schedulerMatchSelector ?: ReceiptMatchSelector { _, _, choices, _, _ ->
             choices.singleOrNull()?.let { ReceiptSelectionResponseView(it.alias, 0.96) }
         },
     )

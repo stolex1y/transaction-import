@@ -26,6 +26,8 @@ import io.github.stolex1y.transactionimport.core.RevisionConflictException
 import io.github.stolex1y.transactionimport.core.SessionNotFoundException
 import io.github.stolex1y.transactionimport.core.StickyFact
 import io.github.stolex1y.transactionimport.core.StructuredTransaction
+import io.github.stolex1y.transactionimport.core.ReceiptAssociation
+import io.github.stolex1y.transactionimport.core.ReceiptAssociationStatus
 import io.github.stolex1y.transactionimport.core.DEFAULT_AGENT_CATEGORIES
 import io.github.stolex1y.transactionimport.core.TransactionCategory
 import io.github.stolex1y.transactionimport.core.UserPreferences
@@ -254,6 +256,45 @@ class SqliteImportSessionRepository(
         insertMerchantCanonicalCandidates(this, sessionId, merchantCanonicalCandidates)
         metric?.let { insertMetric(this, sessionId, it) }
         bumpSession(this, sessionId, expectedRevision, updatedAtEpochMs)
+        requireState(this, sessionId)
+    }
+
+    override suspend fun saveReceiptAssociationExchange(
+        sessionId: String,
+        expectedRevision: Long,
+        userMessage: ConversationMessage,
+        assistantMessage: ConversationMessage,
+        draft: ImportDraft,
+        updatedAtEpochMs: Long,
+        receiptRule: ConfirmedDecision?,
+        receiptState: ReceiptState,
+    ): ImportSessionState = transaction {
+        checkRevision(this, sessionId, expectedRevision)
+        require(draft.version == expectedRevision + 1) {
+            "Версия черновика должна совпадать со следующей ревизией сессии."
+        }
+        val nextSequence = nextMessageSequence(this, sessionId)
+        insertMessage(this, sessionId, nextSequence, userMessage)
+        insertMessage(this, sessionId, nextSequence + 1, assistantMessage)
+        receiptRule?.let { rule ->
+            val preferences = readPreferences(this)
+            require(preferences.confirmedDecisions.none { it.id == rule.id }) {
+                "Идентификатор подтверждённого решения уже существует."
+            }
+            writePreferences(
+                this,
+                preferences.copy(confirmedDecisions = preferences.confirmedDecisions + rule),
+            )
+        }
+        replaceDraft(
+            connection = this,
+            sessionId = sessionId,
+            expectedRevision = expectedRevision,
+            draft = draft,
+            updatedAtEpochMs = updatedAtEpochMs,
+            memoryTrace = null,
+            receiptState = receiptState,
+        )
         requireState(this, sessionId)
     }
     override suspend fun acceptMemoryCandidate(
@@ -1217,17 +1258,47 @@ class SqliteImportSessionRepository(
                 statement.executeQuery().use { rows ->
                     buildList {
                         while (rows.next()) {
-                            val transaction = databaseJson.decodeFromString<StructuredTransaction>(
+                            val decodedTransaction = databaseJson.decodeFromString<StructuredTransaction>(
                                 rows.getString("transaction_json"),
                             )
+                            val hadLegacyUnmatched = decodedTransaction.issues.any {
+                                it.startsWith("receipt_unmatched:")
+                            }
+                            val remainingIssues = decodedTransaction.issues.filterNot {
+                                it.startsWith("receipt_unmatched:")
+                            }
+                            val transaction = if (hadLegacyUnmatched) {
+                                decodedTransaction.copy(
+                                    issues = remainingIssues,
+                                    needsReview = decodedTransaction.needsReview &&
+                                        (decodedTransaction.categoryId == null || remainingIssues.isNotEmpty()),
+                                    receiptAssociation = decodedTransaction.receiptAssociation
+                                        ?: ReceiptAssociation(ReceiptAssociationStatus.UNMATCHED),
+                                )
+                            } else {
+                                decodedTransaction
+                            }
+                            val storedFieldErrors = databaseJson.decodeFromString<Map<String, List<String>>>(
+                                rows.getString("field_errors_json"),
+                            )
+                            val fieldErrors = if (hadLegacyUnmatched) {
+                                storedFieldErrors.mapValues { (_, errors) ->
+                                    errors.filterNot {
+                                        it.contains(
+                                            "нет чека с совпадающими суммой, датой и валютой",
+                                            ignoreCase = true,
+                                        )
+                                    }
+                                }.filterValues { it.isNotEmpty() }
+                            } else {
+                                storedFieldErrors
+                            }
                             add(
                                 DraftTransaction(
                                     id = transaction.sourceIndex.toString(),
                                     included = rows.getInt("included") != 0,
                                     description = rows.getString("description"),
-                                    fieldErrors = databaseJson.decodeFromString(
-                                        rows.getString("field_errors_json"),
-                                    ),
+                                    fieldErrors = fieldErrors,
                                     transaction = transaction,
                                 ),
                             )

@@ -16,10 +16,17 @@ enum class MemoryLayer {
 }
 
 @Serializable
+enum class ConfirmedDecisionScope {
+    @SerialName("receipt_matching")
+    RECEIPT_MATCHING,
+}
+
+@Serializable
 data class ConfirmedDecision(
     val id: String,
     val text: String,
     @SerialName("created_at_epoch_ms") val createdAtEpochMs: Long,
+    val scope: ConfirmedDecisionScope? = null,
 )
 
 @Serializable

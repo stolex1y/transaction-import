@@ -451,6 +451,7 @@ function renderReceiptsAuth(status) {
         [details[statusCode], message, persistenceNote].filter(Boolean).join(" ");
     elements.receiptsSessionRetry.hidden = !receiptsAuthState.retryable;
     elements.receiptsLogout.hidden = !receiptsAuthState.authenticated && statusCode !== "logout_failed";
+    elements.receiptsBrowserLogin.hidden = statusCode === "active" && status?.authenticated === true;
     elements.receiptsBrowserLogin.disabled = statusCode === "authenticating";
     scheduleReceiptStatusPoll();
 }
@@ -3343,8 +3344,8 @@ function createOperationCard(row) {
         fieldControl("Категория", categorySelect(editor.category_id, editor.direction), row, "category_id", editor.included),
         fieldControl("Счёт / карта", readOnlyInput("source_label", editor.source_label), row, "source_label", editor.included),
     );
+    const receiptStatus = receiptAssociationIndicator(row.transaction.receipt_association);
     const itemDetails = transactionItemsDetails(row.transaction.items);
-
     const generalErrors = editor.included ? (row.field_errors?._transaction || []) : [];
     const footer = document.createElement("div");
     footer.className = "operation-card-footer";
@@ -3353,6 +3354,7 @@ function createOperationCard(row) {
     for (const error of generalErrors) errorBox.append(errorText(error));
     footer.append(errorBox, saveOperationButton(row.id, "Сохранить операцию"));
     card.append(header, grid);
+    if (receiptStatus) card.append(receiptStatus);
     if (itemDetails) card.append(itemDetails);
     card.append(footer);
     return card;
@@ -3403,7 +3405,9 @@ function createOperationTableRow(row) {
         "description",
         editor.included,
     );
+    const receiptStatus = receiptAssociationIndicator(row.transaction.receipt_association);
     const itemDetails = transactionItemsDetails(row.transaction.items);
+    if (receiptStatus) descriptionCell.append(receiptStatus);
     if (itemDetails) descriptionCell.append(itemDetails);
     tableRow.append(
         tableFieldCell("Дата и время", transactionDateInput("occurred_at", editor.occurred_at), row, "occurred_at", editor.included),
@@ -3425,6 +3429,27 @@ function createOperationTableRow(row) {
     tableRow.append(tableCell(action));
     return tableRow;
 }
+function receiptAssociationIndicator(association) {
+    if (!association || typeof association.status !== "string") return null;
+    const indicator = document.createElement("p");
+    indicator.className = `receipt-association-status ${association.status}`;
+    if (association.status === "unmatched") {
+        indicator.textContent = "Без чека";
+    } else if (association.status === "ambiguous") {
+        indicator.textContent = "Чек требует уточнения";
+    } else if (association.status === "source_error") {
+        indicator.textContent = "Источник чеков недоступен";
+    } else if (association.status === "matched" && association.summary) {
+        const summary = association.summary;
+        indicator.textContent =
+            `Чек: ${summary.date || "дата не указана"} · ${summary.merchant || "продавец не указан"} · ` +
+            `${minorToMajor(Number(summary.amount_minor) || 0, summary.currency || "RUB")} ${summary.currency || "RUB"}`;
+    } else {
+        return null;
+    }
+    return indicator;
+}
+
 function transactionItemsDetails(items) {
     if (!Array.isArray(items) || items.length === 0) return null;
     const details = document.createElement("details");

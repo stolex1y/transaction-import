@@ -241,6 +241,8 @@ data class StructuredTransaction(
     val issues: List<String>,
     @SerialName("source_label") val sourceLabel: String? = null,
     val items: List<TransactionItem> = emptyList(),
+    @SerialName("receipt_association")
+    val receiptAssociation: ReceiptAssociation? = null,
     @SerialName("source_ref") val sourceRef: String? = null,
 )
 @Serializable

@@ -40,6 +40,9 @@ fun receiptStateFor(
         draft.status != ImportStatus.READY -> ReceiptStatus.HAS_ERRORS
         draft.unparsedFragments.isNotEmpty() -> ReceiptStatus.HAS_ERRORS
         draft.transactions.none { it.included } -> ReceiptStatus.HAS_ERRORS
+        draft.transactions.any {
+            it.included && it.transaction.receiptAssociation?.status == ReceiptAssociationStatus.SOURCE_ERROR
+        } -> ReceiptStatus.HAS_ERRORS
         draft.transactions.any { it.included && it.fieldErrors.isNotEmpty() } ->
             ReceiptStatus.HAS_ERRORS
         compliance?.status == InvariantCheckStatus.CONFLICT -> ReceiptStatus.HAS_ERRORS

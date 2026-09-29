@@ -5,6 +5,7 @@ import com.microsoft.playwright.BrowserType
 import com.microsoft.playwright.Page
 import com.microsoft.playwright.Playwright
 import io.github.stolex1y.transactionimport.core.ContextManagementConfig
+import io.github.stolex1y.transactionimport.core.AgentGatewayResolver
 import io.github.stolex1y.transactionimport.core.ContextStrategy
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
@@ -1336,6 +1337,9 @@ class AgentBrowserTest {
                             "() => document.querySelector('#receipts-auth-detail')?.textContent" +
                                 ".includes('Проверочная session живёт только в памяти.')",
                         )
+                        assertTrue(page.locator("#receipts-browser-login").isHidden)
+                        assertTrue(page.locator("#receipts-refresh-session").isVisible)
+                        assertTrue(page.locator("#receipts-logout").isVisible)
                         page.locator("#receipts-from").fill("2026-09-10")
                         page.locator("#receipts-to").fill("2026-09-10")
                         page.locator("#receipts-seller").fill("Кофейня")
@@ -1356,6 +1360,11 @@ class AgentBrowserTest {
                             page.evaluate("() => document.querySelector('#receipts-panel').outerHTML")
                                 .toString().contains(BrowserReceiptsFixture.RAW_KEY),
                         )
+                        page.locator("#receipts-logout").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#receipts-browser-login')?.hidden === false",
+                        )
+                        assertTrue(page.locator("#receipts-browser-login").isVisible)
                         val after = page.evaluate(
                             """
                                 async () => {
@@ -2155,6 +2164,480 @@ class AgentBrowserTest {
                 }
             }
         } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun fnsLoginButtonHidesOnlyForConfirmedActiveAuthorization() {
+        val database = Files.createTempFile("agent-browser-receipt-auth-", ".sqlite")
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString()))
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        val state = page.evaluate(
+                            """
+                                () => {
+                                  const login = document.querySelector("#receipts-browser-login");
+                                  const refresh = document.querySelector("#receipts-refresh-session");
+                                  const logout = document.querySelector("#receipts-logout");
+                                  renderReceiptsAuth({ status: "active", authenticated: false });
+                                  const activeButUnconfirmed = login.hidden;
+                                  renderReceiptsAuth({ status: "active", authenticated: true });
+                                  const confirmed = [login.hidden, refresh.hidden, logout.hidden];
+                                  renderReceiptsAuth({ status: "login_required", authenticated: false });
+                                  const required = login.hidden;
+                                  return [activeButUnconfirmed, ...confirmed, required].join(",");
+                                }
+                            """.trimIndent(),
+                        ).toString()
+                        assertEquals("false,true,false,false,false", state)
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun receiptRuleAndMatchStatesReachCurrentAndFutureRunsInBrowser() {
+        val database = Files.createTempFile("agent-browser-receipt-memory-", ".sqlite")
+        val ruleInstruction =
+            "Запомни: для пополнений транспортной карты выбирай электронную квитанцию от станции Северная."
+        val draftJson = """
+            {
+              "status": "ready",
+              "rejection_reason": null,
+              "transactions": [
+                {
+                  "source_index": 1, "direction": "expense",
+                  "occurred_at": "2026-02-08T12:10:00", "posted_at": null,
+                  "included": true, "amount_minor": 1000, "currency": "RUB",
+                  "merchant": "Synthetic unique operation", "description": "Синтетическая операция 1",
+                  "category_id": "food.groceries", "needs_review": false, "issues": []
+                },
+                {
+                  "source_index": 2, "direction": "expense",
+                  "occurred_at": "2026-02-08T13:10:00", "posted_at": null,
+                  "included": true, "amount_minor": 2000, "currency": "RUB",
+                  "merchant": "Synthetic ambiguous operation", "description": "Синтетическая операция 2",
+                  "category_id": "food.groceries", "needs_review": false, "issues": []
+                },
+                {
+                  "source_index": 3, "direction": "expense",
+                  "occurred_at": "2026-02-08T14:10:00", "posted_at": null,
+                  "included": true, "amount_minor": 3000, "currency": "RUB",
+                  "merchant": "Synthetic unmatched operation", "description": "Синтетическая операция 3",
+                  "category_id": "food.groceries", "needs_review": false, "issues": []
+                }
+              ],
+              "unparsed_fragments": []
+            }
+        """.trimIndent()
+        val gateway = FakeAgentGateway(
+            ArrayDeque(listOf(draftJson, """{"intent":"remember_rule"}""")),
+        )
+        val schedulerRules = mutableListOf<List<String>>()
+        val schedulerNow = LocalDate.parse("2026-09-10")
+            .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val baseDependencies = fakeAgentDependencies(
+            databasePath = database.toString(),
+            gateway = gateway,
+            schedulerAccountAvailable = true,
+            schedulerNowEpochMs = { schedulerNow },
+            schedulerMatchSelector = ReceiptMatchSelector { _, _, choices, _, rules ->
+                schedulerRules += rules
+                choices.singleOrNull()?.let { ReceiptSelectionResponseView(it.alias, 0.96) }
+            },
+        )
+        var searchCalls = 0
+        var detailCalls = 0
+        val receiptSource = object : McpToolProvider {
+            override suspend fun allowedTools(): List<McpCallableTool> = emptyList()
+
+            override suspend fun callConfiguredTool(
+                serverId: String,
+                tool: String,
+                arguments: JsonObject,
+            ): TbankToolCallResponse {
+                assertEquals("receipts", serverId)
+                return when (tool) {
+                    "search-receipts" -> {
+                        searchCalls += 1
+                        TbankToolCallResponse(
+                            tool = tool,
+                            text = """
+                                {"receipts":[
+                                  {"receipt_key":"synthetic-unique-key","merchant":"Северная станция","received_at":"2026-02-08T12:15:00Z","amount_minor":1000,"currency":"RUB"},
+                                  {"receipt_key":"synthetic-ambiguous-key-1","merchant":"Северная станция","received_at":"2026-02-08T13:15:00Z","amount_minor":2000,"currency":"RUB"},
+                                  {"receipt_key":"synthetic-ambiguous-key-2","merchant":"Южная станция","received_at":"2026-02-08T13:16:00Z","amount_minor":2000,"currency":"RUB"}
+                                ],"has_more":false}
+                            """.trimIndent(),
+                        )
+                    }
+                    "get-receipt" -> {
+                        detailCalls += 1
+                        val key = arguments["receipt_key"]?.jsonPrimitive?.content
+                        val (amount, merchant, time) = when (key) {
+                            "synthetic-unique-key" -> Triple(1000, "Северная станция", "12:15:00")
+                            "synthetic-ambiguous-key-1" -> Triple(2000, "Северная станция", "13:15:00")
+                            "synthetic-ambiguous-key-2" -> Triple(2000, "Южная станция", "13:16:00")
+                            else -> error("Unexpected synthetic receipt key")
+                        }
+                        TbankToolCallResponse(
+                            tool = tool,
+                            text = """
+                                {"date_time":"2026-02-08T${time}Z","total_minor":$amount,
+                                 "currency":"RUB","merchant":"$merchant",
+                                 "settlement_place":"Синтетическая торговая точка",
+                                 "items":[{"name":"Synthetic receipt item","quantity":1,"price_minor":$amount,"sum_minor":$amount}]}
+                            """.trimIndent(),
+                        )
+                    }
+                    else -> error("Unexpected synthetic receipt tool: $tool")
+                }
+            }
+        }
+        val currentSelectorRules = mutableListOf<List<String>>()
+        val nativeMcpAgent = NativeMcpAgent(
+            agent = baseDependencies.agent,
+            gatewayResolver = AgentGatewayResolver { gateway },
+            mcpTools = receiptSource,
+            runtimeConfig = baseDependencies.runtimeConfig,
+            receiptMatchSelector = ReceiptMatchSelector { _, transaction, choices, _, rules ->
+                currentSelectorRules += rules
+                when (transaction.merchant) {
+                    "Synthetic unique operation" ->
+                        ReceiptSelectionResponseView(choices.single().alias, 0.96)
+                    "Synthetic ambiguous operation" ->
+                        ReceiptSelectionResponseView(receiptAlias = null, confidence = 0.0)
+                    else -> error("An unmatched synthetic transaction must not reach the selector")
+                }
+            },
+        )
+        val dependencies = AgentWebDependencies(
+            agent = baseDependencies.agent,
+            catalog = baseDependencies.catalog,
+            runtimeConfig = baseDependencies.runtimeConfig,
+            availableProviderIds = baseDependencies.availableProviderIds,
+            newSessionTitle = baseDependencies.newSessionTitle,
+            mcpCatalog = baseDependencies.mcpCatalog,
+            tbankMcp = baseDependencies.tbankMcp,
+            nativeMcpAgent = nativeMcpAgent,
+            scheduler = baseDependencies.scheduler,
+            receiptsProxy = baseDependencies.receiptsProxy,
+        )
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = dependencies)
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        page.locator("#agent-message").fill("Синтетическая выписка")
+                        page.locator("#send-message").click()
+                        page.locator("#operation-table").waitFor()
+                        assertEquals(
+                            3,
+                            page.locator("#operation-table tbody tr").count(),
+                            "Initial draft failed: ${page.locator("#agent-status").textContent()}",
+                        )
+                        page.locator("#agent-message").fill(ruleInstruction)
+                        val associationResponse = page.waitForResponse(
+                            { response ->
+                                response.request().method() == "POST" &&
+                                    response.url().endsWith("/messages")
+                            },
+                            { page.locator("#send-message").click() },
+                        )
+                        val associationResponseBody = associationResponse.text()
+                        assertTrue(
+                            associationResponse.status() in 200..299,
+                            "$associationResponseBody; searches=$searchCalls; details=$detailCalls; " +
+                                "selectorCalls=${currentSelectorRules.size}; gatewayRequests=${gateway.requests.size}",
+                        )
+                        page.waitForFunction(
+                            "() => document.querySelector('#agent-message')?.value === '' || " +
+                                "document.querySelector('#agent-status')?.classList.contains('error')",
+                        )
+                        assertTrue(
+                            page.locator(".receipt-association-status.matched").count() > 0,
+                            "Receipt association response: $associationResponseBody",
+                        )
+
+                        val matched = page.locator(".receipt-association-status.matched")
+                        val ambiguous = page.locator(".receipt-association-status.ambiguous")
+                        val unmatched = page.locator(".receipt-association-status.unmatched")
+                        matched.first().waitFor()
+                        ambiguous.first().waitFor()
+                        unmatched.first().waitFor()
+                        assertEquals(1, matched.count())
+                        assertEquals(1, ambiguous.count())
+                        assertEquals(1, unmatched.count())
+                        assertEquals("Без чека", unmatched.first().textContent())
+                        assertEquals(1, searchCalls)
+                        assertEquals(3, detailCalls)
+                        assertTrue(currentSelectorRules.all { it.isEmpty() })
+
+                        page.locator("#show-scheduler-panel").click()
+                        page.waitForFunction(
+                            "() => Array.from(document.querySelector('#scheduler-accounts').options)" +
+                                ".some(option => option.value === 'fixture-account')",
+                        )
+                        page.locator("#scheduler-accounts").selectOption("fixture-account")
+                        page.locator("#scheduler-name").fill("Synthetic receipt rule")
+                        page.locator("#scheduler-start-date").fill("2026-09-10")
+                        page.locator("#scheduler-interval").fill("60")
+                        page.locator("#scheduler-submit").click()
+                        page.locator(".scheduler-task a[data-session-id]").waitFor()
+                        val taskId = page.locator(".scheduler-task").getAttribute("data-task-id")!!
+                        val taskCard = page.locator(".scheduler-task[data-task-id='$taskId']")
+                        taskCard.locator("button[data-scheduler-action='run']").click()
+                        page.waitForFunction(
+                            """id => {
+                                const card = [...document.querySelectorAll('.scheduler-task')]
+                                  .find(item => item.dataset.taskId === id);
+                                return card?.textContent.includes('Последний запуск:') || false;
+                            }""",
+                            taskId,
+                        )
+                        assertEquals(
+                            1,
+                            schedulerRules.size,
+                            "Scheduler selector was not called. Task: ${taskCard.textContent()}",
+                        )
+                        assertEquals(listOf(ruleInstruction), schedulerRules.single())
+                        taskCard.locator("a[data-session-id]").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('.agent-app')?.dataset.activePanel === 'sessions' && " +
+                                "!document.querySelector('#agent-workspace')?.hidden",
+                        )
+                        waitForSessionReady(page)
+                        val linkedSessionId =
+                            page.evaluate("() => window.location.pathname.split('/').pop()").toString()
+                        page.locator("#operation-table").waitFor()
+                        assertEquals(1, page.locator(".receipt-association-status.matched").count())
+                        val linkedState = page.evaluate(
+                            """async id => JSON.stringify(
+                                await (await fetch('/api/agent/sessions/' + encodeURIComponent(id))).json()
+                            )""",
+                            linkedSessionId,
+                        ).toString()
+                        val schedulerRows = Json.parseToJsonElement(linkedState)
+                            .jsonObject["draft"]!!.jsonObject["transactions"]!!.jsonArray
+                        assertEquals(1, schedulerRows.size)
+                        val scheduledItems = schedulerRows.single().jsonObject["transaction"]!!
+                            .jsonObject["items"]!!.jsonArray
+                        assertEquals(1, scheduledItems.size)
+                        assertEquals(
+                            "Imported item",
+                            scheduledItems.single().jsonObject["name"]?.jsonPrimitive?.content,
+                        )
+                        assertFalse(linkedState.contains("fixture-receipt-private"))
+                    }
+                }
+            }
+        } finally {
+            baseDependencies.scheduler?.close()
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun receiptSourceFailureIsVisibleAsSourceErrorInBrowser() {
+        val database = Files.createTempFile("agent-browser-receipt-source-error-", ".sqlite")
+        val gateway = FakeAgentGateway(
+            ArrayDeque(
+                listOf(
+                    FakeAgentGateway.READY_DRAFT_JSON,
+                    """{"intent":"associate"}""",
+                ),
+            ),
+        )
+        val baseDependencies = fakeAgentDependencies(database.toString(), gateway)
+        val rawFailure = "synthetic-private-fiscal-response"
+        val failingSource = object : McpToolProvider {
+            override suspend fun allowedTools(): List<McpCallableTool> = emptyList()
+
+            override suspend fun callConfiguredTool(
+                serverId: String,
+                tool: String,
+                arguments: JsonObject,
+            ): TbankToolCallResponse {
+                assertEquals("receipts", serverId)
+                throw IllegalStateException(rawFailure)
+            }
+        }
+        val nativeMcpAgent = NativeMcpAgent(
+            agent = baseDependencies.agent,
+            gatewayResolver = AgentGatewayResolver { gateway },
+            mcpTools = failingSource,
+            runtimeConfig = baseDependencies.runtimeConfig,
+            receiptMatchSelector = ReceiptMatchSelector { _, _, _, _, _ ->
+                error("Selector must not run after source failure")
+            },
+        )
+        val dependencies = AgentWebDependencies(
+            agent = baseDependencies.agent,
+            catalog = baseDependencies.catalog,
+            runtimeConfig = baseDependencies.runtimeConfig,
+            availableProviderIds = baseDependencies.availableProviderIds,
+            newSessionTitle = baseDependencies.newSessionTitle,
+            mcpCatalog = baseDependencies.mcpCatalog,
+            tbankMcp = baseDependencies.tbankMcp,
+            nativeMcpAgent = nativeMcpAgent,
+            scheduler = baseDependencies.scheduler,
+            receiptsProxy = baseDependencies.receiptsProxy,
+        )
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = dependencies)
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        page.locator("#agent-message").fill("Синтетическая выписка")
+                        page.locator("#send-message").click()
+                        page.locator("#operation-table").waitFor()
+                        page.locator("#agent-message").fill(
+                            "Сверь операцию «пополнение проездного» с подходящим электронным документом.",
+                        )
+                        page.locator("#send-message").click()
+
+                        val sourceErrors = page.locator(".receipt-association-status.source_error")
+                        sourceErrors.first().waitFor()
+                        assertEquals(2, sourceErrors.count())
+                        assertEquals("Источник чеков недоступен", sourceErrors.first().textContent())
+                        assertFalse(page.locator("body").textContent().contains(rawFailure))
+                    }
+                }
+            }
+        } finally {
+            baseDependencies.scheduler?.close()
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun noReceiptMatchIsNeutralAndExportableInBrowser() {
+        val database = Files.createTempFile("agent-browser-receipt-unmatched-", ".sqlite")
+        val gateway = FakeAgentGateway(
+            ArrayDeque(
+                listOf(
+                    FakeAgentGateway.READY_DRAFT_JSON,
+                    """{"intent":"associate"}""",
+                ),
+            ),
+        )
+        val baseDependencies = fakeAgentDependencies(database.toString(), gateway)
+        var searchCalls = 0
+        val emptyReceiptSource = object : McpToolProvider {
+            override suspend fun allowedTools(): List<McpCallableTool> = emptyList()
+
+            override suspend fun callConfiguredTool(
+                serverId: String,
+                tool: String,
+                arguments: JsonObject,
+            ): TbankToolCallResponse {
+                assertEquals("receipts", serverId)
+                assertEquals("search-receipts", tool)
+                searchCalls += 1
+                return TbankToolCallResponse(
+                    tool = tool,
+                    text = """{"receipts":[],"has_more":false}""",
+                )
+            }
+        }
+        val nativeMcpAgent = NativeMcpAgent(
+            agent = baseDependencies.agent,
+            gatewayResolver = AgentGatewayResolver { gateway },
+            mcpTools = emptyReceiptSource,
+            runtimeConfig = baseDependencies.runtimeConfig,
+            receiptMatchSelector = ReceiptMatchSelector { _, _, _, _, _ ->
+                error("The selector must not run when search returns no candidates")
+            },
+        )
+        val dependencies = AgentWebDependencies(
+            agent = baseDependencies.agent,
+            catalog = baseDependencies.catalog,
+            runtimeConfig = baseDependencies.runtimeConfig,
+            availableProviderIds = baseDependencies.availableProviderIds,
+            newSessionTitle = baseDependencies.newSessionTitle,
+            mcpCatalog = baseDependencies.mcpCatalog,
+            tbankMcp = baseDependencies.tbankMcp,
+            nativeMcpAgent = nativeMcpAgent,
+            scheduler = baseDependencies.scheduler,
+            receiptsProxy = baseDependencies.receiptsProxy,
+        )
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = dependencies)
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        page.locator("#agent-message").fill("Синтетическая выписка")
+                        page.locator("#send-message").click()
+                        page.locator("#operation-table").waitFor()
+
+                        val excludedRow = page.locator("tr[data-transaction-id='2']")
+                        excludedRow.locator("input[name='included']").uncheck()
+                        excludedRow.locator("button[data-action='save-operation']").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#build-batch')?.disabled === false",
+                        )
+
+                        page.locator("#agent-message").fill(
+                            "Сверь пополнение проездного с подходящим электронным документом.",
+                        )
+                        page.locator("#send-message").click()
+
+                        val unmatched = page.locator(".receipt-association-status.unmatched")
+                        unmatched.first().waitFor()
+                        assertEquals(2, unmatched.count())
+                        assertEquals("Без чека", unmatched.first().textContent())
+                        assertEquals("Готово к экспорту", page.locator("#receipt-status").textContent())
+                        assertFalse(page.locator("#build-batch").isDisabled)
+                        assertEquals(1, searchCalls)
+                        val download = page.waitForDownload {
+                            page.locator("#build-batch").click()
+                        }
+                        assertTrue(download.suggestedFilename().endsWith(".json"))
+                    }
+                }
+            }
+        } finally {
+            baseDependencies.scheduler?.close()
             server.stop(1_000, 5_000)
             database.deleteIfExists()
         }

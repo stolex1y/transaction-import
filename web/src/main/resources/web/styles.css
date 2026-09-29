@@ -2225,6 +2225,22 @@ html[data-theme="light"] .agent-body select {
     padding-left: 22px;
 }
 
+.receipt-association-status {
+    margin: 8px 0 0;
+    color: var(--agent-muted);
+    font-size: 0.78rem;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.receipt-association-status.matched {
+    color: var(--agent-success);
+}
+
+.receipt-association-status.source_error {
+    color: var(--agent-danger);
+}
+
 .scheduler-task > a {
     width: fit-content;
     color: var(--agent-accent);

@@ -52,7 +52,7 @@ class SchedulerServiceTest {
             runtimeConfig = dependencies.runtimeConfig,
             idGenerator = { "scheduler-test-${++id}" },
             nowEpochMs = { now },
-            matchSelector = ReceiptMatchSelector { _, _, choices ->
+            matchSelector = ReceiptMatchSelector { _, _, choices, _, _ ->
                 ReceiptSelectionResponseView(choices.single().alias, 0.96)
             },
         )
@@ -397,7 +397,7 @@ class SchedulerServiceTest {
                 "receipts" to "search-receipts" -> TbankToolCallResponse(
                     tool = tool,
                     text = """
-                        {"receipts":[{"receipt_key":"receipt-key-private","received_at":"2026-09-10T12:00:00Z","amount_minor":1,"currency":"RUB","merchant":"Кофе"}]}
+                        {"receipts":[{"receipt_key":"receipt-key-private","received_at":"2026-09-10T12:00:00Z","amount_minor":1,"currency":"RUB","merchant":"Кофе"}],"has_more":false}
                     """.trimIndent(),
                 )
                 "receipts" to "get-receipt" -> TbankToolCallResponse(

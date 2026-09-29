@@ -197,6 +197,8 @@ data class ExternalTransactionCandidate(
     val categoryId: String? = null,
     val categoryIssue: String? = null,
     val items: List<TransactionItem> = emptyList(),
+    @SerialName("receipt_association")
+    val receiptAssociation: ReceiptAssociation? = null,
     @SerialName("source_ref") val sourceRef: String? = null,
     val issues: List<String> = emptyList(),
 )
@@ -300,6 +302,8 @@ data class ImportBatchTransaction(
     @SerialName("category_id") val categoryId: String,
     @SerialName("source_label") val sourceLabel: String? = null,
     val items: List<TransactionItem> = emptyList(),
+    @SerialName("receipt_association")
+    val receiptAssociation: ReceiptAssociation? = null,
     @SerialName("source_ref") val sourceRef: String? = null,
 )
 
@@ -387,6 +391,16 @@ interface ImportSessionRepository : MemoryLayerRepository {
         receiptState: ReceiptState? = null,
     ): ImportSessionState
 
+    suspend fun saveReceiptAssociationExchange(
+        sessionId: String,
+        expectedRevision: Long,
+        userMessage: ConversationMessage,
+        assistantMessage: ConversationMessage,
+        draft: ImportDraft,
+        updatedAtEpochMs: Long,
+        receiptRule: ConfirmedDecision?,
+        receiptState: ReceiptState,
+    ): ImportSessionState
     suspend fun saveMessageExchange(
         sessionId: String,
         expectedRevision: Long,
@@ -1721,10 +1735,21 @@ class SmartExpenseAgent(
             categoryCatalog = categoryCatalog,
             merchantCanonicalRules = merchantCanonicalRules,
         )
+        val receiptAssociations = canonicalCandidates
+            .mapNotNull { candidate -> candidate.sourceRef?.let { it to candidate.receiptAssociation } }
+            .toMap()
+        val enrichedDraft = appended.draft.copy(
+            transactions = appended.draft.transactions.map { row ->
+                val receiptAssociation = row.transaction.sourceRef
+                    ?.let(receiptAssociations::get)
+                    ?: return@map row
+                row.copy(transaction = row.transaction.copy(receiptAssociation = receiptAssociation))
+            },
+        )
         return repository.saveDraft(
             sessionId = sessionId,
             expectedRevision = expectedRevision,
-            draft = appended.draft,
+            draft = enrichedDraft,
             updatedAtEpochMs = nowEpochMs(),
         )
     }
@@ -2034,6 +2059,96 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
     }
 }
 
+    suspend fun recordReceiptAssociation(
+        sessionId: String,
+        expectedRevision: Long,
+        userText: String,
+        assistantText: String,
+        updates: Map<String, ReceiptMatchUpdate>,
+        persistRule: Boolean,
+    ): ImportSessionState {
+        val state = getSession(sessionId)
+        ensureRevision(state, expectedRevision)
+        val draft = state.draft ?: throw IllegalArgumentException("В сессии ещё нет черновика.")
+        require(updates.keys.all { id -> draft.transactions.any { it.id == id } }) {
+            "Результат сопоставления ссылается на неизвестную операцию."
+        }
+        val now = nowEpochMs()
+        val nextDraft = draft.copy(
+            transactions = draft.transactions.map { row ->
+                val update = updates[row.id] ?: return@map row
+                if (row.transaction.receiptAssociation?.status == ReceiptAssociationStatus.MATCHED) {
+                    return@map row
+                }
+                val matched = update.status == ReceiptAssociationStatus.MATCHED &&
+                    update.summary != null &&
+                    update.items.isNotEmpty() &&
+                    row.transaction.items.isEmpty()
+                if (update.status == ReceiptAssociationStatus.MATCHED && !matched) {
+                    return@map row.copy(
+                        transaction = row.transaction.copy(
+                            receiptAssociation = ReceiptAssociation(ReceiptAssociationStatus.AMBIGUOUS),
+                        ),
+                    )
+                }
+                row.copy(
+                    transaction = row.transaction.copy(
+                        items = if (matched) update.items else row.transaction.items,
+                        receiptAssociation = ReceiptAssociation(
+                            status = if (matched) ReceiptAssociationStatus.MATCHED else update.status,
+                            summary = update.summary.takeIf { matched },
+                        ),
+                    ),
+                )
+            },
+            version = expectedRevision + 1,
+        ).also(::requireDraftInvariants)
+        val normalizedUserText = maskExplicitPhoneNumbers(userText.trim())
+        val receiptRule = if (persistRule) {
+            val normalizedRule = normalizeConfirmedDecision(normalizedUserText)
+            val preferences = getPreferences()
+            if (
+                preferences.confirmedDecisions.any {
+                    it.scope == ConfirmedDecisionScope.RECEIPT_MATCHING &&
+                        it.text.equals(normalizedRule, ignoreCase = true)
+                }
+            ) {
+                null
+            } else {
+                ConfirmedDecision(
+                    id = idGenerator(),
+                    text = normalizedRule,
+                    createdAtEpochMs = now,
+                    scope = ConfirmedDecisionScope.RECEIPT_MATCHING,
+                )
+            }
+        } else {
+            null
+        }
+        return repository.saveReceiptAssociationExchange(
+            sessionId = sessionId,
+            expectedRevision = expectedRevision,
+            userMessage = ConversationMessage(
+                id = idGenerator(),
+                role = ConversationRole.USER,
+                content = normalizedUserText,
+                displayText = normalizedUserText,
+                createdAtEpochMs = now,
+            ),
+            assistantMessage = ConversationMessage(
+                id = idGenerator(),
+                role = ConversationRole.ASSISTANT,
+                content = assistantText,
+                displayText = assistantText,
+                createdAtEpochMs = now,
+            ),
+            draft = nextDraft,
+            updatedAtEpochMs = now,
+            receiptRule = receiptRule,
+            receiptState = receiptStateFor(nextDraft, state.receiptState.lastCompliance),
+        )
+    }
+
     suspend fun replaceTransaction(
         sessionId: String,
         expectedRevision: Long,
@@ -2144,6 +2259,7 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
                     categoryId = requireNotNull(transaction.categoryId),
                     sourceLabel = transaction.sourceLabel,
                     items = transaction.items,
+                    receiptAssociation = transaction.receiptAssociation,
                     sourceRef = transaction.sourceRef,
                 )
             },
