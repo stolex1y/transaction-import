@@ -53,7 +53,10 @@ class SmartExpenseAgentTest {
         assertFalse(gateway.requests[2].messages.first().content.contains("912"))
 
         assertEquals("next-model", gateway.requests[1].model)
-        assertEquals(listOf("system", "system", "user", "assistant", "user"), gateway.requests[1].messages.map { it.role })
+        assertEquals(
+            listOf("system", "system", "user", "assistant", "user"),
+            gateway.requests[1].messages.map { it.role },
+        )
         assertEquals(4, corrected.messages.size)
         assertTrue(corrected.draft!!.transactions.single { it.id == "1" }.included)
         assertFalse(corrected.draft!!.transactions.single { it.id == "2" }.included)
@@ -161,7 +164,7 @@ class SmartExpenseAgentTest {
     }
 
     @Test
-    fun explicitRuleRequestSavesAndAppliesToCurrentDraft() = runBlocking {
+    fun selectedRuleCandidateIndicesSaveAndApplyMemoryRuleToCurrentDraft() = runBlocking {
         val gateway = QueuedGateway(
             initialDraftJson
                 .replace("\"DEMO MARKET\"", "\"Два Дантиста\"")
@@ -178,7 +181,8 @@ class SmartExpenseAgentTest {
                   }],
                   "merchant_canonical_candidates": [],
                   "review_draft": true,
-                  "persist_memory": true
+                  "persist_memory_candidate_indices": [0],
+                  "persist_merchant_canonical_candidate_indices": []
                 }
             """.trimIndent(),
             """
@@ -194,7 +198,7 @@ class SmartExpenseAgentTest {
             """.trimIndent(),
         )
         val agent = testAgent(MemoryImportSessionRepository(), gateway)
-        val created = agent.createSession("Explicit rule", defaultConfig)
+        val created = agent.createSession("Selected rule", defaultConfig)
         val imported = agent.sendMessage(
             sessionId = created.session.id,
             expectedRevision = created.session.revision,
@@ -220,6 +224,476 @@ class SmartExpenseAgentTest {
             "Операции с мерчантом «Два Дантиста» относить к категории «Здоровье».",
             agent.getPreferences().confirmedDecisions.single().text,
         )
+    }
+
+    @Test
+    fun previouslyPendingMemoryCandidateCanBeSelectedAndAppliedToCurrentDraft() = runBlocking {
+        val candidateText = "Операции с мерчантом «Два Дантиста» относить к категории «Здоровье»."
+        val requests = mutableListOf<ChatCompletionRequest>()
+        val gateway = object : ChatCompletionGateway {
+            override var contextWindowTokens: Int? = null
+            override var maxOutputTokens: Int? = null
+
+            override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+                requests += request
+                val firstMessage = request.messages.firstOrNull()?.content.orEmpty()
+                val content = when {
+                    firstMessage.contains("Ты выполняешь явную перепроверку") -> {
+                        if (request.messages.any { it.content.contains(candidateText) }) {
+                            """
+                                {"operations":[{"transaction_id":"1","action":"set_field",
+                                  "field":"category_id","value":"health.pharmacy"}],
+                                  "message":"Правило применено."}
+                            """.trimIndent()
+                        } else {
+                            """{"operations":[],"message":"Без изменений."}"""
+                        }
+                    }
+
+                    firstMessage.contains("Return exactly one JSON object with exactly these fields:") -> {
+                        if (request.messages.lastOrNull()?.content.orEmpty()
+                                .contains("Примени ранее предложенное правило")
+                        ) {
+                            """
+                                {
+                                  "intent":"needs_clarification",
+                                  "message":"Применяю прежнее правило.",
+                                  "operations":[],
+                                  "transactions":[],
+                                  "memory_candidates":[],
+                                  "merchant_canonical_candidates":[],
+                                  "persist_memory_candidate_indices":[],
+                                  "persist_merchant_canonical_candidate_indices":[],
+                                  "persist_pending_memory_candidate_indices":[0],
+                                  "persist_pending_merchant_canonical_candidate_indices":[]
+                                }
+                            """.trimIndent()
+                        } else {
+                            """
+                                {
+                                  "intent":"needs_clarification",
+                                  "message":"Предлагаю правило.",
+                                  "operations":[],
+                                  "transactions":[],
+                                  "memory_candidates":[{
+                                    "text":"$candidateText",
+                                    "reason":"Пользовательское правило категории."
+                                  }],
+                                  "merchant_canonical_candidates":[],
+                                  "persist_memory_candidate_indices":[],
+                                  "persist_merchant_canonical_candidate_indices":[]
+                                }
+                            """.trimIndent()
+                        }
+                    }
+
+                    else -> initialDraftJson
+                        .replace("\"DEMO MARKET\"", "\"Два Дантиста\"")
+                        .replace("\"food.groceries\"", "null")
+                }
+                return ChatCompletionResponse(
+                    choices = listOf(
+                        ChatChoice(
+                            message = ResponseMessage(content = content),
+                            finishReason = "stop",
+                        ),
+                    ),
+                )
+            }
+        }
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Pending memory candidate", defaultConfig)
+        val imported = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "Синтетическая выписка Два Дантиста",
+        )
+
+        val proposed = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = imported.session.revision,
+            text = "Предложи правило для этого продавца, но пока не применяй.",
+        )
+        assertEquals(MemoryCandidateStatus.PENDING, proposed.memoryCandidates.single().status)
+
+        val updated = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = proposed.session.revision,
+            text = "Примени ранее предложенное правило к текущему draft.",
+        )
+
+        assertEquals("health.pharmacy", updated.draft!!.transactions.first().transaction.categoryId)
+        assertEquals(MemoryCandidateStatus.ACCEPTED, updated.memoryCandidates.single().status)
+        assertEquals(candidateText, agent.getPreferences().confirmedDecisions.single().text)
+        assertTrue(requests.any { request ->
+            request.messages.any {
+                it.content.contains("pending_memory_candidates") && it.content.contains(candidateText)
+            }
+        })
+        assertTrue(requests.any { request ->
+            request.messages.any {
+                it.content.contains("Explicitly user-selected rule candidates") &&
+                    it.content.contains(candidateText)
+            }
+        })
+    }
+
+    @Test
+    fun failedReviewOfSelectedPendingRuleDoesNotPersistOrClaimApplication() = runBlocking {
+        val candidateText = "Операции с мерчантом «Два Дантиста» относить к категории «Здоровье»."
+        val gateway = QueuedGateway(
+            initialDraftJson
+                .replace("\"DEMO MARKET\"", "\"Два Дантиста\"")
+                .replace("\"food.groceries\"", "null"),
+            """
+                {
+                  "intent":"needs_clarification",
+                  "message":"Предлагаю правило.",
+                  "operations":[],
+                  "transactions":[],
+                  "memory_candidates":[{
+                    "text":"$candidateText",
+                    "reason":"Пользовательское правило категории."
+                  }],
+                  "merchant_canonical_candidates":[],
+                  "persist_memory_candidate_indices":[],
+                  "persist_merchant_canonical_candidate_indices":[]
+                }
+            """.trimIndent(),
+            emptyAppliedPatchJson,
+            """
+                {
+                  "intent":"needs_clarification",
+                  "message":"Применяю прежнее правило.",
+                  "operations":[],
+                  "transactions":[],
+                  "memory_candidates":[],
+                  "merchant_canonical_candidates":[],
+                  "persist_memory_candidate_indices":[],
+                  "persist_merchant_canonical_candidate_indices":[],
+                  "persist_pending_memory_candidate_indices":[0],
+                  "persist_pending_merchant_canonical_candidate_indices":[]
+                }
+            """.trimIndent(),
+            "not-json",
+        )
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, gateway)
+        val created = agent.createSession("Review failure leaves pending rule intact", defaultConfig)
+        val imported = agent.sendMessage(created.session.id, created.session.revision, "Выписка Два Дантиста")
+        val proposed = agent.sendMessage(
+            created.session.id,
+            imported.session.revision,
+            "Предложи правило для продавца, но пока не применяй.",
+        )
+
+        val failure = assertFailsWith<AgentResponseException> {
+            agent.sendMessage(
+                created.session.id,
+                proposed.session.revision,
+                "Примени ранее предложенное правило к текущему draft.",
+            )
+        }
+
+        assertTrue(failure.message.orEmpty().contains("не удалось перепроверить"))
+        assertEquals(proposed, repository.get(created.session.id))
+        assertEquals(MemoryCandidateStatus.PENDING, proposed.memoryCandidates.single().status)
+        assertNull(proposed.draft!!.transactions.first().transaction.categoryId)
+        assertTrue(agent.getPreferences().confirmedDecisions.isEmpty())
+    }
+
+    @Test
+    fun previouslyPendingMerchantCandidateCanBeSelectedAndAppliedToCurrentDraft() = runBlocking {
+        val gateway = QueuedGateway(
+            initialDraftJson.replace("\"DEMO MARKET\"", "\"Coffeebon 37\""),
+            """
+                {
+                  "intent":"needs_clarification",
+                  "message":"Предложено правило названия.",
+                  "operations":[],
+                  "transactions":[],
+                  "memory_candidates":[],
+                  "merchant_canonical_candidates":[{
+                    "canonical_name":"КофеБон",
+                    "aliases":["Coffeebon"],
+                    "suffix_policy":"numeric_terminal",
+                    "reason":"Пользователь предложил общее название."
+                  }],
+                  "persist_memory_candidate_indices":[],
+                  "persist_merchant_canonical_candidate_indices":[]
+                }
+            """.trimIndent(),
+            """{"operations":[],"message":"Без изменений."}""",
+            """
+                {
+                  "intent":"needs_clarification",
+                  "message":"Применяю прежнее правило названия.",
+                  "operations":[],
+                  "transactions":[],
+                  "memory_candidates":[],
+                  "merchant_canonical_candidates":[],
+                  "persist_memory_candidate_indices":[],
+                  "persist_merchant_canonical_candidate_indices":[],
+                  "persist_pending_memory_candidate_indices":[],
+                  "persist_pending_merchant_canonical_candidate_indices":[0]
+                }
+            """.trimIndent(),
+            """{"operations":[],"message":"Проверка завершена."}""",
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Pending merchant candidate", defaultConfig)
+        val imported = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "Выписка Coffeebon 37",
+        )
+        val proposed = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = imported.session.revision,
+            text = "Предложи общее правило названия, пока не применяй.",
+        )
+        assertEquals(MemoryCandidateStatus.PENDING, proposed.merchantCanonicalCandidates.single().status)
+
+        val updated = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = proposed.session.revision,
+            text = "Примени ранее предложенное правило названия к текущему draft.",
+        )
+
+        assertEquals("КофеБон", updated.draft!!.transactions.first().transaction.merchant)
+        assertEquals(MemoryCandidateStatus.ACCEPTED, updated.merchantCanonicalCandidates.single().status)
+        assertEquals("КофеБон", agent.getPreferences().merchantCanonicalRules.single().canonicalName)
+        assertTrue(gateway.requests.any { request ->
+            request.messages.any {
+                it.content.contains("pending_merchant_canonical_candidates") &&
+                    it.content.contains("Coffeebon")
+            }
+        })
+        assertTrue(gateway.requests.any { request ->
+            request.messages.any {
+                it.content.contains("Explicitly user-selected rule candidates") &&
+                    it.content.contains("Coffeebon")
+            }
+        })
+    }
+
+    @Test
+    fun unselectedRuleCandidatesRemainPendingWhileCorrectionSucceeds() = runBlocking {
+        val gateway = QueuedGateway(
+            initialDraftJson,
+            """
+                {
+                  "intent": "correction",
+                  "message": "Исправляю описание и предлагаю правила.",
+                  "operations": [{
+                    "transaction_id": "1",
+                    "action": "set_field",
+                    "field": "description",
+                    "value": "Моя заметка"
+                  }],
+                  "transactions": [],
+                  "memory_candidates": [{
+                    "text": "Всегда сопоставлять чеки продавца с операциями.",
+                    "reason": "Провайдер предложил сохранить правило."
+                  }],
+                  "merchant_canonical_candidates": [{
+                    "canonical_name": "КофеБон",
+                    "aliases": ["DEMO MARKET"],
+                    "suffix_policy": "none",
+                    "reason": "Провайдер предложил сохранить правило."
+                  }],
+                  "review_draft": false,
+                  "persist_memory_candidate_indices": [],
+                  "persist_merchant_canonical_candidate_indices": []
+                }
+            """.trimIndent(),
+            """{"operations":[],"message":"Перепроверка завершена."}""",
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Unauthorized persistence", defaultConfig)
+        val imported = agent.sendMessage(created.session.id, 0, "Выписка")
+
+        val corrected = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = imported.session.revision,
+            text = "Измени описание первой операции на «Моя заметка». Сохрани файл с отчётом отдельно.",
+        )
+        val preferences = agent.getPreferences()
+
+        assertEquals(
+            "Моя заметка",
+            corrected.draft!!.transactions.first().description,
+        )
+        assertEquals(MemoryCandidateStatus.PENDING, corrected.memoryCandidates.single().status)
+        assertEquals(
+            MemoryCandidateStatus.PENDING,
+            corrected.merchantCanonicalCandidates.single().status,
+        )
+        assertTrue(preferences.confirmedDecisions.isEmpty())
+        assertTrue(preferences.merchantCanonicalRules.isEmpty())
+    }
+
+    @Test
+    fun selectedRuleCandidateIndexPersistsOnlyItsProposalWithoutLexicalOverlap() = runBlocking {
+        val gateway = QueuedGateway(
+            initialDraftJson,
+            """
+                {
+                  "intent": "correction",
+                  "message": "Правило выбрано.",
+                  "operations": [{
+                    "transaction_id": "1",
+                    "action": "set_field",
+                    "field": "description",
+                    "value": "Моя заметка"
+                  }],
+                  "transactions": [],
+                  "memory_candidates": [
+                    {
+                      "text": "Всегда сопоставлять чеки продавца с операциями.",
+                      "reason": "Контекстное правило."
+                    },
+                    {
+                      "text": "Не включать переводы.",
+                      "reason": "Несвязанное предложение."
+                    }
+                  ],
+                  "merchant_canonical_candidates": [],
+                  "review_draft": false,
+                  "persist_memory_candidate_indices": [0],
+                  "persist_merchant_canonical_candidate_indices": []
+                }
+            """.trimIndent(),
+            """{"operations":[],"message":"Перепроверка завершена."}""",
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Typed rule selection", defaultConfig)
+        val imported = agent.sendMessage(created.session.id, 0, "Выписка")
+
+        val corrected = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = imported.session.revision,
+            text = "Сделай это постоянным и примени к текущему draft.",
+        )
+
+        assertEquals("Моя заметка", corrected.draft!!.transactions.first().description)
+        assertEquals(
+            listOf(MemoryCandidateStatus.ACCEPTED, MemoryCandidateStatus.PENDING),
+            corrected.memoryCandidates.map { it.status },
+        )
+        assertEquals(
+            "Всегда сопоставлять чеки продавца с операциями.",
+            agent.getPreferences().confirmedDecisions.single().text,
+        )
+        assertTrue(corrected.merchantCanonicalCandidates.isEmpty())
+    }
+
+    @Test
+    fun invalidSelectedRuleCandidateIndicesRejectFollowUpWithoutChangingDraft() = runBlocking {
+        listOf("[1]", "[0,0]").forEachIndexed { index, selectedIndices ->
+            val gateway = QueuedGateway(
+                initialDraftJson,
+                """
+                    {
+                      "intent": "correction",
+                      "message": "Правило выбрано.",
+                      "operations": [{
+                        "transaction_id": "1",
+                        "action": "set_field",
+                        "field": "description",
+                        "value": "Новое описание"
+                      }],
+                      "transactions": [],
+                      "memory_candidates": [{
+                        "text": "Не включать переводы.",
+                        "reason": "Синтетическое правило."
+                      }],
+                      "merchant_canonical_candidates": [],
+                      "review_draft": false,
+                      "persist_memory_candidate_indices": $selectedIndices,
+                      "persist_merchant_canonical_candidate_indices": []
+                    }
+                """.trimIndent(),
+            )
+            val agent = testAgent(MemoryImportSessionRepository(), gateway)
+            val created = agent.createSession("Invalid selected rule $index", defaultConfig)
+            val imported = agent.sendMessage(created.session.id, 0, "Выписка")
+
+            assertFailsWith<AgentResponseException> {
+                agent.sendMessage(
+                    sessionId = created.session.id,
+                    expectedRevision = imported.session.revision,
+                    text = "Сделай это постоянным и измени описание.",
+                )
+            }
+
+            val unchanged = agent.getSession(created.session.id)
+            assertEquals(imported.session, unchanged.session)
+            assertEquals(imported.messages, unchanged.messages)
+            assertEquals(imported.draft, unchanged.draft)
+            assertTrue(agent.getPreferences().confirmedDecisions.isEmpty())
+        }
+    }
+
+    @Test
+    fun repeatImportWithSameSourceRefDoesNotTransferReceiptAssociationToExistingRow() = runBlocking {
+        val agent = testAgent(MemoryImportSessionRepository(), QueuedGateway())
+        val created = agent.createSession("Repeat import", defaultConfig)
+        val originalCandidate = ExternalTransactionCandidate(
+            occurredAt = "2026-09-10T12:00:00Z",
+            postedAt = "2026-09-11",
+            amountMinor = -34_900,
+            currency = "RUB",
+            merchant = "Синтетический продавец",
+            description = "Банковская операция",
+            sourceLabel = "Основной счёт",
+            sourceRef = "stable-bank-row-1",
+        )
+        val imported = agent.appendExternalTransactions(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            candidates = listOf(originalCandidate),
+        )
+        val originalRow = imported.draft!!.transactions.single()
+        val verifiedRepeat = originalCandidate.copy(
+            items = listOf(
+                TransactionItem(
+                    name = "Позиция из проверенного чека",
+                    quantity = 1.0,
+                    priceMinor = 34_900,
+                    sumMinor = 34_900,
+                ),
+            ),
+            receiptAssociation = ReceiptAssociation(
+                status = ReceiptAssociationStatus.MATCHED,
+                summary = ReceiptAssociationSummary(
+                    date = "2026-09-10",
+                    merchant = "Синтетический продавец",
+                    amountMinor = 34_900,
+                    currency = "RUB",
+                ),
+            ),
+        )
+
+        val repeated = agent.appendExternalTransactions(
+            sessionId = created.session.id,
+            expectedRevision = imported.session.revision,
+            candidates = listOf(verifiedRepeat),
+        )
+        val preservedRow = repeated.draft!!.transactions.single()
+
+        assertEquals(1, repeated.draft.transactions.size)
+        assertEquals(originalRow.transaction.sourceIndex, preservedRow.transaction.sourceIndex)
+        assertEquals(originalRow.transaction.sourceRef, preservedRow.transaction.sourceRef)
+        assertEquals(originalRow.transaction.merchant, preservedRow.transaction.merchant)
+        assertEquals(originalRow.transaction.occurredAt, preservedRow.transaction.occurredAt)
+        assertEquals(originalRow.transaction.postedAt, preservedRow.transaction.postedAt)
+        assertEquals(originalRow.transaction.currency, preservedRow.transaction.currency)
+        assertEquals(originalRow.transaction.sourceLabel, preservedRow.transaction.sourceLabel)
+        assertEquals(originalRow.transaction.amountMinor, preservedRow.transaction.amountMinor)
+        assertEquals(originalRow.description, preservedRow.description)
+        assertNull(preservedRow.transaction.receiptAssociation)
+        assertTrue(preservedRow.transaction.items.isEmpty())
     }
 
     @Test
@@ -274,7 +748,7 @@ class SmartExpenseAgentTest {
     }
 
     @Test
-    fun acceptsExplicitCanonicalRuleAndAppliesItToCurrentDraft() = runBlocking {
+    fun persistsSelectedCanonicalRuleAndLeavesOtherProposalPending() = runBlocking {
         val gateway = QueuedGateway(
             initialDraftJson.replace("\"DEMO MARKET\"", "\"Coffeebon 37\""),
             """
@@ -294,7 +768,8 @@ class SmartExpenseAgentTest {
                     "reason": "Пользователь явно задал правило."
                   }],
                   "review_draft": true,
-                  "persist_memory": true
+                  "persist_memory_candidate_indices": [],
+                  "persist_merchant_canonical_candidate_indices": [0]
                 }
             """.trimIndent(),
             """
@@ -331,8 +806,12 @@ class SmartExpenseAgentTest {
             updated.merchantCanonicalCandidates.single().status,
         )
         assertEquals(listOf("Не включать переводы"), updated.memoryCandidates.map { it.text })
-        assertEquals("Правило сохранено и применяется к текущему draft.", updated.messages.last().displayText)
-        assertEquals(listOf("Не включать переводы"), agent.getPreferences().confirmedDecisions.map { it.text })
+        assertEquals(MemoryCandidateStatus.PENDING, updated.memoryCandidates.single().status)
+        assertEquals(
+            "Выбранные правила сохранены; остальные предложения оставлены на подтверждение.",
+            updated.messages.last().displayText,
+        )
+        assertTrue(agent.getPreferences().confirmedDecisions.isEmpty())
     }
 
     @Test
@@ -1672,6 +2151,38 @@ class SmartExpenseAgentTest {
             agent.buildImportBatch(created.session.id).transactions.first().merchant,
         )
         assertEquals("DIXY", normalizeMerchantLabel("DIXY-78383D"))
+    }
+
+    @Test
+    fun replacementCannotChangeTransactionSourceIndex() = runBlocking {
+        val agent = testAgent(MemoryImportSessionRepository(), QueuedGateway(initialDraftJson))
+        val created = agent.createSession("Stable transaction identity", defaultConfig)
+        val imported = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "Синтетическая выписка",
+        )
+        val original = imported.draft!!.transactions.first()
+
+        assertFailsWith<IllegalArgumentException> {
+            agent.replaceTransaction(
+                sessionId = created.session.id,
+                expectedRevision = imported.session.revision,
+                transactionId = original.id,
+                included = original.included,
+                description = original.description,
+                replacement = original.transaction.copy(
+                    sourceIndex = original.transaction.sourceIndex + 1,
+                ),
+            )
+        }
+
+        val unchanged = agent.getSession(created.session.id)
+        val retained = unchanged.draft!!.transactions.first()
+        assertEquals(imported.session.revision, unchanged.session.revision)
+        assertEquals(original.id, retained.id)
+        assertEquals(original.transaction.sourceIndex, retained.transaction.sourceIndex)
+        assertEquals(imported.draft, unchanged.draft)
     }
 
     @Test

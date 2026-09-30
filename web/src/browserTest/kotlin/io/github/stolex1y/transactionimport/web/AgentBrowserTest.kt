@@ -4,6 +4,13 @@ import com.microsoft.playwright.Browser
 import com.microsoft.playwright.BrowserType
 import com.microsoft.playwright.Page
 import com.microsoft.playwright.Playwright
+import io.github.stolex1y.transactionimport.core.ChatChoice
+import io.github.stolex1y.transactionimport.core.ChatCompletionGateway
+import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
+import io.github.stolex1y.transactionimport.core.ChatCompletionResponse
+import io.github.stolex1y.transactionimport.core.ChatFunctionCall
+import io.github.stolex1y.transactionimport.core.ChatToolCall
+import io.github.stolex1y.transactionimport.core.ResponseMessage
 import io.github.stolex1y.transactionimport.core.ContextManagementConfig
 import io.github.stolex1y.transactionimport.core.AgentGatewayResolver
 import io.github.stolex1y.transactionimport.core.ContextStrategy
@@ -13,6 +20,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonObject
 import java.net.ServerSocket
 import java.time.ZoneId
@@ -130,14 +139,95 @@ class AgentBrowserTest {
                                     category_id: "food.cafe",
                                     category_issue: null,
                                     source_label: "Основной счёт"
-                                  }]
+                                  }],
+                                  receipt_matching: {
+                                    status: "source_error",
+                                    matched_count: 0,
+                                    ambiguous_count: 0,
+                                    unmatched_count: 0,
+                                    candidate_count: 0,
+                                    detail_count: 0
+                                  }
                                 })
                             """.trimIndent(),
                         )
                         assertEquals(0, page.locator("#mcp-preview-panel").count())
                         assertEquals(1, page.locator("#message-list .message.assistant .mcp-inline-preview").count())
-                        assertEquals(6, page.locator(".mcp-inline-preview-table th").count())
+                        assertEquals(7, page.locator(".mcp-inline-preview-table th").count())
                         assertEquals("Принять операции", page.locator(".mcp-inline-preview button").last().textContent())
+                        assertTrue(
+                            page.locator(".receipt-matching-status").textContent()
+                                .contains("Источник чеков недоступен или не авторизован"),
+                        )
+                        page.evaluate(
+                            """
+                                () => renderMcpPreview({
+                                  id: "matched-receipt-preview",
+                                  session_revision: 1,
+                                  transactions: [{
+                                    occurred_at: "2026-09-10",
+                                    amount_minor: -34900,
+                                    currency: "RUB",
+                                    merchant: "ДЕМО МАРКЕТ",
+                                    description: "Синтетическая операция",
+                                    category_id: "food.groceries",
+                                    source_label: "Основной счёт",
+                                    items: [{
+                                      name: "Синтетическая позиция",
+                                      quantity: 1,
+                                      price_minor: 34900,
+                                      sum_minor: 34900,
+                                      currency: "RUB"
+                                    }],
+                                    receipt_association: {
+                                      status: "matched",
+                                      summary: {
+                                        date: "2026-09-10",
+                                        merchant: "Синтетический продавец",
+                                        amount_minor: 34900,
+                                        currency: "RUB"
+                                      },
+                                      receipt_key: "synthetic-private-receipt-key",
+                                      fiscal_document_number: "synthetic-fiscal-id"
+                                    }
+                                  }],
+                                  receipt_matching: {
+                                    status: "completed",
+                                    matched_count: 1,
+                                    ambiguous_count: 0,
+                                    unmatched_count: 0
+                                  }
+                                })
+                            """.trimIndent(),
+                        )
+                        val matchedPreviewText = page.locator(".mcp-inline-preview").last().textContent().orEmpty()
+                        assertTrue(matchedPreviewText.contains("Синтетический продавец"))
+                        assertTrue(matchedPreviewText.contains("2026-09-10"))
+                        page.locator(".mcp-inline-preview .transaction-items > summary").click()
+                        assertTrue(
+                            page.locator(".mcp-inline-preview .transaction-items li").textContent()
+                                .contains("Синтетическая позиция"),
+                        )
+                        assertFalse(matchedPreviewText.contains("synthetic-private-receipt-key"))
+                        assertFalse(matchedPreviewText.contains("synthetic-fiscal-id"))
+                        assertEquals(
+                            "Принять операции",
+                            page.locator(".mcp-inline-preview button").last().textContent(),
+                        )
+                        page.evaluate(
+                            """
+                                () => renderMcpPreview({
+                                  id: "selector-error-preview",
+                                  session_revision: 1,
+                                  transactions: [],
+                                  receipt_matching: { status: "selector_error" }
+                                })
+                            """.trimIndent(),
+                        )
+                        assertTrue(
+                            page.locator(".receipt-matching-status").textContent()
+                                .contains("безопасно сопоставить чеки не удалось"),
+                        )
                         page.evaluate("() => renderMcpPreview(null)")
                         assertEquals(1, page.locator("#metrics-table-body tr").count())
                         assertTrue(page.locator("#metrics-summary").textContent().contains("За сессию всего"))
@@ -2244,8 +2334,9 @@ class AgentBrowserTest {
               "unparsed_fragments": []
             }
         """.trimIndent()
-        val gateway = FakeAgentGateway(
-            ArrayDeque(listOf(draftJson, """{"intent":"remember_rule"}""")),
+        val gateway = BrowserNativePlanGateway(
+            FakeAgentGateway(ArrayDeque(listOf(draftJson))),
+            actionArguments = """{"remember_rule":true}""",
         )
         val schedulerRules = mutableListOf<List<String>>()
         val schedulerNow = LocalDate.parse("2026-09-10")
@@ -2263,7 +2354,7 @@ class AgentBrowserTest {
         var searchCalls = 0
         var detailCalls = 0
         val receiptSource = object : McpToolProvider {
-            override suspend fun allowedTools(): List<McpCallableTool> = emptyList()
+            override suspend fun allowedTools(): List<McpCallableTool> = receiptToolCapabilities()
 
             override suspend fun callConfiguredTool(
                 serverId: String,
@@ -2313,7 +2404,9 @@ class AgentBrowserTest {
             agent = baseDependencies.agent,
             gatewayResolver = AgentGatewayResolver { gateway },
             mcpTools = receiptSource,
-            runtimeConfig = baseDependencies.runtimeConfig,
+            runtimeConfig = baseDependencies.runtimeConfig.copy(
+                mcpToolLoop = baseDependencies.runtimeConfig.mcpToolLoop.copy(enabled = true),
+            ),
             receiptMatchSelector = ReceiptMatchSelector { _, transaction, choices, _, rules ->
                 currentSelectorRules += rules
                 when (transaction.merchant) {
@@ -2328,7 +2421,9 @@ class AgentBrowserTest {
         val dependencies = AgentWebDependencies(
             agent = baseDependencies.agent,
             catalog = baseDependencies.catalog,
-            runtimeConfig = baseDependencies.runtimeConfig,
+            runtimeConfig = baseDependencies.runtimeConfig.copy(
+                mcpToolLoop = baseDependencies.runtimeConfig.mcpToolLoop.copy(enabled = true),
+            ),
             availableProviderIds = baseDependencies.availableProviderIds,
             newSessionTitle = baseDependencies.newSessionTitle,
             mcpCatalog = baseDependencies.mcpCatalog,
@@ -2370,7 +2465,7 @@ class AgentBrowserTest {
                         assertTrue(
                             associationResponse.status() in 200..299,
                             "$associationResponseBody; searches=$searchCalls; details=$detailCalls; " +
-                                "selectorCalls=${currentSelectorRules.size}; gatewayRequests=${gateway.requests.size}",
+                                "selectorCalls=${currentSelectorRules.size}",
                         )
                         page.waitForFunction(
                             "() => document.querySelector('#agent-message')?.value === '' || " +
@@ -2463,18 +2558,11 @@ class AgentBrowserTest {
     @Test
     fun receiptSourceFailureIsVisibleAsSourceErrorInBrowser() {
         val database = Files.createTempFile("agent-browser-receipt-source-error-", ".sqlite")
-        val gateway = FakeAgentGateway(
-            ArrayDeque(
-                listOf(
-                    FakeAgentGateway.READY_DRAFT_JSON,
-                    """{"intent":"associate"}""",
-                ),
-            ),
-        )
+        val gateway = BrowserNativePlanGateway(FakeAgentGateway())
         val baseDependencies = fakeAgentDependencies(database.toString(), gateway)
         val rawFailure = "synthetic-private-fiscal-response"
         val failingSource = object : McpToolProvider {
-            override suspend fun allowedTools(): List<McpCallableTool> = emptyList()
+            override suspend fun allowedTools(): List<McpCallableTool> = receiptToolCapabilities()
 
             override suspend fun callConfiguredTool(
                 serverId: String,
@@ -2489,7 +2577,9 @@ class AgentBrowserTest {
             agent = baseDependencies.agent,
             gatewayResolver = AgentGatewayResolver { gateway },
             mcpTools = failingSource,
-            runtimeConfig = baseDependencies.runtimeConfig,
+            runtimeConfig = baseDependencies.runtimeConfig.copy(
+                mcpToolLoop = baseDependencies.runtimeConfig.mcpToolLoop.copy(enabled = true),
+            ),
             receiptMatchSelector = ReceiptMatchSelector { _, _, _, _, _ ->
                 error("Selector must not run after source failure")
             },
@@ -2497,7 +2587,9 @@ class AgentBrowserTest {
         val dependencies = AgentWebDependencies(
             agent = baseDependencies.agent,
             catalog = baseDependencies.catalog,
-            runtimeConfig = baseDependencies.runtimeConfig,
+            runtimeConfig = baseDependencies.runtimeConfig.copy(
+                mcpToolLoop = baseDependencies.runtimeConfig.mcpToolLoop.copy(enabled = true),
+            ),
             availableProviderIds = baseDependencies.availableProviderIds,
             newSessionTitle = baseDependencies.newSessionTitle,
             mcpCatalog = baseDependencies.mcpCatalog,
@@ -2523,7 +2615,7 @@ class AgentBrowserTest {
                         page.locator("#send-message").click()
                         page.locator("#operation-table").waitFor()
                         page.locator("#agent-message").fill(
-                            "Сверь операцию «пополнение проездного» с подходящим электронным документом.",
+                            "Сопоставь операцию «пополнение проездного» с подходящей электронной квитанцией.",
                         )
                         page.locator("#send-message").click()
 
@@ -2545,18 +2637,11 @@ class AgentBrowserTest {
     @Test
     fun noReceiptMatchIsNeutralAndExportableInBrowser() {
         val database = Files.createTempFile("agent-browser-receipt-unmatched-", ".sqlite")
-        val gateway = FakeAgentGateway(
-            ArrayDeque(
-                listOf(
-                    FakeAgentGateway.READY_DRAFT_JSON,
-                    """{"intent":"associate"}""",
-                ),
-            ),
-        )
+        val gateway = BrowserNativePlanGateway(FakeAgentGateway())
         val baseDependencies = fakeAgentDependencies(database.toString(), gateway)
         var searchCalls = 0
         val emptyReceiptSource = object : McpToolProvider {
-            override suspend fun allowedTools(): List<McpCallableTool> = emptyList()
+            override suspend fun allowedTools(): List<McpCallableTool> = receiptToolCapabilities()
 
             override suspend fun callConfiguredTool(
                 serverId: String,
@@ -2576,7 +2661,9 @@ class AgentBrowserTest {
             agent = baseDependencies.agent,
             gatewayResolver = AgentGatewayResolver { gateway },
             mcpTools = emptyReceiptSource,
-            runtimeConfig = baseDependencies.runtimeConfig,
+            runtimeConfig = baseDependencies.runtimeConfig.copy(
+                mcpToolLoop = baseDependencies.runtimeConfig.mcpToolLoop.copy(enabled = true),
+            ),
             receiptMatchSelector = ReceiptMatchSelector { _, _, _, _, _ ->
                 error("The selector must not run when search returns no candidates")
             },
@@ -2584,7 +2671,9 @@ class AgentBrowserTest {
         val dependencies = AgentWebDependencies(
             agent = baseDependencies.agent,
             catalog = baseDependencies.catalog,
-            runtimeConfig = baseDependencies.runtimeConfig,
+            runtimeConfig = baseDependencies.runtimeConfig.copy(
+                mcpToolLoop = baseDependencies.runtimeConfig.mcpToolLoop.copy(enabled = true),
+            ),
             availableProviderIds = baseDependencies.availableProviderIds,
             newSessionTitle = baseDependencies.newSessionTitle,
             mcpCatalog = baseDependencies.mcpCatalog,
@@ -2618,7 +2707,7 @@ class AgentBrowserTest {
                         )
 
                         page.locator("#agent-message").fill(
-                            "Сверь пополнение проездного с подходящим электронным документом.",
+                            "Сопоставь пополнение проездного с подходящей электронной квитанцией.",
                         )
                         page.locator("#send-message").click()
 
@@ -2726,5 +2815,62 @@ class AgentBrowserTest {
 
     private companion object {
         val JSON = Json { ignoreUnknownKeys = true }
+    }
+}
+private fun receiptToolCapabilities(): List<McpCallableTool> = listOf(
+    McpCallableTool(
+        serverId = "receipts",
+        serverDisplayName = "Synthetic receipts",
+        name = "search-receipts",
+        description = "Search receipts",
+        inputSchema = buildJsonObject { put("type", "object") },
+    ),
+    McpCallableTool(
+        serverId = "receipts",
+        serverDisplayName = "Synthetic receipts",
+        name = "get-receipt",
+        description = "Read receipt details",
+        inputSchema = buildJsonObject { put("type", "object") },
+    ),
+)
+
+private class BrowserNativePlanGateway(
+    private val coreGateway: ChatCompletionGateway,
+    private val actionArguments: String = "{}",
+) : ChatCompletionGateway {
+    override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+        if (request.tools.isNullOrEmpty()) return coreGateway.complete(request)
+        val actionAlreadyHandled = request.messages.any {
+            it.role == "tool" && it.name?.startsWith("app_") == true
+        }
+        if (actionAlreadyHandled) {
+            return ChatCompletionResponse(
+                choices = listOf(
+                    ChatChoice(
+                        message = ResponseMessage(content = "Synthetic receipt action completed."),
+                        finishReason = "stop",
+                    ),
+                ),
+            )
+        }
+        return ChatCompletionResponse(
+            choices = listOf(
+                ChatChoice(
+                    message = ResponseMessage(
+                        content = null,
+                        toolCalls = listOf(
+                            ChatToolCall(
+                                id = "browser-application-action",
+                                function = ChatFunctionCall(
+                                    name = "app_associate_receipts",
+                                    arguments = actionArguments,
+                                ),
+                            ),
+                        ),
+                    ),
+                    finishReason = "tool_calls",
+                ),
+            ),
+        )
     }
 }

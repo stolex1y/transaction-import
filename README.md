@@ -310,15 +310,16 @@ cadence в минутах. Часовой пояс автоматически ф
 3. локально фильтрует сводки по абсолютной сумме, валюте и дате ±1 день и
    запрашивает детали только для подходящих кандидатов, не более одного раза
    для каждого чека за запуск;
-4. передаёт selector только safe поля операции и чека, включая optional
+4. передаёт selector только безопасные поля операции и чека, включая optional
    `settlement_place` и подтверждённые receipt rules; raw receipt keys и
-   fiscal identifiers модели не передаются. Явная инструкция добавляется
-   только в ручном chat association, не в scheduler;
-5. применяет только валидный alias/confidence и one-to-one связь. Сохранённое
-   receipt rule может разрешить общий кандидат только тогда, когда оно
-   выбирает одну операцию; конфликт одинаковых выборов оставляет все строки
-   неоднозначными. Отсутствие кандидата хранится как нейтральный `Без чека`
-   без issue/review/error и не блокирует экспорт;
+   fiscal identifiers модели не передаются. Явная инструкция пользователя
+   передаётся selector при интерактивном сопоставлении, но не в scheduler;
+5. применяет только валидный alias/confidence и one-to-one связь. Для защиты
+   между последовательными imports уже связанные строки текущего draft
+   сравниваются по безопасным summary/items. Повторное или неразличимое
+   совпадение остаётся неоднозначным; raw receipt keys не сохраняются.
+   Отсутствие кандидата хранится как нейтральный `Без чека` без issue/review/error
+   и не блокирует экспорт;
 6. добавляет позиции чека и allowlisted summary (дата, продавец, сумма/валюта),
    не перезаписывая банковские merchant, category или description.
 
@@ -329,25 +330,51 @@ cadence в минутах. Часовой пояс автоматически ф
 Это лимиты app→MCP; внутреннюю пагинацию upstream receipts-сервиса они не
 описывают.
 
-Явная естественно-языковая инструкция может связать чек с операцией в текущем
-draft. Если пользователь прямо просит запомнить правило, оно сохраняется
-атомарно вместе с результатом применения к текущему draft и используется при
-будущих scheduler runs. Повторная обработка не добавляет те же позиции снова.
-Маршрут определяется отдельным ограниченным LLM-вызовом, а не regex или
-ключевыми словами: пока открыт draft, каждое непустое сообщение классифицируется
-как `none`, `associate` или `remember_rule`. В модель передаётся редактированный
-контекст последних восьми сообщений истории и текущего текста — до 1 200
-символов на сообщение. JSON-ответ ограничен 64 токенами, timeout — 15 секунд.
-`none` продолжает обычный маршрут чата; ошибка или некорректный ответ не меняют
-draft и правила и показываются безопасно. Это распознаёт перефразировки без
-слов-триггеров, но добавляет стоимость и задержку каждому сообщению в сессии с
-draft. Matcher получает только решения со scope `RECEIPT_MATCHING`; обычные
-подтверждённые решения не становятся правилами чеков.
-При наличии сохранённого receipt rule selector вызывается и для единственного
-локально подходящего чека, чтобы правило могло повлиять на решение; без явной
-инструкции и scoped rules один глобально однозначный кандидат выбирается
-детерминированно. Это добавляет модельные вызовы подходящим операциям будущих
-scheduler runs.
+Интерактивное сопоставление чеков использует тот же native LLM tool-calling
+loop, что и получение банковских операций. Для составного запроса planner
+выбирает bank tools, затем отдельное типизированное действие
+`app_associate_receipts`; receipt search/detail tools напрямую planner не видит.
+Matching и безопасно проверенные receipt summary/items попадают в enriched
+preview до явного confirm. Confirm сохраняет этот snapshot без повторного
+source fetch.
+
+Ошибки source/auth/selector отображаются отдельно от успешного поиска без
+подходящих чеков. При ошибке preview остаётся bank-only и доступен для confirm;
+поздняя привязка к уже созданному draft требует отдельного planner action.
+
+State-aware LLM planner — единственный semantic interpreter сообщений для
+чата, draft, bank/receipts и receipt rules. Фиксированные языковые списки,
+keyword/verb gates и отдельный intent-verifier не используются. Executor
+проверяет capability, структуру, аргументы, состояние и domain invariants, но
+не перепроверяет семантику structurally valid плана. Ошибка модели может выбрать
+лишний read-only source или неверное правило; этот риск принят, а импорт всё
+равно требует явного подтверждения.
+
+Если корректный план направляет обычную draft correction в `app_route_to_agent`,
+correction не вызывает bank/receipt sources. Если новый bank fetch возвращает
+0 операций, старый draft не передаётся на receipt matching; отдельный action
+нужен для последующего сопоставления существующих операций.
+
+`app_associate_receipts` сохраняет receipt rule только при typed
+`remember_rule=true` в плане. При смешанном запросе с новым импортом правило
+не применяется до confirm; после подтверждения planner может выбрать отдельное
+применение к созданному draft. Решение не определяется сравнением слов правила
+с текстом пользователя.
+
+Интерфейс `NativeMcpTransactionSourceAdapter` изолирует source-specific schema,
+подготовку аргументов, идентификаторы и нормализацию операций. Planner работает
+с разрешёнными tool definitions и получает нормализованные результаты, без
+ветвления по имени банка в маршрутизаторе. Текущий адаптер поддерживает только
+T‑Банк и legacy server ID; synthetic alternative adapter проверяет общую
+границу. Другой банк и plugin SDK этим изменением не реализуются.
+
+Existing confirmed receipt rules remain scoped to `RECEIPT_MATCHING` and are
+available to the selector and scheduler. When such a rule is present, the
+selector may run even for a single locally eligible receipt; without scoped
+rules or an explicit interactive association instruction, one globally unique
+candidate is selected deterministically. Scheduler selector calls remain
+bounded to at most one sequential call per operation that needs a choice. The
+configured timeout is 15 seconds and there is no separate per-run selector cap.
 
 Selector — прямой LLM completion, не MCP tool call. Текущий контракт делает
 не более одного последовательного selector-вызова на операцию, которой нужен

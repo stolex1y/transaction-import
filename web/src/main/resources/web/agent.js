@@ -2733,13 +2733,39 @@ function renderInlineMcpPreview(preview) {
         `Получено операций: ${(preview.transactions || []).length}. ` +
         "Проверьте результат; черновик изменится только после принятия.";
 
+    if (preview.receipt_matching) {
+        const receiptMatching = preview.receipt_matching;
+        const receiptStatus = document.createElement("p");
+        receiptStatus.className = "control-note receipt-matching-status";
+        receiptStatus.dataset.status = receiptMatching.status || "unknown";
+        if (receiptMatching.status === "completed") {
+            receiptStatus.textContent =
+                `Сопоставление чеков завершено: уникально привязано ${receiptMatching.matched_count || 0}, ` +
+                `неоднозначных ${receiptMatching.ambiguous_count || 0}, без подходящего чека ` +
+                `${receiptMatching.unmatched_count || 0}. Просмотрено сводок: ` +
+                `${receiptMatching.candidate_count || 0}; деталей: ${receiptMatching.detail_count || 0}.`;
+        } else if (receiptMatching.status === "source_error") {
+            receiptStatus.textContent =
+                "Источник чеков недоступен или не авторизован. Показаны банковские операции без сопоставления с чеками.";
+        } else if (receiptMatching.status === "selector_error") {
+            receiptStatus.textContent =
+                "Источник чеков ответил, но безопасно сопоставить чеки не удалось. " +
+                "Показаны банковские операции без сопоставления с чеками.";
+        } else {
+            receiptStatus.textContent =
+                "Статус сопоставления чеков неизвестен; банковские операции показаны без подтверждённой связи.";
+        }
+        section.append(heading, note, receiptStatus);
+    } else {
+        section.append(heading, note);
+    }
     const tableWrap = document.createElement("div");
     tableWrap.className = "mcp-inline-preview-table-wrap";
     const table = document.createElement("table");
     table.className = "mcp-inline-preview-table";
     const header = document.createElement("thead");
     const headerRow = document.createElement("tr");
-    for (const label of ["Дата", "Сумма", "Merchant", "Описание", "Категория", "Источник"]) {
+    for (const label of ["Дата", "Сумма", "Merchant", "Описание", "Категория", "Источник", "Чек"]) {
         const cell = document.createElement("th");
         cell.scope = "col";
         cell.textContent = label;
@@ -2770,7 +2796,18 @@ function renderInlineMcpPreview(preview) {
         }
         const source = document.createElement("td");
         source.textContent = transaction.source_label || "Счёт / карта";
-        row.append(date, amount, merchant, description, category, source);
+        const receipt = document.createElement("td");
+        const receiptIndicator = receiptAssociationIndicator(transaction.receipt_association);
+        if (receiptIndicator) {
+            receipt.append(receiptIndicator);
+        } else {
+            receipt.textContent = "Связь не подтверждена";
+        }
+        const receiptItems = transactionItemsDetails(transaction.items);
+        if (receiptItems) {
+            receipt.append(receiptItems);
+        }
+        row.append(date, amount, merchant, description, category, source, receipt);
         body.append(row);
     }
     table.append(header, body);
@@ -2788,7 +2825,7 @@ function renderInlineMcpPreview(preview) {
     confirm.textContent = "Принять операции";
     confirm.addEventListener("click", confirmMcpPreview);
     actions.append(cancel, confirm);
-    section.append(heading, note, tableWrap, actions);
+    section.append(tableWrap, actions);
     return section;
 }
 
