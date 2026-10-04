@@ -146,12 +146,20 @@ data class DraftTransaction(
 )
 
 @Serializable
+data class RefundAssociation(
+    @SerialName("purchase_transaction_id") val purchaseTransactionId: String,
+    @SerialName("refund_transaction_id") val refundTransactionId: String,
+)
+
+
+@Serializable
 data class ImportDraft(
     val status: ImportStatus,
     @SerialName("rejection_reason") val rejectionReason: String?,
     val transactions: List<DraftTransaction>,
     @SerialName("unparsed_fragments") val unparsedFragments: List<String>,
     val version: Long,
+    @SerialName("refund_associations") val refundAssociations: List<RefundAssociation> = emptyList(),
 )
 
 
@@ -2143,7 +2151,10 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
                 if (update.status == ReceiptAssociationStatus.MATCHED && !matched) {
                     return@map row.copy(
                         transaction = row.transaction.copy(
-                            receiptAssociation = ReceiptAssociation(ReceiptAssociationStatus.AMBIGUOUS),
+                            receiptAssociation = ReceiptAssociation(
+                                status = ReceiptAssociationStatus.AMBIGUOUS,
+                                review = update.review,
+                            ),
                         ),
                     )
                 }
@@ -2153,6 +2164,7 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
                         receiptAssociation = ReceiptAssociation(
                             status = if (matched) ReceiptAssociationStatus.MATCHED else update.status,
                             summary = update.summary.takeIf { matched },
+                            review = update.review.takeUnless { matched },
                         ),
                     ),
                 )
@@ -2533,28 +2545,30 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
         val preferences = requireNotNull(memory.longTerm)
         val merchantCanonicalRules = merchantCanonicalRulesFor(preferences)
         val promptText = "$USER_PROMPT_PREFIX\n\n$userText"
-        val response = gateway.complete(
-            completionRequest(
-                config = state.session.config,
-                gateway = gateway,
-                messages = buildList {
-                    add(
-                        RequestMessage(
-                            "system",
-                            systemWithContext(
-                                base = initialDraftSystemPrompt(categoryCatalog.categories),
-                                preferences = preferences,
-                                receiptState = state.receiptState,
-                                taskInvariants = SYSTEM_TASK_INVARIANTS,
-                            ),
+        val request = completionRequest(
+            config = state.session.config,
+            gateway = gateway,
+            messages = buildList {
+                add(
+                    RequestMessage(
+                        "system",
+                        systemWithContext(
+                            base = initialDraftSystemPrompt(categoryCatalog.categories),
+                            preferences = preferences,
+                            receiptState = state.receiptState,
+                            taskInvariants = SYSTEM_TASK_INVARIANTS,
                         ),
-                    )
-                    facts.message?.let(::add)
-                    add(RequestMessage("user", promptText))
-                },
-            ),
+                    ),
+                )
+                facts.message?.let(::add)
+                add(RequestMessage("user", promptText))
+            },
         )
-        val completion = requireJsonCompletion(response)
+        val response = gateway.complete(request)
+        val completion = requireJsonCompletion(
+            response,
+            providerResponseDiagnostics(state.session.config, gateway, request, response),
+        )
         val extracted = decodeInitialDraft(completion)
         val normalizedRejection = NOT_APPLICABLE_MESSAGE.takeIf {
             extracted.status == ImportStatus.NOT_APPLICABLE
@@ -2662,8 +2676,12 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
             userText = userText,
             categoryCatalog = categoryCatalog,
         )
-        val response = gateway.complete(completionRequest(state.session.config, gateway, requestMessages))
-        val completion = requireJsonCompletion(response)
+        val request = completionRequest(state.session.config, gateway, requestMessages)
+        val response = gateway.complete(request)
+        val completion = requireJsonCompletion(
+            response,
+            providerResponseDiagnostics(state.session.config, gateway, request, response),
+        )
         val followUp = decodeFollowUp(completion)
         val selectedMemoryCandidateIndices = validateRuleCandidateIndices(
             indices = followUp.persistMemoryCandidateIndices,
@@ -2695,8 +2713,8 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
         val displayText: String
         when (resolvedIntent) {
             FollowUpIntent.CORRECTION -> {
-                if (followUp.transactions.isNotEmpty()) {
-                    throw AgentResponseException("Ответ correction не должен содержать новые транзакции.")
+                if (followUp.transactions.isNotEmpty() || followUp.refundAssociations.isNotEmpty()) {
+                    throw AgentResponseException("Ответ correction не должен содержать добавления или связи возвратов.")
                 }
                 updatedDraft = try {
                     applyPatch(draft, followUp.operations, categoryCatalog)
@@ -2709,8 +2727,8 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
             }
 
             FollowUpIntent.APPEND -> {
-                if (followUp.operations.isNotEmpty()) {
-                    throw AgentResponseException("Ответ append не должен содержать patch operations.")
+                if (followUp.operations.isNotEmpty() || followUp.refundAssociations.isNotEmpty()) {
+                    throw AgentResponseException("Ответ append не должен содержать изменения связей возвратов.")
                 }
                 val appended = try {
                     appendTransactions(
@@ -2728,9 +2746,27 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
                     "Пропущено точных дубликатов: ${appended.duplicateCount}."
             }
 
+            FollowUpIntent.REFUND_ASSOCIATION -> {
+                if (followUp.operations.isNotEmpty() || followUp.transactions.isNotEmpty() ||
+                    followUp.refundAssociations.isEmpty()
+                ) {
+                    throw AgentResponseException("Связь возврата должна содержать только существующие операции.")
+                }
+                updatedDraft = try {
+                    applyRefundAssociations(draft, followUp.refundAssociations)
+                        .copy(version = nextRevision)
+                        .also(::requireDraftInvariants)
+                } catch (error: IllegalArgumentException) {
+                    throw AgentResponseException("Связь возврата не прошла проверку: ${error.message}")
+                }
+                displayText = followUp.message.trim().ifBlank { "Связь возврата сохранена." }
+            }
+
             FollowUpIntent.NEEDS_CLARIFICATION -> {
-                if (followUp.operations.isNotEmpty() || followUp.transactions.isNotEmpty()) {
-                    throw AgentResponseException("Ответ needs_clarification не должен менять draft.")
+                if (followUp.operations.isNotEmpty() || followUp.transactions.isNotEmpty() ||
+                    followUp.refundAssociations.isNotEmpty()
+                ) {
+                    throw AgentResponseException("Ответ needs_clarification не должен менять операции или связи возвратов.")
                 }
                 updatedDraft = draft.copy(version = nextRevision)
                 displayText = followUp.message.trim().ifBlank { "Черновик не изменён." }
@@ -2755,6 +2791,19 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
             existingCandidates = state.merchantCanonicalCandidates,
         )
         val merchantCanonicalCandidates = materializedMerchantCandidates.map { it.candidate }
+        val rejectedMerchantConflict = followUp.merchantCanonicalCandidates.firstNotNullOfOrNull { proposal ->
+            val normalized = runCatching {
+                normalizeMerchantCanonicalRule(proposal.canonicalName, proposal.aliases)
+            }.getOrNull() ?: return@firstNotNullOfOrNull null
+            val proposedKeys = (listOf(normalized.canonicalName) + normalized.aliases)
+                .map(::merchantCanonicalRuleKey)
+                .toSet()
+            merchantCanonicalRules.firstOrNull { rule ->
+                (listOf(rule.canonicalName) + rule.aliases)
+                    .map(::merchantCanonicalRuleKey)
+                    .any { it in proposedKeys }
+            }?.let { proposal.canonicalName to it.canonicalName }
+        }
         val persistableMemoryCandidates = selectedMemoryCandidateIndices.map { selectedIndex ->
             materializedMemoryCandidates.singleOrNull { it.sourceIndex == selectedIndex }?.candidate
                 ?: throw AgentResponseException("Выбранное правило не прошло структурную проверку.")
@@ -2807,7 +2856,7 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
         val finalDraft = automaticRuleReview?.draft ?: updatedDraft
         val finalCompliance = requireInvariantCompliance(state, finalDraft, categoryCatalog, now)
         val automaticRuleReviewFailed = shouldAutoReviewRule && automaticRuleReview == null
-        val savedDisplayText = when {
+        val normalDisplayText = when {
             hasSelectedRuleCandidates &&
                 (persistableMemoryCandidates.size < memoryCandidates.size ||
                     persistableMerchantCanonicalCandidates.size < merchantCanonicalCandidates.size) ->
@@ -2825,6 +2874,10 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
 
             else -> displayText
         }
+        val savedDisplayText = rejectedMerchantConflict?.let { (proposed, existing) ->
+            "$normalDisplayText Предложение «$proposed» конфликтует с сохранённым правилом «$existing»; " +
+                "изменений нет. Измените или удалите старое правило в настройках, затем повторите предложение."
+        } ?: normalDisplayText
         val savedState = repository.saveExchange(
             sessionId = state.session.id,
             expectedRevision = state.session.revision,
@@ -3269,30 +3322,34 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
 
     private fun decodeInitialDraft(completion: JsonCompletion): AgentDraftResponse {
         if (completion.finishReason != "stop") {
-            throw AgentResponseException(
-                "Ответ завершён с ошибкой провайдера. Попробуйте ещё раз.",
-            )
+            throw AgentResponseException(providerCompletionFailure(completion))
+        }
+        if (!isJsonSyntaxValid(completion.content)) {
+            throw AgentResponseException("Ответ провайдера содержит некорректный JSON.")
         }
         return try {
             agentJson.decodeFromString<AgentDraftResponse>(completion.content)
         } catch (_: SerializationException) {
-            throw AgentResponseException("Ответ провайдера не удалось проверить.")
+            throw AgentResponseException("Структура ответа провайдера не соответствует контракту черновика.")
         } catch (_: IllegalArgumentException) {
-            throw AgentResponseException("Ответ провайдера не удалось проверить.")
+            throw AgentResponseException("Структура ответа провайдера не соответствует контракту черновика.")
         }
     }
 
     private fun decodeFollowUp(completion: JsonCompletion): FollowUpResponse {
         if (completion.finishReason != "stop") {
-            throw AgentResponseException("Ответ завершён с ошибкой провайдера. Попробуйте ещё раз.")
+            throw AgentResponseException(providerCompletionFailure(completion))
+        }
+        if (parseFollowUpObject(completion.content) == null && !isJsonSyntaxValid(completion.content)) {
+            throw AgentResponseException("Ответ с изменениями содержит некорректный JSON.")
         }
         val normalizedPayload = normalizeFollowUpPayload(completion.content)
         return try {
             FOLLOW_UP_JSON.decodeFromString<FollowUpResponse>(normalizedPayload)
         } catch (_: SerializationException) {
-            throw AgentResponseException("Ответ с изменениями не удалось проверить.")
+            throw AgentResponseException("Структура ответа с изменениями не соответствует контракту.")
         } catch (_: IllegalArgumentException) {
-            throw AgentResponseException("Ответ с изменениями не удалось проверить.")
+            throw AgentResponseException("Структура ответа с изменениями не соответствует контракту.")
         }
     }
 
@@ -3307,8 +3364,8 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
                         "intent",
                         "operations",
                         "changes",
-                        "patches",
                         "transactions",
+                        "refund_associations",
                         "memory_candidates",
                         "merchant_canonical_candidates",
                         "persist_memory_candidate_indices",
@@ -3326,6 +3383,7 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
             nested["operations"] ?: nested["changes"] ?: nested["patches"] ?: nested["operation"],
         )
         values["transactions"] = normalizeNullableArray(nested["transactions"])
+        values["refund_associations"] = normalizeNullableArray(nested["refund_associations"])
         values["memory_candidates"] = normalizeNullableArray(nested["memory_candidates"])
         values["merchant_canonical_candidates"] =
             normalizeNullableArray(nested["merchant_canonical_candidates"])
@@ -3365,6 +3423,14 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
                 }.getOrNull()
             }
             .firstOrNull()
+    }
+
+    private fun isJsonSyntaxValid(content: String): Boolean {
+        val trimmed = content.trim()
+        val first = trimmed.firstOrNull() ?: return false
+        val hasJsonStart = first == '{' || first == '[' || first == '"' ||
+            first == '-' || first in '0'..'9' || trimmed in setOf("true", "false", "null")
+        return hasJsonStart && runCatching { agentJson.parseToJsonElement(trimmed) }.isSuccess
     }
 
     private fun normalizeFollowUpIntent(element: JsonElement?): JsonElement {
@@ -3770,6 +3836,7 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
         require(draft.transactions.all { it.id == canonicalTransactionId(it.transaction.sourceIndex) }) {
             "Идентификатор операции должен совпадать с source_index."
         }
+        requireValidRefundAssociations(draft)
         when (draft.status) {
             ImportStatus.READY -> require(draft.transactions.isNotEmpty()) {
                 "Черновик ready должен содержать операции."
@@ -3779,6 +3846,75 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
             }
         }
     }
+
+
+    private fun applyRefundAssociations(
+        draft: ImportDraft,
+        proposals: List<RefundAssociation>,
+    ): ImportDraft {
+        require(proposals.map { it.refundTransactionId }.distinct().size == proposals.size) {
+            "Одна операция возврата не может иметь несколько целевых покупок."
+        }
+        require(proposals.distinct().size == proposals.size) {
+            "Ответ повторяет одну и ту же связь возврата."
+        }
+        return draft.copy(refundAssociations = (draft.refundAssociations + proposals).distinct())
+            .also(::requireValidRefundAssociations)
+    }
+
+    private fun requireValidRefundAssociations(draft: ImportDraft) {
+        val rows = draft.transactions.associateBy(DraftTransaction::id)
+        require(draft.refundAssociations.distinct().size == draft.refundAssociations.size) {
+            "Связь возврата повторяется."
+        }
+        require(draft.refundAssociations.map { it.refundTransactionId }.distinct().size ==
+            draft.refundAssociations.size
+        ) {
+            "Одна операция возврата не может иметь несколько целевых покупок."
+        }
+        val refundedByPurchase = mutableMapOf<String, Long>()
+        draft.refundAssociations.forEach { association ->
+            val purchaseRow = rows[association.purchaseTransactionId]
+                ?: throw IllegalArgumentException("Покупка не найдена в текущем черновике.")
+            val purchase = purchaseRow.transaction
+            val refund = rows[association.refundTransactionId]?.transaction
+                ?: throw IllegalArgumentException("Операция возврата не найдена в текущем черновике.")
+            require(association.purchaseTransactionId != association.refundTransactionId) {
+                "Возврат и покупка должны быть разными операциями."
+            }
+            require(isConfirmedRefundPurchase(purchase, purchaseRow.description) &&
+                refund.direction == TransactionDirection.INCOME
+            ) {
+                "Связь должна соединять подтверждённую покупку и доход-возврат."
+            }
+            require(refund.amountMinor > 0 &&
+                refund.amountMinor < purchase.amountMinor
+            ) {
+                "Сумма частичного возврата должна быть меньше положительной суммы покупки."
+            }
+            require(purchase.currency == refund.currency) {
+                "Валюта возврата должна совпадать с валютой покупки."
+            }
+            val alreadyRefunded = refundedByPurchase[association.purchaseTransactionId] ?: 0L
+            require(refund.amountMinor <= purchase.amountMinor - alreadyRefunded) {
+                "Сумма связанных возвратов превышает сумму покупки."
+            }
+            refundedByPurchase[association.purchaseTransactionId] = alreadyRefunded + refund.amountMinor
+        }
+    }
+
+
+
+    private fun isConfirmedRefundPurchase(
+        transaction: StructuredTransaction,
+        description: String,
+    ): Boolean =
+        transaction.direction == TransactionDirection.EXPENSE &&
+            transaction.amountMinor > 0 &&
+            transaction.categoryId?.startsWith("transfer.") != true &&
+            !transaction.merchant.equals("Перевод", ignoreCase = true) &&
+            !transaction.merchant.equals("Между своими счетами", ignoreCase = true) &&
+            !EXPLICIT_TRANSFER_MARKER.containsMatchIn("${transaction.merchant} $description")
 
     private suspend fun requireInvariantCompliance(
         state: ImportSessionState,
@@ -3855,15 +3991,69 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
         )
     }
 
-    private fun requireJsonCompletion(response: ChatCompletionResponse): JsonCompletion {
+    private fun requireJsonCompletion(
+        response: ChatCompletionResponse,
+        diagnostics: ProviderResponseDiagnostics? = null,
+    ): JsonCompletion {
         val choice = response.choices.firstOrNull()
-            ?: throw AgentResponseException("Провайдер не вернул ответ. Попробуйте ещё раз.")
+            ?: throw AgentResponseException(
+                "Провайдер не вернул choices.${diagnostics?.format()?.let { " $it" }.orEmpty()}",
+            )
         val content = choice.message.content?.trim().orEmpty()
+        val hasReasoningContent = !choice.message.reasoningContent.isNullOrBlank() ||
+            !choice.message.reasoning.isNullOrBlank()
+        val completion = JsonCompletion(
+            content = content,
+            finishReason = choice.finishReason,
+            diagnostics = diagnostics,
+            hasReasoningContent = hasReasoningContent,
+        )
         if (content.isEmpty()) {
-            throw AgentResponseException("Провайдер вернул пустой ответ. Попробуйте ещё раз.")
+            val error = if (choice.finishReason == "length" && diagnostics != null) {
+                providerLengthFailure(completion)
+            } else {
+                "Провайдер вернул пустой final content." +
+                    diagnostics?.format(hasReasoningContent)?.let { " $it" }.orEmpty()
+            }
+            throw AgentResponseException(error)
         }
-        return JsonCompletion(content, choice.finishReason)
+        return completion
     }
+
+    private fun providerCompletionFailure(completion: JsonCompletion): String =
+        if (completion.finishReason == "length" && completion.diagnostics != null) {
+            providerLengthFailure(completion)
+        } else {
+            val reason = completion.finishReason?.let(::safeFinishReason) ?: "unknown"
+            "Ответ провайдера завершён с finish_reason=$reason." +
+                completion.diagnostics?.format(completion.hasReasoningContent)?.let { " $it" }.orEmpty()
+        }
+
+    private fun providerLengthFailure(completion: JsonCompletion): String {
+        val details = completion.diagnostics?.format(completion.hasReasoningContent).orEmpty()
+        return "Провайдер ограничил генерацию или достигнут лимит контекста " +
+            "(finish_reason=length). Проверьте max_tokens и размер запроса. " +
+            "$details Черновик не изменён."
+    }
+
+    private fun providerResponseDiagnostics(
+        config: AgentConfig,
+        gateway: ChatCompletionGateway,
+        request: ChatCompletionRequest,
+        response: ChatCompletionResponse,
+    ) = ProviderResponseDiagnostics(
+        providerId = config.providerId,
+        modelId = config.modelId,
+        reasoningModeId = config.reasoningModeId,
+        configuredMaxTokens = runtimeConfig.maxTokens,
+        requestMaxTokens = request.maxTokens,
+        modelMaxOutputTokens = gateway.maxOutputTokens,
+        contextWindowTokens = gateway.contextWindowTokens,
+        usage = response.usage,
+    )
+
+    private fun safeFinishReason(value: String): String =
+        value.takeIf(FINISH_REASON_PATTERN::matches) ?: "unknown"
 
     private fun draftSummary(draft: ImportDraft): String = when (draft.status) {
         ImportStatus.READY -> "Черновик готов: ${draft.transactions.size} операций."
@@ -4203,7 +4393,41 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
     private data class JsonCompletion(
         val content: String,
         val finishReason: String?,
+        val diagnostics: ProviderResponseDiagnostics? = null,
+        val hasReasoningContent: Boolean = false,
     )
+
+    private data class ProviderResponseDiagnostics(
+        val providerId: String,
+        val modelId: String,
+        val reasoningModeId: String,
+        val configuredMaxTokens: Int,
+        val requestMaxTokens: Int?,
+        val modelMaxOutputTokens: Int?,
+        val contextWindowTokens: Int?,
+        val usage: Usage?,
+    ) {
+        fun format(hasReasoningContent: Boolean = false): String = buildList {
+            add("provider=${safeValue(providerId)}")
+            add("model=${safeValue(modelId)}")
+            add("reasoning_mode=${safeValue(reasoningModeId)}")
+            add("max_tokens_configured=$configuredMaxTokens")
+            requestMaxTokens?.let { add("max_tokens_requested=$it") }
+            modelMaxOutputTokens?.let { add("max_output_tokens_model=$it") }
+            contextWindowTokens?.let { add("context_window_tokens=$it") }
+            usage?.promptTokens?.takeIf { it >= 0 }?.let { add("prompt_tokens=$it") }
+            usage?.completionTokens?.takeIf { it >= 0 }?.let { add("completion_tokens=$it") }
+            usage?.totalTokens?.takeIf { it >= 0 }?.let { add("total_tokens=$it") }
+            if (hasReasoningContent) add("reasoning_content=present")
+        }.joinToString(separator = "; ", postfix = ".")
+
+        private fun safeValue(value: String): String =
+            value.takeIf {
+                it.length <= 100 && it.all { character ->
+                    character.isLetterOrDigit() || character in "._:/-"
+                }
+            } ?: "configured"
+    }
 
     @Serializable
     private data class SummaryResponse(
@@ -4236,6 +4460,7 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
         const val MAX_DECISION_LENGTH = 500
         const val MAX_MEMORY_CANDIDATE_REASON_LENGTH = 300
         const val MAX_MERCHANT_RULE_REASON_LENGTH = 300
+        val FINISH_REASON_PATTERN = Regex("^[a-zA-Z0-9_-]{1,40}$")
         const val MAX_MEMORY_CANDIDATES = 5
 
         val allMemoryLayers = listOf(
@@ -4374,10 +4599,11 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
         """.trimIndent()
         val FOLLOW_UP_SYSTEM_PROMPT = """
             Return exactly one JSON object with exactly these fields:
-            - intent: "correction", "append_statement", or "needs_clarification"
+            - intent: "correction", "append_statement", "refund_association", or "needs_clarification"
             - message: concise Russian text
             - operations: array
             - transactions: array
+            - refund_associations: array of explicit purchase/refund transaction ID pairs; use [] otherwise
             - memory_candidates: array of candidate objects; use [] when there are no candidates
             - merchant_canonical_candidates: array of structured proposals; use [] when there are no candidates
             - review_draft: boolean; true when the current user message states a rule
@@ -4413,6 +4639,16 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
             For intent="append_statement", use operations=[] and put every operation from
             the newly supplied bank statement into transactions. The application applies
             confirmed rules and validates the result.
+
+            For an explicit, unambiguous partial-refund statement in the current user
+            message and full conversation, use intent="refund_association", operations=[],
+            transactions=[], and refund_associations=[{"purchase_transaction_id":"<stable id>",
+            "refund_transaction_id":"<stable id>"}]. Link only a clearly identified purchase and
+            refund already present in the draft. If more than one purchase could be the target and
+            the user has not distinguished them, use needs_clarification, ask one concise question,
+            and return refund_associations=[]. Never infer a refund link from amount, merchant,
+            date, or sign alone. Do not alter either source transaction.
+
 
             For intent="needs_clarification", use operations=[] and transactions=[].
             Never invent missing transactions or bank facts.
@@ -4618,6 +4854,9 @@ private enum class FollowUpIntent {
     @SerialName("append_statement")
     APPEND,
 
+    @SerialName("refund_association")
+    REFUND_ASSOCIATION,
+
     @SerialName("needs_clarification")
     NEEDS_CLARIFICATION,
 }
@@ -4714,6 +4953,9 @@ private data class FollowUpResponse(
     val message: String = "",
     val operations: List<DraftPatchOperation> = emptyList(),
     val transactions: List<AgentExtractedTransaction> = emptyList(),
+    @SerialName("refund_associations")
+    val refundAssociations: List<RefundAssociation> = emptyList(),
+
     @SerialName("memory_candidates")
     val memoryCandidates: List<AgentMemoryCandidateProposal> = emptyList(),
     @SerialName("merchant_canonical_candidates")
@@ -4733,6 +4975,7 @@ private data class FollowUpResponse(
         intent != FollowUpIntent.NEEDS_CLARIFICATION -> intent
         operations.isNotEmpty() -> FollowUpIntent.CORRECTION
         transactions.isNotEmpty() -> FollowUpIntent.APPEND
+        refundAssociations.isNotEmpty() -> FollowUpIntent.REFUND_ASSOCIATION
         else -> FollowUpIntent.NEEDS_CLARIFICATION
     }
 }

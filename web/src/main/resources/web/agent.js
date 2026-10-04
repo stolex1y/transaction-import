@@ -3299,11 +3299,47 @@ function updateDraftSummary(draft) {
         parts.push(`Исправьте ошибки в ${invalid} ${operationWord(invalid)}.`);
     }
     if (hasDirtyDraft()) parts.push("Есть несохранённые изменения.");
+    const refundSummary = refundAssociationSummary(draft);
+    if (refundSummary) parts.push(refundSummary);
     elements.draftStatus.textContent = parts.join(" ");
     renderReceiptStatus();
     elements.buildBatch.disabled = busy || included === 0 || invalid > 0 || hasDirtyDraft();
     elements.selectAll.checked = included === draft.transactions.length && draft.transactions.length > 0;
     elements.selectAll.indeterminate = included > 0 && included < draft.transactions.length;
+}
+
+function refundAssociationSummary(draft) {
+    const associations = Array.isArray(draft.refund_associations) ? draft.refund_associations : [];
+    if (associations.length === 0) return "";
+    const transactions = new Map(
+        (draft.transactions || []).map((row) => [row.id, row.transaction]),
+    );
+    const totals = new Map();
+    for (const association of associations) {
+        const purchase = transactions.get(association.purchase_transaction_id);
+        const refund = transactions.get(association.refund_transaction_id);
+        if (!purchase || !refund ||
+            !Number.isSafeInteger(purchase.amount_minor) ||
+            !Number.isSafeInteger(refund.amount_minor) ||
+            normalizeCurrencyCode(purchase.currency) !== normalizeCurrencyCode(refund.currency)
+        ) continue;
+        const total = totals.get(association.purchase_transaction_id) || {
+            purchase,
+            refundMinor: 0,
+            refundIds: [],
+        };
+        total.refundMinor += refund.amount_minor;
+        total.refundIds.push(association.refund_transaction_id);
+        if (Number.isSafeInteger(total.refundMinor)) {
+            totals.set(association.purchase_transaction_id, total);
+        }
+    }
+    return Array.from(totals, ([purchaseId, total]) => {
+        const currency = normalizeCurrencyCode(total.purchase.currency);
+        const netMinor = total.purchase.amount_minor - total.refundMinor;
+        return `Частичный возврат: операция ${total.refundIds.join(", ")} связана с покупкой ${purchaseId}; ` +
+            `чистая сумма покупки — ${minorToMajor(netMinor, currency)} ${currency}.`;
+    }).join(" ");
 }
 
 function renderDraft() {
@@ -3468,22 +3504,64 @@ function createOperationTableRow(row) {
 }
 function receiptAssociationIndicator(association) {
     if (!association || typeof association.status !== "string") return null;
-    const indicator = document.createElement("p");
+    const indicator = document.createElement("div");
     indicator.className = `receipt-association-status ${association.status}`;
+    const title = document.createElement("p");
     if (association.status === "unmatched") {
-        indicator.textContent = "Без чека";
+        title.textContent = "Без чека";
     } else if (association.status === "ambiguous") {
-        indicator.textContent = "Чек требует уточнения";
+        title.textContent = "Чек требует уточнения";
+        const review = association.review;
+        if (review && typeof review.reason === "string") {
+            const explanation = document.createElement("p");
+            const reasons = {
+                multiple_candidates: "Подошло несколько чеков.",
+                selector_uncertain: "Система не смогла уверенно выбрать один чек.",
+                shared_by_operations: "Один чек подходит нескольким операциям.",
+                duplicate_selection: "Этот чек уже использован другой операцией.",
+                operation_type_unknown: "Сначала подтвердите, что это покупка или расход.",
+            };
+            explanation.textContent = reasons[review.reason] || "Нужно уточнение.";
+            indicator.append(title, explanation);
+            if (Array.isArray(review.candidates) && review.candidates.length > 0) {
+                const options = document.createElement("ul");
+                options.setAttribute("aria-label", "Варианты чеков");
+                for (const candidate of review.candidates.slice(0, 5)) {
+                    const option = document.createElement("li");
+                    const parts = [
+                        candidate?.merchant,
+                        candidate?.settlement_place,
+                        candidate?.date_time || candidate?.date,
+                        Number.isFinite(Number(candidate?.amount_minor))
+                            ? `${minorToMajor(Number(candidate.amount_minor), candidate.currency || "RUB")} ${candidate.currency || "RUB"}`
+                            : null,
+                    ].filter((value) => typeof value === "string" && value.trim());
+                    option.textContent = parts.join(" · ");
+                    options.append(option);
+                }
+                indicator.append(options);
+            } else {
+                const note = document.createElement("p");
+                note.textContent = "Безопасно различимых вариантов нет.";
+                indicator.append(note);
+            }
+            return indicator;
+        }
     } else if (association.status === "source_error") {
-        indicator.textContent = "Источник чеков недоступен";
+        title.textContent = "Источник чеков недоступен";
     } else if (association.status === "matched" && association.summary) {
         const summary = association.summary;
-        indicator.textContent =
-            `Чек: ${summary.date || "дата не указана"} · ${summary.merchant || "продавец не указан"} · ` +
-            `${minorToMajor(Number(summary.amount_minor) || 0, summary.currency || "RUB")} ${summary.currency || "RUB"}`;
+        const parts = [
+            summary.date_time || summary.date,
+            summary.merchant,
+            summary.settlement_place,
+            `${minorToMajor(Number(summary.amount_minor) || 0, summary.currency || "RUB")} ${summary.currency || "RUB"}`,
+        ].filter((value) => typeof value === "string" && value.trim());
+        title.textContent = `Чек: ${parts.join(" · ")}`;
     } else {
         return null;
     }
+    indicator.append(title);
     return indicator;
 }
 

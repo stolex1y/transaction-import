@@ -26,8 +26,10 @@ import io.github.stolex1y.transactionimport.core.RevisionConflictException
 import io.github.stolex1y.transactionimport.core.SessionNotFoundException
 import io.github.stolex1y.transactionimport.core.StickyFact
 import io.github.stolex1y.transactionimport.core.StructuredTransaction
+import io.github.stolex1y.transactionimport.core.RefundAssociation
 import io.github.stolex1y.transactionimport.core.ReceiptAssociation
 import io.github.stolex1y.transactionimport.core.ReceiptAssociationStatus
+import io.github.stolex1y.transactionimport.core.ReceiptAssociationSummary
 import io.github.stolex1y.transactionimport.core.DEFAULT_AGENT_CATEGORIES
 import io.github.stolex1y.transactionimport.core.TransactionCategory
 import io.github.stolex1y.transactionimport.core.UserPreferences
@@ -615,6 +617,19 @@ class SqliteImportSessionRepository(
             statement.setString(2, sessionId)
             statement.executeUpdate()
         }
+        prepareStatement(
+            """
+            INSERT INTO draft_refund_associations (session_id, purchase_transaction_id, refund_transaction_id)
+            SELECT ?, purchase_transaction_id, refund_transaction_id
+            FROM draft_refund_associations
+            WHERE session_id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, forkSession.id)
+            statement.setString(2, sessionId)
+            statement.executeUpdate()
+        }
+
         requireState(this, forkSession.id)
     }
 
@@ -777,6 +792,22 @@ class SqliteImportSessionRepository(
                 )
                 """.trimIndent(),
             )
+            statement.execute(
+                """
+                CREATE TABLE IF NOT EXISTS draft_refund_associations (
+                    session_id TEXT NOT NULL,
+                    purchase_transaction_id TEXT NOT NULL,
+                    refund_transaction_id TEXT NOT NULL,
+                    PRIMARY KEY (session_id, purchase_transaction_id, refund_transaction_id),
+                    UNIQUE (session_id, refund_transaction_id),
+                    FOREIGN KEY (session_id, purchase_transaction_id)
+                        REFERENCES draft_transactions(session_id, transaction_id) ON DELETE CASCADE,
+                    FOREIGN KEY (session_id, refund_transaction_id)
+                        REFERENCES draft_transactions(session_id, transaction_id) ON DELETE CASCADE
+                )
+                """.trimIndent(),
+            )
+
             statement.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_preferences (
@@ -1052,6 +1083,32 @@ class SqliteImportSessionRepository(
         }
     }
 
+    private fun redactUnverifiedReceiptSnapshot(transaction: StructuredTransaction): StructuredTransaction {
+        val association = transaction.receiptAssociation ?: return transaction
+        val summary = association.summary
+        val trustedSummary = summary?.takeIf {
+            it.privacyVersion == ReceiptAssociationSummary.CURRENT_PRIVACY_VERSION
+        }
+        val review = association.review?.takeIf { evidence ->
+            evidence.candidates.all {
+                it.privacyVersion == ReceiptAssociationSummary.CURRENT_PRIVACY_VERSION
+            }
+        }
+        val unverifiedMatched = association.status == ReceiptAssociationStatus.MATCHED &&
+            summary?.privacyVersion != ReceiptAssociationSummary.CURRENT_PRIVACY_VERSION
+        val unverifiedSummary = summary != null && trustedSummary == null
+        val unverifiedReview = association.review != null && review == null
+        if (!unverifiedMatched && !unverifiedSummary && !unverifiedReview) return transaction
+
+        return transaction.copy(
+            items = if (unverifiedMatched) emptyList() else transaction.items,
+            receiptAssociation = association.copy(
+                summary = trustedSummary,
+                review = review,
+            ),
+        )
+    }
+
     private fun readState(connection: Connection, id: String): ImportSessionState? {
         val header = connection.prepareStatement(
             """
@@ -1261,22 +1318,23 @@ class SqliteImportSessionRepository(
                             val decodedTransaction = databaseJson.decodeFromString<StructuredTransaction>(
                                 rows.getString("transaction_json"),
                             )
-                            val hadLegacyUnmatched = decodedTransaction.issues.any {
+                            val privacySafeTransaction = redactUnverifiedReceiptSnapshot(decodedTransaction)
+                            val hadLegacyUnmatched = privacySafeTransaction.issues.any {
                                 it.startsWith("receipt_unmatched:")
                             }
-                            val remainingIssues = decodedTransaction.issues.filterNot {
+                            val remainingIssues = privacySafeTransaction.issues.filterNot {
                                 it.startsWith("receipt_unmatched:")
                             }
                             val transaction = if (hadLegacyUnmatched) {
-                                decodedTransaction.copy(
+                                privacySafeTransaction.copy(
                                     issues = remainingIssues,
-                                    needsReview = decodedTransaction.needsReview &&
-                                        (decodedTransaction.categoryId == null || remainingIssues.isNotEmpty()),
-                                    receiptAssociation = decodedTransaction.receiptAssociation
+                                    needsReview = privacySafeTransaction.needsReview &&
+                                        (privacySafeTransaction.categoryId == null || remainingIssues.isNotEmpty()),
+                                    receiptAssociation = privacySafeTransaction.receiptAssociation
                                         ?: ReceiptAssociation(ReceiptAssociationStatus.UNMATCHED),
                                 )
                             } else {
-                                decodedTransaction
+                                privacySafeTransaction
                             }
                             val storedFieldErrors = databaseJson.decodeFromString<Map<String, List<String>>>(
                                 rows.getString("field_errors_json"),
@@ -1306,6 +1364,29 @@ class SqliteImportSessionRepository(
                     }
                 }
             }
+            val refundAssociations = connection.prepareStatement(
+                """
+                SELECT purchase_transaction_id, refund_transaction_id
+                FROM draft_refund_associations
+                WHERE session_id = ?
+                ORDER BY purchase_transaction_id, refund_transaction_id
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, id)
+                statement.executeQuery().use { rows ->
+                    buildList {
+                        while (rows.next()) {
+                            add(
+                                RefundAssociation(
+                                    purchaseTransactionId = rows.getString("purchase_transaction_id"),
+                                    refundTransactionId = rows.getString("refund_transaction_id"),
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+
             ImportDraft(
                 status = ImportStatus.valueOf(status),
                 rejectionReason = header.rejectionReason,
@@ -1316,6 +1397,7 @@ class SqliteImportSessionRepository(
                     },
                 ),
                 version = header.session.revision,
+                refundAssociations = refundAssociations,
             )
         }
         val storedReceiptState = readReceiptState(connection, id)
@@ -1958,6 +2040,22 @@ class SqliteImportSessionRepository(
             }
             statement.executeBatch()
         }
+        connection.prepareStatement(
+            """
+            INSERT INTO draft_refund_associations (
+                session_id, purchase_transaction_id, refund_transaction_id
+            ) VALUES (?, ?, ?)
+            """.trimIndent(),
+        ).use { statement ->
+            draft.refundAssociations.forEach { association ->
+                statement.setString(1, sessionId)
+                statement.setString(2, association.purchaseTransactionId)
+                statement.setString(3, association.refundTransactionId)
+                statement.addBatch()
+            }
+            statement.executeBatch()
+        }
+
         connection.prepareStatement(
             """
             UPDATE import_sessions

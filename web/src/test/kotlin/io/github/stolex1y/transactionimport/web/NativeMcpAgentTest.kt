@@ -23,6 +23,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.nio.file.Files
+import java.sql.DriverManager
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.io.path.deleteIfExists
 import kotlin.test.Test
@@ -260,6 +261,319 @@ class NativeMcpAgentTest {
             assertTrue(planner.requests.single().tools.orEmpty().any {
                 it.function.name == "app_route_to_agent"
             })
+        } finally {
+            dependencies.scheduler?.close()
+            database.deleteIfExists()
+        }
+    }
+    @Test
+    fun explicitReceiptInfoReturnsAllowlistedDetailsWithoutChangingDraft() = runBlocking {
+        val database = Files.createTempFile("native-receipt-info-", ".sqlite")
+        val planner = ApplicationActionPlanGateway(
+            action = "app_read_receipt_catalog",
+            followingActions = listOf(
+                "app_read_receipt_info" to
+                    """{"operation_ref":"receipt-operation-1","fields":["settlement_place","total","items"]}""",
+            ),
+        )
+        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val source = ReceiptAssociationFixture()
+        val session = dependencies.agent.createSession(
+            "Synthetic receipt info",
+            dependencies.runtimeConfig.defaultAgentConfig(),
+        )
+        try {
+            val imported = dependencies.agent.sendMessage(
+                sessionId = session.session.id,
+                expectedRevision = session.session.revision,
+                text = "Синтетическая выписка",
+            )
+            val native = NativeMcpAgent(
+                agent = dependencies.agent,
+                gatewayResolver = AgentGatewayResolver { planner },
+                mcpTools = source,
+                runtimeConfig = nativeMcpEnabled(dependencies.runtimeConfig),
+                receiptMatchSelector = ReceiptMatchSelector { _, _, choices, _, _ ->
+                    ReceiptSelectionResponseView(choices.single().alias, 0.98)
+                },
+            )
+            val result = native.handle(
+                sessionId = session.session.id,
+                expectedRevision = imported.session.revision,
+                text = "Сколько было позиций и где рассчитались по чеку?",
+            )
+
+            assertIs<NativeMcpHandlingResult.Handled>(result)
+            assertEquals(1, source.searchCalls)
+            assertEquals(1, source.detailCalls)
+            assertEquals(3, planner.requests.size)
+            assertTrue(planner.requests.first().tools.orEmpty().any {
+                it.function.name == "app_read_receipt_catalog"
+            })
+            assertTrue(planner.requests.first().tools.orEmpty().any {
+                it.function.name == "app_read_receipt_info"
+            })
+            val infoSchema = planner.requests.first().tools.orEmpty()
+                .single { it.function.name == "app_read_receipt_info" }
+                .function.parameters.toString()
+            assertTrue(infoSchema.contains("\"items\":{\"type\":\"string\""), infoSchema)
+            assertFalse(infoSchema.contains("\"items\":["), infoSchema)
+            assertFalse(planner.requests.first().tools.orEmpty().any {
+                it.function.name.startsWith("mcp_receipts_")
+            })
+            val infoResult = planner.requests.last().messages.last().content
+            assertTrue(infoResult.contains("Синтетическая торговая точка"))
+            assertTrue(infoResult.contains("Синтетическая позиция"))
+            assertTrue(infoResult.contains("settlement_place"))
+            assertFalse(infoResult.contains("synthetic-private-receipt-key"))
+            assertFalse(infoResult.contains("synthetic-fiscal-id"))
+            assertFalse(infoResult.contains("synthetic-qr-payload"))
+            assertFalse(infoResult.contains("Синтетический кассир"))
+            val after = dependencies.agent.getSession(session.session.id)
+            assertEquals(imported.session.revision + 1, after.session.revision)
+            assertEquals(imported.draft?.transactions, after.draft?.transactions)
+            assertNull(after.draft!!.transactions.first().transaction.receiptAssociation)
+            assertTrue(after.draft!!.transactions.first().transaction.items.isEmpty())
+        } finally {
+            dependencies.scheduler?.close()
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun receiptInfoUsesPersistedSnapshotWithoutRefetchingSource() = runBlocking {
+        val database = Files.createTempFile("native-receipt-info-snapshot-", ".sqlite")
+        val planner = ApplicationActionPlanGateway(
+            action = "app_read_receipt_catalog",
+            followingActions = listOf(
+                "app_read_receipt_info" to
+                    """{"operation_ref":"receipt-operation-1","fields":["settlement_place","items"]}""",
+            ),
+        )
+        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val source = ReceiptAssociationFixture()
+        val session = dependencies.agent.createSession(
+            "Synthetic saved receipt info",
+            dependencies.runtimeConfig.defaultAgentConfig(),
+        )
+        try {
+            val imported = dependencies.agent.sendMessage(
+                sessionId = session.session.id,
+                expectedRevision = session.session.revision,
+                text = "Синтетическая выписка",
+            )
+            val row = imported.draft!!.transactions.first()
+            val savedReceipt = dependencies.agent.recordReceiptAssociation(
+                sessionId = session.session.id,
+                expectedRevision = imported.session.revision,
+                userText = "Свяжи synthetic receipt.",
+                assistantText = "Связь принята.",
+                updates = mapOf(
+                    row.id to io.github.stolex1y.transactionimport.core.ReceiptMatchUpdate(
+                        status = ReceiptAssociationStatus.MATCHED,
+                        items = listOf(
+                            io.github.stolex1y.transactionimport.core.TransactionItem(
+                                name = "Сохранённая позиция",
+                                quantity = 1.0,
+                                priceMinor = row.transaction.amountMinor,
+                                sumMinor = row.transaction.amountMinor,
+                                currency = row.transaction.currency,
+                            ),
+                        ),
+                        summary = io.github.stolex1y.transactionimport.core.ReceiptAssociationSummary(
+                            date = "2026-02-08",
+                            merchant = "Синтетический продавец",
+                            amountMinor = row.transaction.amountMinor,
+                            currency = row.transaction.currency,
+                            dateTime = "2026-02-08T12:20:00Z",
+                            settlementPlace = "Сохранённое место",
+                            privacyVersion =
+                                io.github.stolex1y.transactionimport.core.ReceiptAssociationSummary
+                                    .CURRENT_PRIVACY_VERSION,
+                        ),
+                    ),
+                ),
+                persistRule = false,
+            )
+            val native = NativeMcpAgent(
+                agent = dependencies.agent,
+                gatewayResolver = AgentGatewayResolver { planner },
+                mcpTools = source,
+                runtimeConfig = nativeMcpEnabled(dependencies.runtimeConfig),
+            )
+            val result = native.handle(
+                sessionId = session.session.id,
+                expectedRevision = savedReceipt.session.revision,
+                text = "Что куплено и где рассчитались?",
+            )
+
+            assertIs<NativeMcpHandlingResult.Handled>(result)
+            assertEquals(0, source.searchCalls)
+            assertEquals(0, source.detailCalls)
+            val infoResult = planner.requests.last().messages.last().content
+            assertTrue(infoResult.contains("Сохранённая позиция"))
+            assertTrue(infoResult.contains("Сохранённое место"))
+            assertTrue(infoResult.contains("available"))
+            val after = dependencies.agent.getSession(session.session.id)
+            assertEquals(savedReceipt.session.revision + 1, after.session.revision)
+            assertEquals(savedReceipt.draft?.transactions, after.draft?.transactions)
+        } finally {
+            dependencies.scheduler?.close()
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun readOnlyReceiptPlanCannotContinueIntoAssociation() = runBlocking {
+        val database = Files.createTempFile("native-receipt-read-only-plan-", ".sqlite")
+        val planner = ApplicationActionPlanGateway(
+            action = "app_read_receipt_catalog",
+            followingActions = listOf(
+                "app_read_receipt_info" to
+                    """{"operation_ref":"receipt-operation-1","fields":["items"]}""",
+                "app_associate_receipts" to "{}",
+            ),
+        )
+        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val source = ReceiptAssociationFixture()
+        val session = dependencies.agent.createSession(
+            "Synthetic read-only plan",
+            dependencies.runtimeConfig.defaultAgentConfig(),
+        )
+        try {
+            val imported = dependencies.agent.sendMessage(
+                sessionId = session.session.id,
+                expectedRevision = session.session.revision,
+                text = "Синтетическая выписка",
+            )
+            val native = NativeMcpAgent(
+                agent = dependencies.agent,
+                gatewayResolver = AgentGatewayResolver { planner },
+                mcpTools = source,
+                runtimeConfig = nativeMcpEnabled(dependencies.runtimeConfig),
+                receiptMatchSelector = ReceiptMatchSelector { _, _, choices, _, _ ->
+                    ReceiptSelectionResponseView(choices.single().alias, 0.98)
+                },
+            )
+            val failure = runCatching {
+                native.handle(
+                    sessionId = session.session.id,
+                    expectedRevision = imported.session.revision,
+                    text = "Покажи позиции чека.",
+                )
+            }.exceptionOrNull()
+
+            assertIs<AgentResponseException>(failure)
+            val after = dependencies.agent.getSession(session.session.id)
+            assertEquals(imported.draft?.transactions, after.draft?.transactions)
+            assertTrue(after.draft!!.transactions.all { it.transaction.receiptAssociation == null })
+        } finally {
+            dependencies.scheduler?.close()
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun receiptInfoAmbiguityReturnsSafeOptionsWithoutAssociation() = runBlocking {
+        val database = Files.createTempFile("native-receipt-info-ambiguous-", ".sqlite")
+        val planner = ApplicationActionPlanGateway(
+            action = "app_read_receipt_catalog",
+            followingActions = listOf(
+                "app_read_receipt_info" to
+                    """{"operation_ref":"receipt-operation-1","fields":["items"]}""",
+            ),
+        )
+        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val source = ReceiptAssociationFixture(includeSecondReceipt = true)
+        val session = dependencies.agent.createSession(
+            "Synthetic ambiguous receipt info",
+            dependencies.runtimeConfig.defaultAgentConfig(),
+        )
+        try {
+            val imported = dependencies.agent.sendMessage(
+                sessionId = session.session.id,
+                expectedRevision = session.session.revision,
+                text = "Синтетическая выписка",
+            )
+            val native = NativeMcpAgent(
+                agent = dependencies.agent,
+                gatewayResolver = AgentGatewayResolver { planner },
+                mcpTools = source,
+                runtimeConfig = nativeMcpEnabled(dependencies.runtimeConfig),
+                receiptMatchSelector = ReceiptMatchSelector { _, _, _, _, _ ->
+                    ReceiptSelectionResponseView(receiptAlias = null, confidence = 0.0)
+                },
+            )
+            val result = native.handle(
+                sessionId = session.session.id,
+                expectedRevision = imported.session.revision,
+                text = "Покажи позиции чека по этой операции.",
+            )
+
+            assertIs<NativeMcpHandlingResult.Handled>(result)
+            assertEquals(1, source.searchCalls)
+            assertEquals(2, source.detailCalls)
+            val infoResult = planner.requests.last().messages.last().content
+            assertTrue(infoResult.contains("ambiguous"), infoResult)
+            assertTrue(infoResult.contains("multiple_candidates"))
+            assertTrue(infoResult.contains("Синтетическая торговая точка"))
+            assertFalse(infoResult.contains("synthetic-private-receipt-key"))
+            assertFalse(infoResult.contains("synthetic-fiscal-id"))
+            val after = dependencies.agent.getSession(session.session.id)
+            assertEquals(
+                imported.draft?.transactions,
+                after.draft?.transactions,
+            )
+            assertTrue(after.draft!!.transactions.all { it.transaction.receiptAssociation == null })
+        } finally {
+            dependencies.scheduler?.close()
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun receiptInfoSourceFailureIsDistinctAndLeavesDraftUnchanged() = runBlocking {
+        val database = Files.createTempFile("native-receipt-info-error-", ".sqlite")
+        val planner = ApplicationActionPlanGateway(
+            action = "app_read_receipt_catalog",
+            followingActions = listOf(
+                "app_read_receipt_info" to
+                    """{"operation_ref":"receipt-operation-1","fields":["items"]}""",
+            ),
+        )
+        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val source = ReceiptAssociationFixture(requestFailure = "synthetic-private-upstream-error")
+        val session = dependencies.agent.createSession(
+            "Synthetic receipt info failure",
+            dependencies.runtimeConfig.defaultAgentConfig(),
+        )
+        try {
+            val imported = dependencies.agent.sendMessage(
+                sessionId = session.session.id,
+                expectedRevision = session.session.revision,
+                text = "Синтетическая выписка",
+            )
+            val native = NativeMcpAgent(
+                agent = dependencies.agent,
+                gatewayResolver = AgentGatewayResolver { planner },
+                mcpTools = source,
+                runtimeConfig = nativeMcpEnabled(dependencies.runtimeConfig),
+            )
+            val result = native.handle(
+                sessionId = session.session.id,
+                expectedRevision = imported.session.revision,
+                text = "Покажи позиции чека.",
+            )
+
+            assertIs<NativeMcpHandlingResult.Handled>(result)
+            val infoResult = planner.requests.last().messages.last().content
+            assertTrue(infoResult.contains("source_error"))
+            assertFalse(infoResult.contains("не найден"))
+            assertFalse(infoResult.contains("synthetic-private-upstream-error"))
+            val after = dependencies.agent.getSession(session.session.id)
+            assertEquals(imported.session.revision + 1, after.session.revision)
+            assertEquals(imported.draft?.transactions, after.draft?.transactions)
+            assertEquals(0, source.detailCalls)
         } finally {
             dependencies.scheduler?.close()
             database.deleteIfExists()
@@ -750,6 +1064,25 @@ class NativeMcpAgentTest {
                 ReceiptAssociationStatus.MATCHED,
                 firstDraft.transactions.single().transaction.receiptAssociation?.status,
             )
+
+            DriverManager.getConnection("jdbc:sqlite:${database}").use { connection ->
+                connection.prepareStatement(
+                    """
+                        UPDATE draft_transactions
+                        SET transaction_json = replace(
+                            transaction_json, '"privacy_version":1', '"privacy_version":0'
+                        )
+                        WHERE session_id = ?
+                    """.trimIndent(),
+                ).use { statement ->
+                    statement.setString(1, session.session.id)
+                    assertEquals(1, statement.executeUpdate())
+                }
+            }
+            val legacyState = dependencies.agent.getSession(session.session.id)
+            assertNull(legacyState.draft!!.transactions.first().transaction.receiptAssociation?.summary)
+            assertTrue(legacyState.draft!!.transactions.first().transaction.items.isEmpty())
+            assertFalse(legacyState.toString().contains("synthetic-private-receipt-key-first"))
 
             val secondPreviewResponse = assertIs<NativeMcpHandlingResult.Handled>(
                 native.handle(
@@ -1495,25 +1828,26 @@ private fun nativeMcpEnabled(config: AgentRuntimeConfig): AgentRuntimeConfig =
 private class ApplicationActionPlanGateway(
     private val action: String,
     private val arguments: String = "{}",
+    private val followingActions: List<Pair<String, String>> = emptyList(),
 ) : ChatCompletionGateway {
     val requests = mutableListOf<ChatCompletionRequest>()
     private var index = 0
 
     override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
         requests += request
-        val message = if (index++ == 0) {
+        val actions = listOf(action to arguments) + followingActions
+        val responseIndex = index++
+        val message = actions.getOrNull(responseIndex)?.let { (name, args) ->
             ResponseMessage(
                 content = null,
                 toolCalls = listOf(
                     ChatToolCall(
-                        id = "application-action",
-                        function = ChatFunctionCall(name = action, arguments = arguments),
+                        id = "application-action-$responseIndex",
+                        function = ChatFunctionCall(name = name, arguments = args),
                     ),
                 ),
             )
-        } else {
-            ResponseMessage(content = "Синтетическое действие завершено.")
-        }
+        } ?: ResponseMessage(content = "Синтетическое действие завершено.")
         return ChatCompletionResponse(
             choices = listOf(ChatChoice(message = message, finishReason = "stop")),
         )

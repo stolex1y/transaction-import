@@ -3,6 +3,7 @@ package io.github.stolex1y.transactionimport.web
 import io.github.stolex1y.transactionimport.core.AgentConfig
 import io.github.stolex1y.transactionimport.core.ExternalTransactionCandidate
 import io.github.stolex1y.transactionimport.core.ReceiptAssociationStatus
+import io.github.stolex1y.transactionimport.core.ReceiptReviewReason
 import io.github.stolex1y.transactionimport.core.SchedulerTraceEvent
 import io.github.stolex1y.transactionimport.core.TransactionItem
 import kotlinx.coroutines.runBlocking
@@ -12,9 +13,67 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ReceiptMatchingTest {
+
+    @Test
+    fun avoidsReceiptSourceCallsWhenNoConfirmedPurchaseExists() = runBlocking {
+        val source = RecordingReceiptSource(pages = emptyMap(), details = emptyMap())
+        val result = ReceiptMatchingEngine(
+            mcpTools = source,
+            selector = ReceiptMatchSelector { _, _, _, _, _ ->
+                error("Unknown/non-purchase operations must not reach the selector.")
+            },
+        ).match(
+            transactions = listOf(
+                candidate("transfer", "2026-09-10", -500, "RUB", "Перевод"),
+                candidate("income", "2026-09-10", 500, "RUB", "Зачисление"),
+                candidate("unknown", "2026-09-10", -500, "RUB", "Неизвестный тип")
+                    .copy(categoryId = null),
+            ),
+            config = testConfig,
+        )
+
+        assertTrue(source.searchCalls.isEmpty())
+        assertTrue(source.detailCalls.isEmpty())
+        assertEquals(ReceiptAssociationStatus.UNMATCHED, result.transactions[0].receiptAssociation?.status)
+        assertEquals(ReceiptAssociationStatus.UNMATCHED, result.transactions[1].receiptAssociation?.status)
+        assertEquals(ReceiptAssociationStatus.AMBIGUOUS, result.transactions[2].receiptAssociation?.status)
+    }
+
+    @Test
+    fun receiptSearchOnlyConsidersPurchaseAndKeepsUnknownTypeForReview() = runBlocking {
+        val source = singleReceiptSource(detail("2026-09-10T10:00:00Z", 500, "RUB", "Синтетический продавец"))
+        val result = ReceiptMatchingEngine(
+            mcpTools = source,
+            selector = ReceiptMatchSelector { _, _, choices, _, _ ->
+                assertEquals(1, choices.size)
+                ReceiptSelectionResponseView(choices.single().alias, 0.96)
+            },
+        ).match(
+            transactions = listOf(
+                candidate("purchase", "2026-09-10T10:00:00Z", -500, "RUB", "Покупка"),
+                candidate("transfer", "2026-09-10T10:00:00Z", -500, "RUB", "Получатель")
+                    .copy(description = "Перевод между своими счетами", categoryId = null),
+                candidate("income", "2026-09-10T10:00:00Z", 500, "RUB", "Зачисление"),
+                candidate("unknown", "2026-09-10T10:00:00Z", -500, "RUB", "Операция без типа")
+                    .copy(categoryId = null, items = listOf(TransactionItem("Старая позиция", 1.0, 500, 500))),
+            ),
+            config = testConfig,
+        )
+
+        assertEquals(1, source.searchCalls.size)
+        assertEquals(1, source.detailCalls.size)
+        assertEquals(ReceiptAssociationStatus.MATCHED, result.transactions[0].receiptAssociation?.status)
+        assertEquals(ReceiptAssociationStatus.UNMATCHED, result.transactions[1].receiptAssociation?.status)
+        assertEquals(ReceiptAssociationStatus.UNMATCHED, result.transactions[2].receiptAssociation?.status)
+        assertEquals(ReceiptAssociationStatus.AMBIGUOUS, result.transactions[3].receiptAssociation?.status)
+        assertEquals(ReceiptReviewReason.OPERATION_TYPE_UNKNOWN, result.transactions[3].receiptAssociation?.review?.reason)
+        assertTrue(result.transactions.drop(1).all { it.items.isEmpty() })
+    }
+
     @Test
     fun searchesWholePeriodFiltersLocallyAndFetchesOnlyCandidateDetailsOnce() = runBlocking {
         val source = RecordingReceiptSource(
@@ -85,6 +144,10 @@ class ReceiptMatchingTest {
         assertEquals("Синтетическая булочная", first.receiptAssociation?.summary?.merchant)
         assertEquals(500L, first.receiptAssociation?.summary?.amountMinor)
         assertEquals("RUB", first.receiptAssociation?.summary?.currency)
+        assertEquals(
+            io.github.stolex1y.transactionimport.core.ReceiptAssociationSummary.CURRENT_PRIVACY_VERSION,
+            first.receiptAssociation?.summary?.privacyVersion,
+        )
         assertEquals(listOf("Синтетическая позиция"), first.items.map(TransactionItem::name))
         assertEquals("Банковский продавец 2", result.transactions[1].merchant)
         assertEquals(ReceiptAssociationStatus.MATCHED, result.transactions[1].receiptAssociation?.status)
@@ -124,6 +187,11 @@ class ReceiptMatchingTest {
         assertEquals(0, selectorCalls)
         assertTrue(result.transactions.all { it.receiptAssociation?.status == ReceiptAssociationStatus.AMBIGUOUS })
         assertTrue(result.transactions.all { it.issues.any { issue -> issue.startsWith("receipt_ambiguous:") } })
+        val review = result.transactions.first().receiptAssociation?.review
+        assertEquals(ReceiptReviewReason.SHARED_BY_OPERATIONS, review?.reason)
+        assertEquals(1, review?.candidates?.size)
+        assertEquals("Синтетическая торговая точка", review?.candidates?.single()?.settlementPlace)
+        assertEquals("2026-09-10T10:00Z", review?.candidates?.single()?.dateTime)
     }
 
     @Test
@@ -222,6 +290,8 @@ class ReceiptMatchingTest {
         )
         assertEquals("null", observedSettlementPlace)
         assertEquals(ReceiptAssociationStatus.MATCHED, validResult.transactions.single().receiptAssociation?.status)
+        assertEquals("2026-09-10T10:00Z", validResult.transactions.single().receiptAssociation?.summary?.dateTime)
+        assertEquals(null, validResult.transactions.single().receiptAssociation?.summary?.settlementPlace)
 
         assertFailsWith<ReceiptMatchingSourceException> {
             ReceiptMatchingEngine(
@@ -234,6 +304,80 @@ class ReceiptMatchingTest {
         }
     }
 
+
+    @Test
+    fun dateTimeWithUnparsedSuffixIsRejectedBeforePersistence() = runBlocking {
+        val maliciousDate = detailWithSettlementPlace("null")
+            .replace("2026-09-10T10:00:00Z", "2026-09-10T10:00:00Z synthetic-private-key")
+        assertFailsWith<ReceiptMatchingSourceException> {
+            ReceiptMatchingEngine(
+                singleReceiptSource(maliciousDate),
+                ReceiptMatchSelector { _, _, _, _, _ -> null },
+            ).match(
+                transactions = listOf(candidate("bank-row", "2026-09-10", -500, "RUB", "Продавец")),
+                config = testConfig,
+            )
+        }
+    }
+
+    @Test
+    fun echoedReceiptKeyIsRemovedFromAllowlistedTextFields() = runBlocking {
+        val key = "a14f9876-35db-4d44-9aab-8bf1a8727e09"
+        val detail = """
+            {"date_time":"2026-09-10T10:00:00Z","total_minor":500,"currency":"RUB",
+             "merchant":"$key","settlement_place":"Кафе $key",
+             "items":[{"name":"Товар $key","quantity":1,"price_minor":500,"sum_minor":500}]}
+        """.trimIndent()
+        val selectorMerchants = mutableListOf<String>()
+        val result = ReceiptMatchingEngine(
+            singleReceiptSource(detail, key),
+            ReceiptMatchSelector { _, _, choices, _, _ ->
+                selectorMerchants += choices.single().merchant
+                ReceiptSelectionResponseView(choices.single().alias, 0.98)
+            },
+        ).match(
+            transactions = listOf(candidate("bank-row", "2026-09-10", -500, "RUB", "Продавец")),
+            config = testConfig,
+            explicitInstruction = "Привяжи найденный чек.",
+        )
+        val safeOutput = listOf(
+            result.transactions.single().receiptAssociation?.summary,
+            result.transactions.single().items,
+            selectorMerchants,
+        ).toString()
+
+        assertTrue(result.transactions.single().receiptAssociation?.status == ReceiptAssociationStatus.MATCHED)
+        assertTrue(selectorMerchants.single().contains("скрыта"))
+        assertFalse(safeOutput.contains(key))
+    }
+
+    @Test
+    fun buyerLabelsAreRemovedFromReceiptDetailTextBeforePersistence() = runBlocking {
+        val buyerName = "Synthetic Buyer Identity"
+        val key = "synthetic-buyer-receipt"
+        val detail = """
+            {"date_time":"2026-09-10T10:00:00Z","total_minor":500,"currency":"RUB",
+             "merchant":"Продавец","settlement_place":"Покупатель: $buyerName",
+             "items":[{"name":"Buyer: $buyerName","quantity":1,"price_minor":500,"sum_minor":500}]}
+        """.trimIndent()
+        val result = ReceiptMatchingEngine(
+            singleReceiptSource(detail, key),
+            ReceiptMatchSelector { _, _, choices, _, _ ->
+                ReceiptSelectionResponseView(choices.single().alias, 0.98)
+            },
+        ).match(
+            transactions = listOf(candidate("buyer-private-row", "2026-09-10", -500, "RUB", "Продавец")),
+            config = testConfig,
+            explicitInstruction = "Привяжи найденный чек.",
+        )
+        val storedText = listOf(
+            result.transactions.single().receiptAssociation?.summary,
+            result.transactions.single().items,
+        ).toString()
+
+        assertTrue(result.transactions.single().receiptAssociation?.status == ReceiptAssociationStatus.MATCHED)
+        assertFalse(storedText.contains(buyerName))
+    }
 
     @Test
     fun explicitInstructionTargetsOnlyTheNamedOperationWhenReceiptIsShared() = runBlocking {

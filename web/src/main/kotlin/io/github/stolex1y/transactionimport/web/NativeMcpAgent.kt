@@ -19,6 +19,8 @@ import io.github.stolex1y.transactionimport.core.ModelCallStatus
 import io.github.stolex1y.transactionimport.core.ReceiptAssociation
 import io.github.stolex1y.transactionimport.core.ReceiptAssociationStatus
 import io.github.stolex1y.transactionimport.core.ReceiptAssociationSummary
+import io.github.stolex1y.transactionimport.core.ReceiptReviewEvidence
+import io.github.stolex1y.transactionimport.core.ReceiptReviewReason
 import io.github.stolex1y.transactionimport.core.ReceiptMatchUpdate
 import io.github.stolex1y.transactionimport.core.RequestMessage
 import io.github.stolex1y.transactionimport.core.TransactionItem
@@ -45,6 +47,7 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
 import java.time.LocalDate
+import io.github.stolex1y.transactionimport.core.TransactionDirection
 import java.time.ZoneId
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -72,6 +75,47 @@ private const val MAX_RECEIPT_INSTRUCTION_MESSAGE_CHARS = 2_000
 
 private const val APP_ROUTE_TO_AGENT = "app_route_to_agent"
 private const val APP_ASSOCIATE_RECEIPTS = "app_associate_receipts"
+private const val APP_READ_RECEIPT_CATALOG = "app_read_receipt_catalog"
+private const val APP_READ_RECEIPT_INFO = "app_read_receipt_info"
+private const val MAX_RECEIPT_CATALOG_ROWS = 100
+
+@Serializable
+private data class ReceiptInfoCatalogResponse(
+    val truncated: Boolean,
+    val operations: List<ReceiptInfoCatalogOperation>,
+)
+
+@Serializable
+private data class ReceiptInfoCatalogOperation(
+    @SerialName("operation_ref") val operationRef: String,
+    @SerialName("operation_date") val operationDate: String,
+    @SerialName("operation_merchant") val operationMerchant: String,
+    @SerialName("operation_amount_minor") val operationAmountMinor: Long,
+    @SerialName("operation_currency") val operationCurrency: String,
+    @SerialName("receipt_status") val receiptStatus: String,
+    @SerialName("available_fields") val availableFields: List<String>,
+    val summary: ReceiptAssociationSummary? = null,
+    val review: ReceiptReviewEvidence? = null,
+)
+
+@Serializable
+private data class ReceiptInfoResponse(
+    val status: String,
+    val summary: ReceiptAssociationSummary? = null,
+    val review: ReceiptReviewEvidence? = null,
+    val items: List<TransactionItem>? = null,
+    val message: String? = null,
+)
+
+private data class ReceiptInfoRequest(
+    val operationRef: String,
+    val fields: Set<String>,
+)
+
+private val receiptInfoJson = Json {
+    explicitNulls = false
+    encodeDefaults = true
+}
 
 @Serializable
 enum class ReceiptMatchingStageStatus {
@@ -252,6 +296,7 @@ suspend fun handle(
     }
     val toolSchemasByFunction = functionDefinitions.associate { it.function.name to it.function.parameters }
     val schedulerAliases = linkedMapOf<String, String>()
+    val receiptRowRefs = linkedMapOf<String, String>()
     val candidates = mutableListOf<ExternalTransactionCandidate>()
     val redactedValues = mutableSetOf<String>()
     var response: ChatCompletionResponse
@@ -259,6 +304,8 @@ suspend fun handle(
     var toolCalls = 0
     var lastFetchArguments: JsonObject? = null
     var receiptsRequested = false
+    var receiptCatalogLoaded = false
+    var receiptInfoRead = false
     var persistReceiptRule = false
     var receiptRulePersistenceDeferred = false
     var transactionFetchCompleted = false
@@ -432,9 +479,33 @@ suspend fun handle(
                 "Сопоставление чеков должно идти отдельным шагом после получения операций.",
             )
         }
+        if (receiptCatalogLoaded && calls.any { it.function.name != APP_READ_RECEIPT_INFO }) {
+            throw AgentResponseException("После чтения каталога разрешён только отдельный шаг чтения сведений о чеке.")
+        }
+        if (receiptInfoRead && calls.isNotEmpty()) {
+            throw AgentResponseException("План завершён после чтения сведений о чеке; другие действия запрещены.")
+        }
+        val receiptCatalogCallCount = calls.count { it.function.name == APP_READ_RECEIPT_CATALOG }
+        val receiptInfoCallCount = calls.count { it.function.name == APP_READ_RECEIPT_INFO }
+        if (receiptCatalogCallCount + receiptInfoCallCount > 1 || (receiptCatalogCallCount > 0 && receiptInfoRead)) {
+            throw AgentResponseException("План содержит повторный шаг чтения чека.")
+        }
+        if (receiptCatalogCallCount > 0 &&
+            (calls.size != 1 || previousToolCalls != 0 || candidates.isNotEmpty() || receiptCatalogLoaded)
+        ) {
+            throw AgentResponseException("Каталог чеков должен быть отдельным первым шагом.")
+        }
+        if (receiptInfoCallCount > 0 &&
+            (calls.size != 1 || !receiptCatalogLoaded || receiptInfoRead || candidates.isNotEmpty() || receiptsRequested)
+        ) {
+            throw AgentResponseException("Детали чека можно читать только после каталога и отдельным шагом.")
+        }
         val receiptActionCount = calls.count { it.function.name == APP_ASSOCIATE_RECEIPTS }
         if (receiptActionCount > 1 || (receiptsRequested && receiptActionCount > 0)) {
             throw AgentResponseException("План содержит повторный шаг сопоставления чеков.")
+        }
+        if (receiptActionCount > 0 && (receiptCatalogCallCount > 0 || receiptInfoCallCount > 0)) {
+            throw AgentResponseException("Сопоставление и чтение чеков выполняются разными действиями.")
         }
         if (receiptActionCount > 0 && calls.size != 1) {
             throw AgentResponseException("Сопоставление чеков должно выполняться отдельным шагом.")
@@ -458,6 +529,17 @@ suspend fun handle(
                         )
                     }
                     PreparedPlanCall.AssociateReceipts(call, requestedRule)
+                }
+                APP_READ_RECEIPT_CATALOG -> {
+                    requireEmptyActionArguments(rawArguments)
+                    PreparedPlanCall.ReadReceiptCatalog(call)
+                }
+
+                APP_READ_RECEIPT_INFO -> {
+                    val request = parseReceiptInfoRequest(rawArguments)
+                    val rowId = receiptRowRefs[request.operationRef]
+                        ?: throw AgentResponseException("Ссылка на операцию недоступна или устарела.")
+                    PreparedPlanCall.ReadReceiptInfo(call, rowId, request.fields)
                 }
 
                 else -> {
@@ -510,6 +592,32 @@ suspend fun handle(
                     messages += RequestMessage(
                         role = "tool",
                         content = "Шаг принят; сопоставление выполнится после завершения текущего плана.",
+                        toolCallId = planned.call.id,
+                        name = planned.call.function.name,
+                    )
+                }
+                is PreparedPlanCall.ReadReceiptCatalog -> {
+                    receiptRowRefs.clear()
+                    messages += RequestMessage(
+                        role = "tool",
+                        content = receiptCatalogResponse(state, receiptRowRefs),
+                        toolCallId = planned.call.id,
+                        name = planned.call.function.name,
+                    )
+                    receiptCatalogLoaded = true
+                }
+
+                is PreparedPlanCall.ReadReceiptInfo -> {
+                    receiptInfoRead = true
+                    messages += RequestMessage(
+                        role = "tool",
+                        content = receiptInfoResponse(
+                            state = state,
+                            rowId = planned.rowId,
+                            fields = planned.fields,
+                            userText = text,
+                            receiptsAvailable = receiptsAvailable,
+                        ),
                         toolCallId = planned.call.id,
                         name = planned.call.function.name,
                     )
@@ -600,6 +708,20 @@ private fun applicationActions(
             "Используй как единственный первый шаг, не вызывая MCP tools.",
     )
     if (
+        pending == null && state.draft?.transactions?.isNotEmpty() == true
+    ) {
+        put(
+            APP_READ_RECEIPT_CATALOG,
+            "Для явного вопроса пользователя о receipt сначала получить краткий каталог " +
+                "операций и safe receipt status/candidates. Не вызывать это действие для обычного чата.",
+        )
+        put(
+            APP_READ_RECEIPT_INFO,
+            "После app_read_receipt_catalog получить только запрошенные поля receipt по operation_ref. " +
+                "Действие read-only: не связывает receipt и не меняет draft.",
+        )
+    }
+    if (
         (pending == null && state.draft?.transactions?.isNotEmpty() == true) ||
         transactionSourceAvailable
     ) {
@@ -627,8 +749,8 @@ private fun appActionDefinition(name: String, description: String): ChatToolDefi
                 put("type", "object")
                 put(
                     "properties",
-                    if (name == APP_ASSOCIATE_RECEIPTS) {
-                        buildJsonObject {
+                    when (name) {
+                        APP_ASSOCIATE_RECEIPTS -> buildJsonObject {
                             put(
                                 "remember_rule",
                                 buildJsonObject {
@@ -637,14 +759,53 @@ private fun appActionDefinition(name: String, description: String): ChatToolDefi
                                 },
                             )
                         }
-                    } else {
-                        buildJsonObject {}
+                        APP_READ_RECEIPT_INFO -> buildJsonObject {
+                            put(
+                                "operation_ref",
+                                buildJsonObject {
+                                    put("type", "string")
+                                    put("description", "Только ref из результата app_read_receipt_catalog")
+                                },
+                            )
+                            put(
+                                "fields",
+                                buildJsonObject {
+                                    put("type", "array")
+                                    put("minItems", 1)
+                                    put("maxItems", 5)
+                                    put("uniqueItems", true)
+                                    put(
+                                        "items",
+                                        buildJsonObject {
+                                            put("type", "string")
+                                            putJsonArray("enum") {
+                                                listOf(
+                                                    "merchant",
+                                                    "settlement_place",
+                                                    "date_time",
+                                                    "total",
+                                                    "items",
+                                                ).forEach { add(JsonPrimitive(it)) }
+                                            }
+                                        },
+                                    )
+                                },
+                            )
+                        }
+                        else -> buildJsonObject {}
                     },
                 )
+                if (name == APP_READ_RECEIPT_INFO) {
+                    putJsonArray("required") {
+                        add(JsonPrimitive("operation_ref"))
+                        add(JsonPrimitive("fields"))
+                    }
+                }
                 put("additionalProperties", false)
             },
         ),
     )
+
 
 private fun requireEmptyActionArguments(arguments: JsonObject) {
     if (arguments.isNotEmpty()) {
@@ -658,6 +819,85 @@ private fun receiptRuleRequested(arguments: JsonObject): Boolean {
     val value = arguments["remember_rule"] ?: return false
     return (value as? JsonPrimitive)?.booleanOrNull
         ?: throw AgentResponseException("Значение remember_rule должно быть логическим.")
+}
+
+private val RECEIPT_INFO_FIELDS = setOf(
+    "merchant",
+    "settlement_place",
+    "date_time",
+    "total",
+    "items",
+)
+
+private fun parseReceiptInfoRequest(arguments: JsonObject): ReceiptInfoRequest {
+    if (arguments.keys != setOf("operation_ref", "fields")) {
+        throw AgentResponseException("Действие чтения чека получило недопустимые аргументы.")
+    }
+    val operationRef = (arguments["operation_ref"] as? JsonPrimitive)
+        ?.takeIf { it.isString }
+        ?.contentOrNull
+        ?.takeIf { RECEIPT_OPERATION_REF_PATTERN.matches(it) }
+        ?: throw AgentResponseException("Ссылка на операцию имеет неверный формат.")
+    val rawFields = arguments["fields"] as? JsonArray
+        ?: throw AgentResponseException("Список полей чека имеет неверный формат.")
+    val fields = rawFields.map { element ->
+        (element as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.contentOrNull
+            ?: throw AgentResponseException("Список полей чека имеет неверный формат.")
+    }
+    if (fields.isEmpty() || fields.size > RECEIPT_INFO_FIELDS.size ||
+        fields.size != fields.distinct().size || fields.any { it !in RECEIPT_INFO_FIELDS }
+    ) {
+        throw AgentResponseException("Список полей чека не прошёл проверку.")
+    }
+    return ReceiptInfoRequest(operationRef, fields.toSet())
+}
+
+private val RECEIPT_OPERATION_REF_PATTERN = Regex("""^receipt-operation-[1-9][0-9]{0,2}$""")
+
+private fun receiptCatalogResponse(
+    state: ImportSessionState,
+    rowRefs: MutableMap<String, String>,
+): String {
+    val rows = state.draft?.transactions.orEmpty()
+    val visibleRows = rows.take(MAX_RECEIPT_CATALOG_ROWS)
+    val operations = visibleRows.mapIndexed { index, row ->
+        val reference = "receipt-operation-${index + 1}"
+        rowRefs[reference] = row.id
+        val transaction = row.transaction
+        val association = transaction.receiptAssociation
+        val summary = association?.summary
+        val availableFields = buildList {
+            if (summary?.merchant != null) add("merchant")
+            if (summary?.settlementPlace != null) add("settlement_place")
+            if (summary?.dateTime != null) add("date_time")
+            if (summary != null) add("total")
+            if (transaction.items.isNotEmpty()) add("items")
+        }
+        ReceiptInfoCatalogOperation(
+            operationRef = reference,
+            operationDate = transaction.occurredAt,
+            operationMerchant = transaction.merchant,
+            operationAmountMinor = if (transaction.direction == TransactionDirection.EXPENSE) {
+                -transaction.amountMinor
+            } else {
+                transaction.amountMinor
+            },
+            operationCurrency = transaction.currency,
+            receiptStatus = association?.status?.name?.lowercase() ?: "unmatched",
+            availableFields = availableFields,
+            summary = summary,
+            review = association?.review,
+        )
+    }
+    return receiptInfoJson.encodeToString(
+        ReceiptInfoCatalogResponse.serializer(),
+        ReceiptInfoCatalogResponse(
+            truncated = rows.size > visibleRows.size,
+            operations = operations,
+        ),
+    )
 }
 
 private fun receiptInstructionContext(
@@ -698,6 +938,114 @@ private fun safeReceiptInstruction(instructionContext: List<RequestMessage>): St
             add("${message.role}: ${sanitizeReceiptMatchingText(redactText(message.content))}")
         }
 }.joinToString("\n")
+
+private suspend fun receiptInfoResponse(
+    state: ImportSessionState,
+    rowId: String,
+    fields: Set<String>,
+    userText: String,
+    receiptsAvailable: Boolean,
+): String {
+    val row = state.draft?.transactions?.singleOrNull { it.id == rowId }
+        ?: return receiptInfoJson.encodeToString(
+            ReceiptInfoResponse.serializer(),
+            ReceiptInfoResponse(status = "operation_unavailable", message = "Операция больше недоступна."),
+        )
+    val transaction = row.transaction
+    val existingAssociation = transaction.receiptAssociation
+    val existingSummary = existingAssociation?.summary
+    fun available(field: String): Boolean = when (field) {
+        "merchant" -> existingSummary?.merchant?.isNotBlank() == true
+        "settlement_place" -> existingSummary?.settlementPlace != null
+        "date_time" -> existingSummary?.dateTime != null
+        "total" -> existingSummary != null
+        "items" -> transaction.items.isNotEmpty()
+        else -> false
+    }
+    val missing = fields.filterNot(::available)
+    val includeSummary = fields.any { it != "items" }
+    fun encode(
+        status: String,
+        summary: ReceiptAssociationSummary? = existingSummary.takeIf { includeSummary },
+        review: ReceiptReviewEvidence? = existingAssociation?.review,
+        items: List<TransactionItem>? = transaction.items.takeIf { "items" in fields && it.isNotEmpty() },
+        message: String? = null,
+    ): String = receiptInfoJson.encodeToString(
+        ReceiptInfoResponse.serializer(),
+        ReceiptInfoResponse(status, summary, review, items, message),
+    )
+    if (missing.isEmpty()) return encode("available")
+    if (existingAssociation?.status == ReceiptAssociationStatus.MATCHED) {
+        return encode(
+            status = "saved_details_unavailable",
+            message = "Сохранённая связь не содержит запрошенные сведения; другой чек не подставлен.",
+        )
+    }
+    if (!receiptsAvailable) {
+        return encode(
+            status = "source_unavailable",
+            message = "Источник чеков не настроен; сохранённые сведения не изменены.",
+        )
+    }
+    val candidate = ExternalTransactionCandidate(
+        occurredAt = transaction.occurredAt,
+        postedAt = transaction.postedAt,
+        amountMinor = if (transaction.direction == TransactionDirection.EXPENSE) {
+            -transaction.amountMinor
+        } else {
+            transaction.amountMinor
+        },
+        currency = transaction.currency,
+        merchant = transaction.merchant,
+        description = row.description,
+        sourceLabel = transaction.sourceLabel,
+        categoryId = transaction.categoryId,
+        items = transaction.items,
+        receiptAssociation = existingAssociation,
+        sourceRef = row.id,
+    )
+    val matching = try {
+        receiptMatchingEngine.match(
+            transactions = listOf(candidate),
+            config = state.session.config,
+            explicitInstruction = safeReceiptInstruction(receiptInstructionContext(state, userText)),
+            strictSelector = true,
+        )
+    } catch (error: kotlinx.coroutines.CancellationException) {
+        throw error
+    } catch (_: ReceiptMatchingSourceException) {
+        return encode(
+            status = "source_error",
+            message = "Не удалось прочитать чек из источника; draft не изменён.",
+        )
+    } catch (_: ReceiptMatchingSelectionException) {
+        return encode(
+            status = "selector_error",
+            message = "Не удалось безопасно выбрать сведения о чеке; draft не изменён.",
+        )
+    }
+    val guarded = matching.transactions.withReceiptReuseGuard(state.receiptUsage(exceptRowId = row.id))
+        .single()
+    val association = guarded.receiptAssociation
+    val status = when (association?.status) {
+        ReceiptAssociationStatus.MATCHED -> "matched"
+        ReceiptAssociationStatus.AMBIGUOUS -> "ambiguous"
+        ReceiptAssociationStatus.UNMATCHED -> "unmatched"
+        ReceiptAssociationStatus.SOURCE_ERROR -> "source_error"
+        null -> "unmatched"
+    }
+    return encode(
+        status = status,
+        summary = association?.summary?.takeIf { includeSummary },
+        review = association?.review ?: existingAssociation?.review.takeIf { association == null },
+        items = guarded.items.takeIf { "items" in fields && it.isNotEmpty() },
+        message = when (status) {
+            "unmatched" -> "Подходящий чек не найден."
+            "ambiguous" -> "Нужен выбор пользователя; draft не изменён."
+            else -> null
+        },
+    )
+}
 
 private suspend fun handleReceiptAssociation(
     state: ImportSessionState,
@@ -780,6 +1128,7 @@ private suspend fun handleReceiptAssociation(
             status = association.status,
             items = candidate.items,
             summary = association.summary,
+            review = association.review,
         )
     }
     val matchedCount = updates.values.count { it.status == ReceiptAssociationStatus.MATCHED }
@@ -789,7 +1138,46 @@ private suspend fun handleReceiptAssociation(
         if (persistRule) add("Правило сохранено и применено к текущему draft.")
         if (matchedCount > 0) add("Привязано уникальных чеков: $matchedCount.")
         if (ambiguousCount > 0) {
-            add("Есть неоднозначные операции; уточните, какой чек относится к каждой из них.")
+            val explanations = updates.entries
+                .filter { it.value.status == ReceiptAssociationStatus.AMBIGUOUS }
+                .take(3)
+                .mapNotNull { (rowId, update) ->
+                    val review = update.review ?: return@mapNotNull null
+                    val transaction = draft.transactions.singleOrNull { it.id == rowId }?.transaction
+                    val operation = transaction?.let {
+                        "${it.occurredAt} ${sanitizeReceiptMatchingText(it.merchant)}"
+                    } ?: "Операция"
+                    val reason = when (review.reason) {
+                        ReceiptReviewReason.MULTIPLE_CANDIDATES -> "подошло несколько чеков"
+                        ReceiptReviewReason.SELECTOR_UNCERTAIN ->
+                            "система не смогла уверенно выбрать один чек"
+                        ReceiptReviewReason.SHARED_BY_OPERATIONS ->
+                            "один чек подходит нескольким операциям"
+                        ReceiptReviewReason.DUPLICATE_SELECTION ->
+                            "этот чек уже использован другой операцией"
+                        ReceiptReviewReason.OPERATION_TYPE_UNKNOWN ->
+                            "тип операции неизвестен; сначала подтвердите покупку"
+                    }
+                    val options = review.candidates.take(5).joinToString("; ") { summary ->
+                        buildString {
+                            append(summary.merchant)
+                            summary.settlementPlace?.let { append(" — ").append(it) }
+                            append(", ")
+                            append(summary.dateTime ?: summary.date)
+                            append(", ")
+                            append(formatMinorAmount(summary.amountMinor, summary.currency))
+                        }
+                    }.ifBlank { "без безопасно различимых вариантов" }
+                    "$operation: $reason. Варианты: $options."
+                }
+            if (explanations.isEmpty()) {
+                add("Есть неоднозначные операции; выберите чек в карточке операции.")
+            } else {
+                add(explanations.joinToString(" "))
+            }
+            if (ambiguousCount > 3) {
+                add("Ещё неоднозначных операций: ${ambiguousCount - 3}; варианты показаны в draft.")
+            }
         }
         if (unmatchedCount > 0) {
             add("Подходящих чеков для операций: $unmatchedCount; это не мешает экспорту.")
@@ -1075,6 +1463,11 @@ private data class BankReceiptMatch(
                     полному сообщению и контексту; фиксированные списки слов его не заменяют.
                     Сопоставление чеков выполняется только через typed-действие
                     app_associate_receipts; receipts tools напрямую не вызывай.
+                    Для явного вопроса пользователя о данных чека сначала вызови
+                    app_read_receipt_catalog. Это отдельный read-only путь: он не запускает
+                    сопоставление и не меняет draft. Затем вызови app_read_receipt_info только
+                    для нужной операции и полей merchant, settlement_place, date_time, total
+                    или items; при неоднозначности объясни причину и не выбирай чек за пользователя.
                     ${if (receiptsAvailable) {
                         "Источник чеков настроен. Если текущий план включает банковские " +
                             "операции и сопоставление чеков, сначала получи весь новый набор " +
@@ -1088,6 +1481,9 @@ private data class BankReceiptMatch(
                             "вернёт source_error и не заявит о выполненном сопоставлении. Не вызывай " +
                             "отсутствующие tools и не имитируй результат."
                     }}
+                    Каталог и результат read-only действия не содержат receipt keys, fiscal/QR
+                    identifiers, банковские идентификаторы, сведения о покупателе/кассире или
+                    полный upstream payload. Не запрашивай и не пересказывай такие данные.
                     Если запрос на receipt rule относится к операциям, которых ещё нет в draft,
                     после безопасного preview правило не сохраняй; запроси подтверждение импорта,
                     затем повтори применение правила к созданному draft.
@@ -1838,6 +2234,16 @@ private fun functionName(serverId: String, tool: String): String =
             val rememberRule: Boolean,
         ) : PreparedPlanCall
 
+        data class ReadReceiptCatalog(
+            override val call: ChatToolCall,
+        ) : PreparedPlanCall
+
+        data class ReadReceiptInfo(
+            override val call: ChatToolCall,
+            val rowId: String,
+            val fields: Set<String>,
+        ) : PreparedPlanCall
+
         data class Mcp(
             override val call: ChatToolCall,
             val rawArguments: JsonObject,
@@ -1979,9 +2385,9 @@ private data class ReceiptUsage(
     val hasUnidentifiableMatchedReceipt: Boolean,
 )
 
-private fun ImportSessionState.receiptUsage(): ReceiptUsage {
+private fun ImportSessionState.receiptUsage(exceptRowId: String? = null): ReceiptUsage {
     val matchedRows = draft?.transactions.orEmpty().filter { row ->
-        row.transaction.receiptAssociation?.status == ReceiptAssociationStatus.MATCHED
+        row.id != exceptRowId && row.transaction.receiptAssociation?.status == ReceiptAssociationStatus.MATCHED
     }
     val fingerprints = matchedRows.mapNotNull { row ->
         val summary = row.transaction.receiptAssociation?.summary ?: return@mapNotNull null
@@ -2019,9 +2425,16 @@ private fun List<ExternalTransactionCandidate>.withReceiptReuseGuard(
                 incomingFingerprintCounts[fingerprint] != 1 ||
                 fingerprint in used
             ) {
+                val selectedSummary = association.summary
                 candidate.copy(
                     items = emptyList(),
-                    receiptAssociation = ReceiptAssociation(ReceiptAssociationStatus.AMBIGUOUS),
+                    receiptAssociation = ReceiptAssociation(
+                        status = ReceiptAssociationStatus.AMBIGUOUS,
+                        review = ReceiptReviewEvidence(
+                            reason = ReceiptReviewReason.DUPLICATE_SELECTION,
+                            candidates = listOfNotNull(selectedSummary),
+                        ),
+                    ),
                 )
             } else {
                 used += fingerprint

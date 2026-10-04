@@ -478,6 +478,57 @@ class SmartExpenseAgentTest {
     }
 
     @Test
+    fun conflictingMerchantProposalIsReportedWithoutChangingSavedRule() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        val existingRule = MerchantCanonicalRule(
+            id = "existing-merchant-rule",
+            canonicalName = "Старое имя",
+            aliases = listOf("Coffeebon"),
+            createdAtEpochMs = 1L,
+        )
+        repository.saveLongTermMemory(
+            repository.readLongTermMemory().copy(merchantCanonicalRules = listOf(existingRule)),
+        )
+        val gateway = QueuedGateway(
+            initialDraftJson.replace("\"DEMO MARKET\"", "\"Coffeebon 37\""),
+            """
+                {
+                  "intent":"needs_clarification",
+                  "message":"Предложение готово.",
+                  "operations":[],
+                  "transactions":[],
+                  "memory_candidates":[],
+                  "merchant_canonical_candidates":[{
+                    "canonical_name":"КофеБон",
+                    "aliases":["Coffeebon"],
+                    "suffix_policy":"numeric_terminal",
+                    "reason":"Общее название."
+                  }],
+                  "persist_memory_candidate_indices":[],
+                  "persist_merchant_canonical_candidate_indices":[]
+                }
+            """.trimIndent(),
+        )
+        val agent = testAgent(repository, gateway)
+        val created = agent.createSession("Merchant conflict", defaultConfig)
+        val imported = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            text = "Выписка Coffeebon 37",
+        )
+        val proposed = agent.sendMessage(
+            sessionId = created.session.id,
+            expectedRevision = imported.session.revision,
+            text = "Предложи общее правило названия.",
+        )
+
+        assertEquals(listOf(existingRule), agent.getPreferences().merchantCanonicalRules)
+        assertTrue(proposed.merchantCanonicalCandidates.isEmpty())
+        assertTrue(proposed.messages.last().displayText.contains("конфликтует"))
+        assertTrue(proposed.messages.last().displayText.contains("изменений нет"))
+    }
+
+    @Test
     fun unselectedRuleCandidatesRemainPendingWhileCorrectionSucceeds() = runBlocking {
         val gateway = QueuedGateway(
             initialDraftJson,
@@ -969,6 +1020,8 @@ class SmartExpenseAgentTest {
                         merchant = "Синтетический магазин",
                         amountMinor = original.amountMinor,
                         currency = original.currency,
+                        dateTime = "2026-01-15T14:20:00Z",
+                        settlementPlace = "Синтетическая торговая точка",
                     ),
                 ),
                 noReceiptRow.id to ReceiptMatchUpdate(ReceiptAssociationStatus.UNMATCHED),
@@ -987,6 +1040,14 @@ class SmartExpenseAgentTest {
         assertEquals(bankRow.description, enriched.description)
         assertEquals(listOf("Синтетические яблоки"), enriched.transaction.items.map(TransactionItem::name))
         assertEquals(ReceiptAssociationStatus.MATCHED, enriched.transaction.receiptAssociation?.status)
+        assertEquals(
+            "2026-01-15T14:20:00Z",
+            enriched.transaction.receiptAssociation?.summary?.dateTime,
+        )
+        assertEquals(
+            "Синтетическая торговая точка",
+            enriched.transaction.receiptAssociation?.summary?.settlementPlace,
+        )
         assertEquals(ReceiptAssociationStatus.UNMATCHED, unmatched.transaction.receiptAssociation?.status)
         assertTrue(unmatched.transaction.issues.isEmpty())
         assertFalse(unmatched.transaction.needsReview)
@@ -1697,6 +1758,114 @@ class SmartExpenseAgentTest {
     }
 
     @Test
+    fun lengthFailureShowsSafeProviderLimitsAndPreservesExistingDraft() = runBlocking {
+        val truncated = ChatCompletionResponse(
+            choices = listOf(
+                ChatChoice(
+                    message = ResponseMessage(reasoningContent = "SYNTHETIC_PRIVATE_REASONING"),
+                    finishReason = "length",
+                ),
+            ),
+            usage = Usage(promptTokens = 700, completionTokens = 3_000, totalTokens = 3_700),
+        )
+        val gateway = ResponseSequenceGateway(
+            ChatCompletionResponse(
+                choices = listOf(ChatChoice(ResponseMessage(content = initialDraftJson), "stop")),
+            ),
+            truncated,
+        )
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(
+            repository,
+            gateway,
+            AgentRuntimeConfig(maxTokens = 4_096),
+        )
+        val created = agent.createSession("Синтетическая сессия", defaultConfig)
+        val imported = agent.sendMessage(created.session.id, created.session.revision, "Синтетическая выписка")
+        val beforeFailure = repository.get(created.session.id)
+
+        val error = assertFailsWith<AgentResponseException> {
+            agent.sendMessage(imported.session.id, imported.session.revision, "Короткое уточнение")
+        }
+
+        val message = error.message.orEmpty()
+        listOf(
+            "finish_reason=length",
+            "provider=fake",
+            "model=fake-model",
+            "reasoning_mode=disabled",
+            "max_tokens_configured=4096",
+            "max_tokens_requested=3000",
+            "max_output_tokens_model=3000",
+            "context_window_tokens=32000",
+            "prompt_tokens=700",
+            "reasoning_content=present",
+        ).forEach { assertTrue(message.contains(it), message) }
+        assertFalse(message.contains("SYNTHETIC_PRIVATE_REASONING"))
+        assertEquals(3_000, gateway.requests.last().maxTokens)
+        assertEquals(beforeFailure, repository.get(created.session.id))
+    }
+
+    @Test
+    fun classifiesMissingBlankMalformedAndSchemaInvalidProviderResponsesWithoutMutation() = runBlocking {
+        val failures = listOf(
+            "no choices" to ChatCompletionResponse(choices = emptyList()),
+            "blank final content" to ChatCompletionResponse(
+                choices = listOf(ChatChoice(ResponseMessage(content = " \n "), "stop")),
+            ),
+            "length without usage" to ChatCompletionResponse(
+                choices = listOf(ChatChoice(ResponseMessage(reasoningContent = "PRIVATE"), "length")),
+            ),
+            "malformed JSON" to ChatCompletionResponse(
+                choices = listOf(ChatChoice(ResponseMessage(content = "not-json"), "stop")),
+            ),
+            "schema-invalid JSON" to ChatCompletionResponse(
+                choices = listOf(
+                    ChatChoice(
+                        ResponseMessage(content = """{"intent":"correction","operations":"not-an-array"}"""),
+                        "stop",
+                    ),
+                ),
+            ),
+        )
+        val expectedMessages = mapOf(
+            "no choices" to "Провайдер не вернул choices.",
+            "blank final content" to "Провайдер вернул пустой final content.",
+            "length without usage" to "finish_reason=length",
+            "malformed JSON" to "Ответ с изменениями содержит некорректный JSON.",
+            "schema-invalid JSON" to "Структура ответа с изменениями не соответствует контракту.",
+        )
+
+        failures.forEach { (profile, failureResponse) ->
+            val gateway = ResponseSequenceGateway(
+                ChatCompletionResponse(
+                    choices = listOf(ChatChoice(ResponseMessage(content = initialDraftJson), "stop")),
+                ),
+                failureResponse,
+            )
+            val repository = MemoryImportSessionRepository()
+            val agent = testAgent(repository, gateway)
+            val created = agent.createSession("Provider failure $profile", defaultConfig)
+            val imported = agent.sendMessage(created.session.id, created.session.revision, "Синтетическая выписка")
+            val before = repository.get(created.session.id)
+
+            val error = assertFailsWith<AgentResponseException> {
+                agent.sendMessage(imported.session.id, imported.session.revision, "Уточни операцию 1.")
+            }
+
+            assertTrue(
+                error.message.orEmpty().contains(expectedMessages.getValue(profile)),
+                "$profile: ${error.message}",
+            )
+            if (profile == "length without usage") {
+                assertFalse(error.message.orEmpty().contains("prompt_tokens="))
+                assertFalse(error.message.orEmpty().contains("completion_tokens="))
+            }
+            assertEquals(before, repository.get(created.session.id), profile)
+        }
+    }
+
+    @Test
     fun compressesOldHistoryIntoSummaryBeforeNextFollowUp() = runBlocking {
         val responses = buildList {
             add(initialDraftJson)
@@ -2026,6 +2195,154 @@ class SmartExpenseAgentTest {
             appended.messages.last().displayText,
         )
     }
+
+    @Test
+    fun ambiguousRefundTargetAsksOnceBeforePersistingAssociation() = runBlocking {
+        val refundDraft = Regex(
+            """"source_index": 2,\s*"included": true,\s*"direction": "expense",\s*"occurred_at": "2026-01-16T08:30:00",\s*"posted_at": null,\s*"amount_minor": 45000""",
+        ).replace(initialDraftJson) { match ->
+            match.value
+                .replace("\"direction\": \"expense\"", "\"direction\": \"income\"")
+                .replace("45000", "35000")
+        }
+        val thirdPurchase = """
+            {"source_index":3,"included":true,"direction":"expense",
+             "occurred_at":"2026-01-15T12:11:00","posted_at":null,
+             "amount_minor":85000,"currency":"RUB","merchant":"DEMO MARKET",
+             "category_id":"food.groceries","needs_review":false,"issues":[]}
+        """.trimIndent()
+        val ambiguousDraft = Regex(
+            """("source_index"\s*:\s*2[\s\S]*?"issues"\s*:\s*\[\]\s*})\s*]""",
+        ).replace(refundDraft) { match ->
+            "${match.groupValues[1]},\n$thirdPurchase\n]"
+        }
+        val clarification = """
+            {"intent":"needs_clarification","message":"К какой покупке относится операция 2 — к 1 или 3?",
+             "operations":[],"transactions":[],"refund_associations":[]}
+        """.trimIndent()
+        val association = """
+            {"intent":"refund_association","message":"Связал с покупкой 3.","operations":[],"transactions":[],
+             "refund_associations":[{"purchase_transaction_id":"3","refund_transaction_id":"2"}]}
+        """.trimIndent()
+        val gateway = QueuedGateway(ambiguousDraft, clarification, association)
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Неоднозначный возврат", defaultConfig)
+        val imported = agent.sendMessage(created.session.id, 0, "Синтетические покупки и возврат.")
+        val before = imported.draft!!.transactions
+        val asked = agent.sendMessage(
+            imported.session.id,
+            imported.session.revision,
+            "Операция 2 — частичный возврат, но продавца не помню.",
+        )
+
+        assertEquals(emptyList(), asked.draft!!.refundAssociations)
+        assertEquals(before, asked.draft!!.transactions)
+        assertEquals("К какой покупке относится операция 2 — к 1 или 3?", asked.messages.last().displayText)
+        assertTrue(
+            gateway.requests.last().messages.first().content.contains("If more than one purchase could be the target"),
+        )
+
+        val linked = agent.sendMessage(
+            asked.session.id,
+            asked.session.revision,
+            "К покупке 3.",
+        )
+        assertEquals(listOf(RefundAssociation("3", "2")), linked.draft!!.refundAssociations)
+        assertEquals(before, linked.draft!!.transactions)
+    }
+
+    @Test
+    fun explicitlyAssociatesPartialRefundWithoutChangingSourceTransactions() = runBlocking {
+        val refundDraft = Regex(
+            """"source_index": 2,\s*"included": true,\s*"direction": "expense",\s*"occurred_at": "2026-01-16T08:30:00",\s*"posted_at": null,\s*"amount_minor": 45000""",
+        ).replace(initialDraftJson) { match ->
+            match.value
+                .replace("\"direction\": \"expense\"", "\"direction\": \"income\"")
+                .replace("45000", "35000")
+        }
+        val associationResponse = """
+            {"intent":"refund_association","message":"Связал возврат с покупкой.","operations":[],"transactions":[],
+             "refund_associations":[{"purchase_transaction_id":"1","refund_transaction_id":"2"}]}
+        """.trimIndent()
+        val gateway = QueuedGateway(refundDraft, associationResponse)
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Связь возврата", defaultConfig)
+        val imported = agent.sendMessage(created.session.id, 0, "Синтетические покупка и возврат.")
+        val before = imported.draft!!.transactions
+        val associated = agent.sendMessage(
+            imported.session.id,
+            imported.session.revision,
+            "Операция 2 — частичный возврат по покупке 1.",
+        )
+
+        assertEquals(
+            listOf(RefundAssociation("1", "2")),
+            associated.draft!!.refundAssociations,
+        )
+        assertEquals(before, associated.draft!!.transactions)
+        assertEquals(90_050L, associated.draft!!.transactions[0].transaction.amountMinor -
+            associated.draft!!.transactions[1].transaction.amountMinor)
+        assertTrue(gateway.requests.last().messages.first().content.contains("Never infer a refund link"))
+    }
+
+    @Test
+    fun rejectsRefundAssociationToExplicitTransferWithoutPartialMutation() = runBlocking {
+        val transferRefundDraft = Regex(
+            """"source_index": 2,\s*"included": true,\s*"direction": "expense",\s*"occurred_at": "2026-01-16T08:30:00",\s*"posted_at": null,\s*"amount_minor": 45000""",
+        ).replace(initialDraftJson) { match ->
+            match.value
+                .replace("\"direction\": \"expense\"", "\"direction\": \"income\"")
+                .replace("45000", "35000")
+        }.replace("\"merchant\": \"DEMO MARKET\"", "\"merchant\": \"Перевод\"")
+        val associationResponse = """
+            {"intent":"refund_association","message":"Связал возврат.","operations":[],"transactions":[],
+             "refund_associations":[{"purchase_transaction_id":"1","refund_transaction_id":"2"}]}
+        """.trimIndent()
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, QueuedGateway(transferRefundDraft, associationResponse))
+        val created = agent.createSession("Перевод не покупка", defaultConfig)
+        val imported = agent.sendMessage(created.session.id, 0, "Синтетические перевод и возврат.")
+
+        assertFailsWith<AgentResponseException> {
+            agent.sendMessage(
+                imported.session.id,
+                imported.session.revision,
+                "Операция 2 — частичный возврат по покупке 1.",
+            )
+        }
+
+        val unchanged = agent.getSession(created.session.id)
+        assertEquals(imported.session, unchanged.session)
+        assertEquals(imported.draft, unchanged.draft)
+    }
+
+    @Test
+    fun rejectsInvalidRefundAssociationWithoutPersistingPartialState() = runBlocking {
+        val refundDraft = Regex(
+            """"source_index": 2,\s*"included": true,\s*"direction": "expense",\s*"occurred_at": "2026-01-16T08:30:00",\s*"posted_at": null,\s*"amount_minor": 45000""",
+        ).replace(initialDraftJson) { match ->
+            match.value
+                .replace("\"direction\": \"expense\"", "\"direction\": \"income\"")
+                .replace("45000", "35000")
+        }
+        val invalidResponse = """
+            {"intent":"refund_association","message":"Связал возврат.","operations":[],"transactions":[],
+             "refund_associations":[{"purchase_transaction_id":"missing","refund_transaction_id":"2"}]}
+        """.trimIndent()
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, QueuedGateway(refundDraft, invalidResponse))
+        val created = agent.createSession("Недопустимая связь возврата", defaultConfig)
+        val imported = agent.sendMessage(created.session.id, 0, "Синтетические покупка и возврат.")
+
+        assertFailsWith<AgentResponseException> {
+            agent.sendMessage(imported.session.id, imported.session.revision, "Свяжи возврат.")
+        }
+
+        val unchanged = agent.getSession(created.session.id)
+        assertEquals(imported.session, unchanged.session)
+        assertEquals(imported.draft, unchanged.draft)
+    }
+
 
     @Test
     fun rejectsInvalidAppendResponseWithoutPartialMutation() = runBlocking {
@@ -2717,6 +3034,20 @@ class SmartExpenseAgentTest {
         }
     }
 
+
+    private class ResponseSequenceGateway(
+        vararg responses: ChatCompletionResponse,
+    ) : ChatCompletionGateway {
+        override val contextWindowTokens: Int = 32_000
+        override val maxOutputTokens: Int = 3_000
+        val requests = mutableListOf<ChatCompletionRequest>()
+        private val responses = responses.toMutableList()
+
+        override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+            requests += request
+            return responses.removeAt(0)
+        }
+    }
 
     private class QueuedGateway(vararg responseContents: String) : ChatCompletionGateway {
         override var contextWindowTokens: Int? = null

@@ -2241,6 +2241,17 @@ html[data-theme="light"] .agent-body select {
     color: var(--agent-danger);
 }
 
+.receipt-association-status p {
+    margin: 0 0 4px;
+}
+
+.receipt-association-status ul {
+    display: grid;
+    gap: 4px;
+    margin: 4px 0 0;
+    padding-left: 18px;
+}
+
 .scheduler-task > a {
     width: fit-content;
     color: var(--agent-accent);

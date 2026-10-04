@@ -15,7 +15,7 @@
     {
       "id": "tbank-transactions",
       "display_name": "Т-Банк: счета и операции",
-      "endpoint": "http://127.0.0.1:3001/mcp",
+      "endpoint": "http://127.0.0.1:3010/mcp",
       "enabled": true,
       "allowed_tools": [
         "list-accounts",
@@ -25,7 +25,7 @@
     {
       "id": "receipts",
       "display_name": "Чеки",
-      "endpoint": "http://127.0.0.1:3002/mcp",
+      "endpoint": "http://127.0.0.1:3011/mcp",
       "enabled": true,
       "allowed_tools": [
         "search-receipts",

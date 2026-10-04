@@ -24,6 +24,9 @@ import io.github.stolex1y.transactionimport.core.Usage
 import io.github.stolex1y.transactionimport.core.TransactionCategory
 import io.github.stolex1y.transactionimport.core.ReceiptAssociation
 import io.github.stolex1y.transactionimport.core.ReceiptAssociationStatus
+import io.github.stolex1y.transactionimport.core.ReceiptAssociationSummary
+import io.github.stolex1y.transactionimport.core.ReceiptMatchUpdate
+import io.github.stolex1y.transactionimport.core.TransactionItem
 import io.github.stolex1y.transactionimport.core.ReceiptStatus
 import io.github.stolex1y.transactionimport.core.UserPreferences
 import kotlinx.coroutines.runBlocking
@@ -119,6 +122,62 @@ class SqliteImportSessionRepositoryTest {
                 mapOf("category_id" to listOf("Проверьте банковские данные")),
                 withUnrelatedWarning.fieldErrors,
             )
+        } finally {
+            deleteDatabase(database)
+        }
+    }
+
+    @Test
+    fun hidesUnverifiedLegacyReceiptTextFromRestoredSessionState() = runBlocking {
+        val database = Files.createTempFile("transaction-import-unverified-receipt-", ".sqlite")
+        try {
+            var id = 0
+            val repository = SqliteImportSessionRepository(database.absolutePathString())
+            val agent = SmartExpenseAgent(
+                repository = repository,
+                gatewayResolver = AgentGatewayResolver { SingleResponseGateway(initialDraftJson) },
+                idGenerator = { "receipt-${++id}" },
+                nowEpochMs = { 2_000L + id },
+            )
+            val created = agent.createSession("Unverified receipt snapshot", defaultConfig)
+            val imported = agent.sendMessage(created.session.id, 0, "Первая выписка")
+            val row = imported.draft!!.transactions.single()
+            val restored = agent.recordReceiptAssociation(
+                sessionId = created.session.id,
+                expectedRevision = imported.session.revision,
+                userText = "Свяжи synthetic receipt.",
+                assistantText = "Связь принята.",
+                updates = mapOf(
+                    row.id to ReceiptMatchUpdate(
+                        status = ReceiptAssociationStatus.MATCHED,
+                        items = listOf(
+                            TransactionItem(
+                                name = "Товар synthetic-private-receipt-key",
+                                quantity = 1.0,
+                                priceMinor = row.transaction.amountMinor,
+                                sumMinor = row.transaction.amountMinor,
+                                currency = row.transaction.currency,
+                            ),
+                        ),
+                        summary = ReceiptAssociationSummary(
+                            date = "2026-01-15",
+                            merchant = "Продавец synthetic-private-receipt-key",
+                            amountMinor = row.transaction.amountMinor,
+                            currency = row.transaction.currency,
+                            dateTime = "2026-01-15T12:10:00Z synthetic-private-receipt-key",
+                            settlementPlace = "Место synthetic-private-receipt-key",
+                        ),
+                    ),
+                ),
+                persistRule = false,
+            )
+            val transaction = repository.get(created.session.id)!!.draft!!.transactions.single().transaction
+
+            assertEquals(ReceiptAssociationStatus.MATCHED, transaction.receiptAssociation?.status)
+            assertNull(transaction.receiptAssociation?.summary)
+            assertTrue(transaction.items.isEmpty())
+            assertFalse(transaction.toString().contains("synthetic-private-receipt-key"))
+            assertFalse(restored.toString().contains("synthetic-private-receipt-key"))
         } finally {
             deleteDatabase(database)
         }

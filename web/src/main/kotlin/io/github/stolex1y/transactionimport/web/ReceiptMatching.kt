@@ -5,6 +5,8 @@ import io.github.stolex1y.transactionimport.core.ExternalTransactionCandidate
 import io.github.stolex1y.transactionimport.core.ReceiptAssociation
 import io.github.stolex1y.transactionimport.core.ReceiptAssociationStatus
 import io.github.stolex1y.transactionimport.core.ReceiptAssociationSummary
+import io.github.stolex1y.transactionimport.core.ReceiptReviewEvidence
+import io.github.stolex1y.transactionimport.core.ReceiptReviewReason
 import io.github.stolex1y.transactionimport.core.SchedulerTraceEvent
 import io.github.stolex1y.transactionimport.core.TransactionItem
 import io.github.stolex1y.transactionimport.core.normalizeCurrencyCode
@@ -25,6 +27,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.time.temporal.ChronoUnit
 import kotlin.math.abs
 
@@ -36,6 +40,7 @@ private const val MAX_PAGES = 100
 private const val MAX_TOTAL_CANDIDATES = 2_000
 private const val MAX_RECEIPT_ITEMS = 200
 private const val MAX_SOURCE_RESPONSE_CHARS = 1_000_000
+private const val MAX_REVIEW_CANDIDATES = 5
 private const val SOURCE_CALL_TIMEOUT_MS = 30_000L
 private const val MATCH_CONFIDENCE_THRESHOLD = 0.75
 private val CURRENCY_PATTERN = Regex("^[A-Z]{3}$")
@@ -45,9 +50,15 @@ private val RECEIPT_REFERENCE_PATTERN = Regex(
 private val SENSITIVE_RECEIPT_VALUE_PATTERN = Regex(
     "(?iu)(?<![\\p{L}\\p{N}_])(?:receipt[_ -]?key|fiscal[_ -]?(?:drive|document|sign|id)|" +
         "фискальн(?:ый|ого)?[_ -]?(?:накопитель|документ|признак|идентификатор)|" +
-        "qr[_ -]?(?:code|код)?|кассир|cashier)(?![\\p{L}\\p{N}_])\\s*[:=#]?\\s*[^,;\\n]+",
+        "qr[_ -]?(?:code|код)?|кассир|cashier|buyer|покупател(?:ь|я|ю|ем|е))(?![\\p{L}\\p{N}_])\\s*[:=#]?\\s*[^,;\\n]+",
 )
 
+
+private enum class ReceiptEligibility {
+    PURCHASE,
+    NOT_A_PURCHASE,
+    UNKNOWN,
+}
 
 private data class ReceiptSummaryCandidate(
     val key: String,
@@ -62,6 +73,7 @@ private data class ReceiptDetailCandidate(
     val summary: ReceiptSummaryCandidate,
     val merchant: String,
     val date: LocalDate,
+    val dateTime: String,
     val amountMinor: Long,
     val currency: String,
     val settlementPlace: String?,
@@ -72,6 +84,9 @@ private data class ReceiptDetailCandidate(
         merchant = merchant,
         amountMinor = amountMinor,
         currency = currency,
+        dateTime = dateTime,
+        settlementPlace = settlementPlace,
+        privacyVersion = ReceiptAssociationSummary.CURRENT_PRIVACY_VERSION,
     )
 }
 
@@ -94,19 +109,24 @@ class ReceiptMatchingEngine(
         strictSelector: Boolean = false,
     ): ReceiptMatchingRun {
         if (transactions.isEmpty()) return ReceiptMatchingRun(emptyList(), 0, 0)
-        val datedTransactions = transactions.map { transaction ->
+        val matchableTransactions = transactions.filter { it.receiptEligibility() == ReceiptEligibility.PURCHASE }
+        val datedTransactions = matchableTransactions.map { transaction ->
             transaction to parseDate(transaction.occurredAt)
         }
-        val periodFrom = datedTransactions.minOf { it.second }.minusDays(1)
-        val periodTo = datedTransactions.maxOf { it.second }.plusDays(1)
-        val summaries = try {
-            searchPeriod(periodFrom, periodTo, trace)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: ReceiptMatchingSourceException) {
-            throw error
-        } catch (_: Throwable) {
-            throw ReceiptMatchingSourceException("Источник receipts/search-receipts вернул некорректные данные.")
+        val periodFrom = datedTransactions.minOfOrNull { it.second }?.minusDays(1)
+        val periodTo = datedTransactions.maxOfOrNull { it.second }?.plusDays(1)
+        val summaries = if (periodFrom == null || periodTo == null) {
+            emptyList()
+        } else {
+            try {
+                searchPeriod(periodFrom, periodTo, trace)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: ReceiptMatchingSourceException) {
+                throw error
+            } catch (_: Throwable) {
+                throw ReceiptMatchingSourceException("Источник receipts/search-receipts вернул некорректные данные.")
+            }
         }
         val summaryCandidates = summaries.mapIndexed { index, summary ->
             summary.copy(alias = "receipt-${index + 1}")
@@ -174,88 +194,128 @@ class ReceiptMatchingEngine(
             val status: ReceiptAssociationStatus,
             val selected: ReceiptDetailCandidate? = null,
             val issue: String? = null,
+            val review: ReceiptReviewEvidence? = null,
         )
         val decisions = transactions.map { transaction ->
-            val id = transaction.sourceRef.orEmpty()
-            val local = eligibleByTransaction[id].orEmpty()
-            if (local.isEmpty()) return@map MatchDecision(transaction, ReceiptAssociationStatus.UNMATCHED)
-            val globallyUnique = local.filter { ownershipCounts[it.summary.key] == 1 }
-            val selectionCandidates = if (strictSelector || safeReceiptRules.isNotEmpty()) {
-                local
-            } else {
-                globallyUnique
-            }
-            if (selectionCandidates.isEmpty()) {
-                return@map MatchDecision(
-                    transaction = transaction,
-                    status = ReceiptAssociationStatus.AMBIGUOUS,
-                    issue = "receipt_ambiguous: чек подходит нескольким операциям",
-                )
-            }
-            val useSelector = selectionCandidates.size > 1 ||
-                safeInstruction.isNotBlank() ||
-                safeReceiptRules.isNotEmpty()
-            val selected = if (!useSelector) {
-                selectionCandidates.single()
-            } else {
-                val proposal = try {
-                    selector.select(
-                        config = config,
+            when (transaction.receiptEligibility()) {
+                ReceiptEligibility.NOT_A_PURCHASE ->
+                    MatchDecision(transaction, ReceiptAssociationStatus.UNMATCHED)
+                ReceiptEligibility.UNKNOWN ->
+                    MatchDecision(
                         transaction = transaction,
-                        choices = selectionCandidates.map { it.toChoice() },
-                        explicitInstruction = safeInstruction,
-                        confirmedReceiptRules = safeReceiptRules,
+                        status = ReceiptAssociationStatus.AMBIGUOUS,
+                        issue = "receipt_operation_type_unknown: тип операции не подтверждён как покупка/расход",
+                        review = ReceiptReviewEvidence(
+                            reason = ReceiptReviewReason.OPERATION_TYPE_UNKNOWN,
+                        ),
                     )
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Throwable) {
-                    if (strictSelector) throw ReceiptMatchingSelectionException()
-                    null
-                }
-                val validProposal = proposal?.let {
-                    val aliases = selectionCandidates.mapTo(hashSetOf()) { candidate -> candidate.summary.alias }
-                    val validConfidence = it.confidence.isFinite() && it.confidence in 0.0..1.0
-                    val validAlias = it.receiptAlias == null || it.receiptAlias in aliases
-                    val abstention = it.receiptAlias == null &&
-                        it.confidence >= MATCH_CONFIDENCE_THRESHOLD
-                    val validNotTarget = !it.notTarget ||
-                        (it.receiptAlias == null && it.confidence == 0.0)
-                    if (!validConfidence || !validAlias || abstention || !validNotTarget) {
-                        if (strictSelector) throw ReceiptMatchingSelectionException()
-                        null
+                ReceiptEligibility.PURCHASE -> {
+                    val id = transaction.sourceRef.orEmpty()
+                    val local = eligibleByTransaction[id].orEmpty()
+                    if (local.isEmpty()) return@map MatchDecision(transaction, ReceiptAssociationStatus.UNMATCHED)
+                    val globallyUnique = local.filter { ownershipCounts[it.summary.key] == 1 }
+                    val selectionCandidates = if (strictSelector || safeReceiptRules.isNotEmpty()) {
+                        local
                     } else {
-                        it
+                        globallyUnique
+                    }
+                    if (selectionCandidates.isEmpty()) {
+                        return@map MatchDecision(
+                            transaction = transaction,
+                            status = ReceiptAssociationStatus.AMBIGUOUS,
+                            issue = "receipt_ambiguous: чек подходит нескольким операциям",
+                            review = ReceiptReviewEvidence(
+                                reason = ReceiptReviewReason.SHARED_BY_OPERATIONS,
+                                candidates = local.map(ReceiptDetailCandidate::safeSummary)
+                                    .distinct()
+                                    .take(MAX_REVIEW_CANDIDATES),
+                            ),
+                        )
+                    }
+                    val useSelector = selectionCandidates.size > 1 ||
+                        safeInstruction.isNotBlank() ||
+                        safeReceiptRules.isNotEmpty()
+                    val selected = if (!useSelector) {
+                        selectionCandidates.single()
+                    } else {
+                        val proposal = try {
+                            selector.select(
+                                config = config,
+                                transaction = transaction,
+                                choices = selectionCandidates.map { it.toChoice() },
+                                explicitInstruction = safeInstruction,
+                                confirmedReceiptRules = safeReceiptRules,
+                            )
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Throwable) {
+                            if (strictSelector) throw ReceiptMatchingSelectionException()
+                            null
+                        }
+                        val validProposal = proposal?.let {
+                            val aliases = selectionCandidates.mapTo(hashSetOf()) { candidate -> candidate.summary.alias }
+                            val validConfidence = it.confidence.isFinite() && it.confidence in 0.0..1.0
+                            val validAlias = it.receiptAlias == null || it.receiptAlias in aliases
+                            val abstention = it.receiptAlias == null &&
+                                it.confidence >= MATCH_CONFIDENCE_THRESHOLD
+                            val validNotTarget = !it.notTarget ||
+                                (it.receiptAlias == null && it.confidence == 0.0)
+                            if (!validConfidence || !validAlias || abstention || !validNotTarget) {
+                                if (strictSelector) throw ReceiptMatchingSelectionException()
+                                null
+                            } else {
+                                it
+                            }
+                        }
+                        if (strictSelector && validProposal == null) throw ReceiptMatchingSelectionException()
+                        if (validProposal?.notTarget == true) {
+                            return@map MatchDecision(transaction, ReceiptAssociationStatus.UNMATCHED)
+                        }
+                        validProposal
+                            ?.takeIf { it.confidence >= MATCH_CONFIDENCE_THRESHOLD }
+                            ?.receiptAlias
+                            ?.let { alias -> selectionCandidates.singleOrNull { it.summary.alias == alias } }
+                    }
+                    if (selected == null) {
+                        MatchDecision(
+                            transaction = transaction,
+                            status = ReceiptAssociationStatus.AMBIGUOUS,
+                            issue = if (selectionCandidates.size > 1) {
+                                "receipt_ambiguous: несколько подходящих чеков требуют уточнения"
+                            } else {
+                                "receipt_ambiguous: не удалось уверенно выбрать чек"
+                            },
+                            review = ReceiptReviewEvidence(
+                                reason = if (selectionCandidates.size > 1) {
+                                    ReceiptReviewReason.MULTIPLE_CANDIDATES
+                                } else {
+                                    ReceiptReviewReason.SELECTOR_UNCERTAIN
+                                },
+                                candidates = selectionCandidates
+                                    .map(ReceiptDetailCandidate::safeSummary)
+                                    .distinct()
+                                    .take(MAX_REVIEW_CANDIDATES),
+                            ),
+                        )
+                    } else {
+                        MatchDecision(transaction, ReceiptAssociationStatus.MATCHED, selected)
                     }
                 }
-                if (strictSelector && validProposal == null) throw ReceiptMatchingSelectionException()
-                if (validProposal?.notTarget == true) {
-                    return@map MatchDecision(transaction, ReceiptAssociationStatus.UNMATCHED)
-                }
-                validProposal
-                    ?.takeIf { it.confidence >= MATCH_CONFIDENCE_THRESHOLD }
-                    ?.receiptAlias
-                    ?.let { alias -> selectionCandidates.singleOrNull { it.summary.alias == alias } }
-            }
-            if (selected == null) {
-                MatchDecision(
-                    transaction = transaction,
-                    status = ReceiptAssociationStatus.AMBIGUOUS,
-                    issue = "receipt_ambiguous: несколько подходящих чеков требуют уточнения",
-                )
-            } else {
-                MatchDecision(transaction, ReceiptAssociationStatus.MATCHED, selected)
             }
         }
         val selectionCounts = decisions.mapNotNull { it.selected?.summary?.key }
             .groupingBy { it }
             .eachCount()
         val enriched = decisions.map { decision ->
-            val transaction = decision.transaction
+            val transaction = decision.transaction.copy(
+                issues = decision.transaction.issues.filterNot { it.startsWith("receipt_") },
+            )
             val selected = decision.selected
             when {
                 decision.status == ReceiptAssociationStatus.UNMATCHED -> {
                     trace?.add(SchedulerTraceEvent(stage = "match-proposal", status = "unmatched"))
                     transaction.copy(
+                        items = emptyList(),
                         receiptAssociation = ReceiptAssociation(ReceiptAssociationStatus.UNMATCHED),
                     )
                 }
@@ -278,9 +338,22 @@ class ReceiptMatchingEngine(
                     } else {
                         "receipt_ambiguous: несколько подходящих чеков требуют уточнения"
                     }
+                    val review = decision.review ?: ReceiptReviewEvidence(
+                        reason = if (selected != null && selectionCounts[selected.summary.key] != 1) {
+                            ReceiptReviewReason.DUPLICATE_SELECTION
+                        } else {
+                            ReceiptReviewReason.SELECTOR_UNCERTAIN
+                        },
+                        candidates = listOfNotNull(selected?.safeSummary())
+                            .take(MAX_REVIEW_CANDIDATES),
+                    )
                     transaction.copy(
                         issues = transaction.issues + issue,
-                        receiptAssociation = ReceiptAssociation(ReceiptAssociationStatus.AMBIGUOUS),
+                        items = emptyList(),
+                        receiptAssociation = ReceiptAssociation(
+                            status = ReceiptAssociationStatus.AMBIGUOUS,
+                            review = review,
+                        ),
                     )
                 }
             }
@@ -366,7 +439,10 @@ class ReceiptMatchingEngine(
         require(receivedAt.length <= 80) { "Источник чеков вернул слишком длинную дату чека." }
         return ReceiptSummaryCandidate(
             key = key,
-            merchant = sanitizeMatchingText(value["merchant"]?.jsonPrimitive?.contentOrNull.orEmpty()).take(200),
+            merchant = sanitizeMatchingText(
+                value["merchant"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                receiptKey = key,
+            ).take(200),
             date = parseDate(receivedAt),
             amountMinor = amount,
             currency = currency,
@@ -403,7 +479,7 @@ class ReceiptMatchingEngine(
                 ?.takeIf { it >= 0L }
                 ?: throw IllegalStateException("Источник чеков вернул некорректную сумму позиции.")
             TransactionItem(
-                name = sanitizeMatchingText(name).take(200),
+                name = sanitizeMatchingText(name, receiptKey = summary.key).take(200),
                 quantity = quantity,
                 priceMinor = priceMinor,
                 sumMinor = sumMinor,
@@ -416,7 +492,8 @@ class ReceiptMatchingEngine(
         val dateText = root["date_time"]?.jsonPrimitive?.contentOrNull?.trim()
             ?.takeIf(String::isNotBlank)
             ?: throw IllegalStateException("Источник чеков вернул чек без даты.")
-        require(dateText.length <= 80) { "Источник чеков вернул слишком длинную дату чека." }
+        require(dateText.length <= 80) { "Источник чеков вернул слишком длинную дату." }
+        val (receiptDate, normalizedDateTime) = parseReceiptDateTime(dateText)
         require(amount == summary.amountMinor && currency == summary.currency) {
             "Источник чеков вернул детали, не совпадающие со сводкой поиска."
         }
@@ -428,18 +505,20 @@ class ReceiptMatchingEngine(
                 }
                 place.content.trim().takeIf(String::isNotBlank)?.also {
                     require(it.length <= 300) { "Источник чеков вернул слишком длинное место расчёта." }
-                }?.let(::sanitizeMatchingText)
+                }?.let { sanitizeMatchingText(it, receiptKey = summary.key) }
             }
             else -> throw IllegalStateException("Источник чеков вернул некорректное место расчёта.")
         }
         val merchant = sanitizeMatchingText(
             root["merchant"]?.jsonPrimitive?.contentOrNull?.trim()
                 ?.takeIf(String::isNotBlank) ?: summary.merchant,
+            receiptKey = summary.key,
         ).take(200)
         return ReceiptDetailCandidate(
             summary = summary,
             merchant = merchant,
-            date = parseDate(dateText),
+            date = receiptDate,
+            dateTime = normalizedDateTime,
             amountMinor = amount,
             currency = currency,
             settlementPlace = settlementPlace,
@@ -502,6 +581,18 @@ class ReceiptMatchingEngine(
         settlementPlace = settlementPlace,
     )
 
+    private fun ExternalTransactionCandidate.receiptEligibility(): ReceiptEligibility = when {
+        amountMinor >= 0 -> ReceiptEligibility.NOT_A_PURCHASE
+        categoryId?.startsWith("transfer.") == true ||
+            merchant.equals("Перевод", ignoreCase = true) ||
+            merchant.equals("Между своими счетами", ignoreCase = true) ||
+            EXPLICIT_TRANSFER_MARKER.containsMatchIn(description) ->
+            ReceiptEligibility.NOT_A_PURCHASE
+        categoryId.isNullOrBlank() || categoryIssue != null ->
+            ReceiptEligibility.UNKNOWN
+        else -> ReceiptEligibility.PURCHASE
+    }
+
     private fun isEligible(
         operationDate: LocalDate,
         operationAmount: Long,
@@ -509,10 +600,20 @@ class ReceiptMatchingEngine(
         receiptDate: LocalDate,
         receiptAmount: Long,
         receiptCurrency: String,
-    ): Boolean = receiptAmount == abs(operationAmount) &&
+    ): Boolean = operationAmount < 0 &&
+        receiptAmount == abs(operationAmount) &&
         normalizeCurrencyCode(receiptCurrency) == normalizeCurrencyCode(operationCurrency) &&
         abs(ChronoUnit.DAYS.between(operationDate, receiptDate)) <= 1
 
+
+    private fun parseReceiptDateTime(value: String): Pair<LocalDate, String> {
+        val text = value.trim()
+        val offsetDateTime = runCatching { OffsetDateTime.parse(text) }.getOrNull()
+        if (offsetDateTime != null) return offsetDateTime.toLocalDate() to offsetDateTime.toString()
+        val localDateTime = runCatching { LocalDateTime.parse(text) }.getOrNull()
+            ?: throw IllegalStateException("Источник вернул дату и время, которые нельзя сравнить с операцией.")
+        return localDateTime.toLocalDate() to localDateTime.toString()
+    }
     private fun parseDate(value: String): LocalDate = try {
         LocalDate.parse(value.trim().take(10))
     } catch (_: Exception) {
@@ -520,10 +621,19 @@ class ReceiptMatchingEngine(
     }
 
 
-    private fun sanitizeMatchingText(value: String): String = sanitizeReceiptMatchingText(value)
+    private fun sanitizeMatchingText(value: String, receiptKey: String? = null): String {
+        val withoutKey = receiptKey?.takeIf(String::isNotEmpty)?.let { key ->
+            value.replace(key, "[ссылка на чек скрыта]", ignoreCase = true)
+        } ?: value
+        return sanitizeReceiptMatchingText(withoutKey)
+    }
 
     private companion object {
         val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+        val EXPLICIT_TRANSFER_MARKER = Regex(
+            """(?:\bперевод\b|\bсбп\b|внутрибанк\w*|межбанк\w*|по\s+номер(?:у)?\s+телефон|между\s+своими\s+сч[её]т\w*|собственн\w*\s+сч[её]т\w*)""",
+            RegexOption.IGNORE_CASE,
+        )
     }
 }
 
