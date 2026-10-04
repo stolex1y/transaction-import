@@ -59,7 +59,14 @@ class DeliveryAcceptanceBrowserTest {
                     page.locator("#tbank-password").fill("demo")
                     page.locator("#tbank-submit").click()
                     page.waitForFunction(
-                        "() => document.querySelector('#tbank-account').options.length >= 1",
+                        """
+                            () => document.querySelector('#tbank-account').options.length >= 1 ||
+                                document.querySelector('#tbank-login-status')?.classList.contains('error')
+                        """.trimIndent(),
+                    )
+                    assertTrue(
+                        page.locator("#tbank-account").locator("option").count() >= 1,
+                        "Список счетов не загрузился: ${page.locator("#tbank-login-status").textContent()}",
                     )
                     page.locator("#open-session-drawer").click()
                     page.locator("#empty-new-session").click()
