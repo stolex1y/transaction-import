@@ -2684,7 +2684,7 @@ class AgentBrowserTest {
             }
         """.trimIndent()
         val gateway = BrowserNativePlanGateway(
-            FakeAgentGateway(ArrayDeque(listOf(draftJson))),
+            FakeAgentGateway(ArrayDeque(listOf(draftJson, FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON))),
             actionArguments = """{"remember_rule":true}""",
         )
         val schedulerRules = mutableListOf<List<String>>()
@@ -3208,8 +3208,15 @@ class AgentBrowserTest {
 
                         val unmatched = page.locator(".receipt-association-status.unmatched")
                         unmatched.first().waitFor()
-                        assertEquals(2, unmatched.count())
+                        assertEquals(1, unmatched.count())
                         assertEquals("Без чека", unmatched.first().textContent())
+                        val excludedReview = excludedRow.locator(".receipt-association-status.ambiguous")
+                        assertEquals(1, excludedReview.count())
+                        assertTrue(
+                            excludedReview.textContent().contains(
+                                "Сначала подтвердите, что это покупка или расход.",
+                            ),
+                        )
                         assertEquals("Готово к экспорту", page.locator("#receipt-status").textContent())
                         assertFalse(page.locator("#build-batch").isDisabled)
                         assertEquals(1, searchCalls)
