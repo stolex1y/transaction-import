@@ -261,10 +261,13 @@ class AgentBrowserTest {
                             "() => document.querySelector('#receipts-auth-status')?.textContent === 'Сервис временно недоступен'",
                         )
                         assertEquals(0, page.locator("#receipts-session-retry").count())
+                        captureDeliveryUi(page, "a09-receipts-status-read-only.png")
                         assertTrue(page.locator("#receipts-refresh-session").isVisible)
+                        assertEquals("Обновить статус", page.locator("#receipts-refresh-session").textContent().trim())
                         page.locator("#receipts-refresh-session").click()
                         page.waitForFunction("() => document.querySelector('#receipts-auth-status')?.textContent")
                         assertEquals(0, authProvider.refreshAttempts)
+                        captureDeliveryUi(page, "a09-receipts-status-after-read.png")
 
                         page.locator("#receipts-from").fill("2026-09-01")
                         page.locator("#receipts-to").fill("2026-09-30")
@@ -274,6 +277,7 @@ class AgentBrowserTest {
                         )
                         assertEquals("Чеки за выбранный период не найдены.", page.locator("#receipts-search-status").textContent())
                         assertEquals(1, authProvider.refreshAttempts)
+                        captureDeliveryUi(page, "a09-receipts-refreshed.png")
 
                         authProvider.transientFailure = true
                         page.locator("#receipts-search-form button[type='submit']").click()
@@ -282,6 +286,7 @@ class AgentBrowserTest {
                         )
                         assertTrue(page.locator("#receipts-search-status").textContent().startsWith("Поиск не выполнен:"))
                         assertEquals(2, authProvider.refreshAttempts)
+                        captureDeliveryUi(page, "a09-receipts-transient-error.png")
 
                         authProvider.transientFailure = false
                         authProvider.rejectRefresh = true
@@ -291,11 +296,13 @@ class AgentBrowserTest {
                         )
                         assertTrue(page.locator("#receipts-search-status").textContent().startsWith("Поиск не выполнен:"))
                         assertTrue(page.locator("#receipts-browser-login").isVisible)
+                        captureDeliveryUi(page, "a09-receipts-browser-login-required.png")
                         page.locator("#receipts-browser-login").click()
                         page.waitForFunction(
                             "() => document.querySelector('#receipts-auth-status')?.textContent === 'Авторизация активна'",
                         )
                         assertFalse(page.locator("#receipts-auth-detail").textContent().contains("synthetic-secret"))
+                        captureDeliveryUi(page, "a09-receipts-browser-login-active.png")
                     }
                 }
             }
@@ -338,9 +345,12 @@ class AgentBrowserTest {
                             "synthetic-account-id",
                             source.transactionArguments["account_ref"]?.jsonPrimitive?.content,
                         )
-                        val visibleAssistantText =
-                            page.locator("#message-list .assistant").last().textContent()
-                        assertTrue(visibleAssistantText.isNotBlank(), visibleAssistantText)
+                        val preview = page.locator(".mcp-inline-preview").last()
+                        preview.waitFor()
+                        val previewText = preview.textContent()
+                        assertTrue(previewText.contains("Synthetic resolved purchase"), previewText)
+                        assertTrue(previewText.contains("Synthetic account"), previewText)
+                        captureDeliveryUi(page, "a10-account-unique-alias-resolved.png")
                         assertFalse(page.locator("#message-list").textContent().contains("synthetic-account-id"))
                         assertTrue(gateway.requests.flatMap { it.messages }.none {
                             it.content.contains("synthetic-account-id")
@@ -365,8 +375,8 @@ class AgentBrowserTest {
         val gateway = BrowserAccountFetchGateway("Unknown account")
         val source = BrowserAccountResolutionSource(
             accountResponseText = """{"accounts":[
-                {"id":"synthetic-account-a","name":"Synthetic account A"},
-                {"id":"synthetic-account-b","name":"Synthetic account B"}
+                {"id":"synthetic-account-a","name":"Synthetic shared account"},
+                {"id":"synthetic-account-b","name":"Synthetic shared account"}
             ]}""",
         )
         val dependencies = browserAccountDependencies(base, runtime, gateway, source)
@@ -390,11 +400,11 @@ class AgentBrowserTest {
                         )
                         assertTrue(response.status() in 200..299, response.text())
                         val visibleText = page.locator("#message-list").textContent()
-                        assertTrue(visibleText.contains("Уточните, какой счёт использовать"), visibleText)
-                        assertTrue(visibleText.contains("Synthetic account A"), visibleText)
-                        assertTrue(visibleText.contains("Synthetic account B"), visibleText)
+                        assertTrue(visibleText.contains("Synthetic shared account #1"), visibleText)
+                        assertTrue(visibleText.contains("Synthetic shared account #2"), visibleText)
                         assertEquals(listOf("list-accounts"), source.calls)
                         assertTrue(source.transactionArguments.isEmpty())
+                        captureDeliveryUi(page, "a10-account-ambiguity-before-fetch.png")
                         assertFalse(visibleText.contains("synthetic-account-a"))
                         assertFalse(visibleText.contains("synthetic-account-b"))
                         assertTrue(gateway.requests.flatMap { it.messages }.none {
@@ -3518,6 +3528,8 @@ class AgentBrowserTest {
                                 it.contains("подтвердите, что это покупка или расход", ignoreCase = true)
                             },
                         )
+                        page.locator(".receipt-association-status.unmatched").first().scrollIntoViewIfNeeded()
+                        captureDeliveryUi(page, "a11-unknown-no-receipt-candidates.png")
                         val download = page.waitForDownload {
                             page.locator("#build-batch").click()
                         }
@@ -3624,6 +3636,10 @@ class AgentBrowserTest {
                                 .locator(".receipt-association-status.ambiguous").textContent()
                                 .contains("Сначала подтвердите, что это покупка или расход."),
                         )
+                        val unresolvedPurchase = preview.locator("tbody tr").nth(3)
+                            .locator(".receipt-association-status.ambiguous")
+                        unresolvedPurchase.scrollIntoViewIfNeeded()
+                        captureDeliveryUi(page, "a11-unknown-with-receipt-candidate.png")
                         assertEquals(1, source.searchCalls)
                         assertEquals(1, source.detailCalls)
                         assertEquals(1, classifier.requests.size)
@@ -3687,6 +3703,19 @@ class AgentBrowserTest {
         companion object {
             const val RAW_KEY = "browser-receipt-raw-secret"
         }
+    }
+
+    private fun captureDeliveryUi(page: Page, name: String) {
+        val evidenceDirectory = System.getenv("DELIVERY_EVIDENCE_DIR")
+            ?.takeIf(String::isNotBlank)
+            ?.let(java.nio.file.Path::of)
+            ?: return
+        Files.createDirectories(evidenceDirectory)
+        page.screenshot(
+            Page.ScreenshotOptions()
+                .setPath(evidenceDirectory.resolve(name))
+                .setFullPage(true),
+        )
     }
 
     private fun waitForAgentInitialized(page: Page) {
@@ -3842,7 +3871,16 @@ private class BrowserAccountResolutionSource(
                 TbankToolCallResponse(tool = tool, text = accountResponseText)
             "tbank-transactions" to "get-account-transactions" -> {
                 transactionArguments = arguments
-                TbankToolCallResponse(tool = tool, text = """{"transactions":[]}""")
+                TbankToolCallResponse(
+                    tool = tool,
+                    text = """
+                        {"account_name":"Synthetic account","transactions":[{
+                          "date":"2026-09-10T10:00:00Z","amount_minor":-1200,
+                          "currency":"RUB","merchant":"Synthetic resolved purchase",
+                          "description":"Synthetic operation from resolved account"
+                        }]}
+                    """.trimIndent(),
+                )
             }
             else -> error("Unexpected synthetic bank tool $serverId/$tool")
         }
