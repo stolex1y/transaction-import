@@ -266,8 +266,8 @@ class AgentBrowserTest {
                         assertEquals("Обновить статус", page.locator("#receipts-refresh-session").textContent().trim())
                         page.locator("#receipts-refresh-session").click()
                         page.waitForFunction("() => document.querySelector('#receipts-auth-status')?.textContent")
-                        assertEquals(0, authProvider.refreshAttempts)
-                        captureDeliveryUi(page, "a09-receipts-status-after-read.png")
+                        assertEquals(0, authProvider.protectedSearchCalls)
+                        captureDeliveryUi(page, "a09-receipts-status-unchanged-after-read.png")
 
                         page.locator("#receipts-from").fill("2026-09-01")
                         page.locator("#receipts-to").fill("2026-09-30")
@@ -276,8 +276,8 @@ class AgentBrowserTest {
                             "() => document.querySelector('#receipts-auth-status')?.textContent === 'Авторизация активна'",
                         )
                         assertEquals("Чеки за выбранный период не найдены.", page.locator("#receipts-search-status").textContent())
-                        assertEquals(1, authProvider.refreshAttempts)
-                        captureDeliveryUi(page, "a09-receipts-refreshed.png")
+                        assertEquals(1, authProvider.protectedSearchCalls)
+                        captureDeliveryUi(page, "a09-receipts-protected-search-success.png")
 
                         authProvider.transientFailure = true
                         page.locator("#receipts-search-form button[type='submit']").click()
@@ -285,17 +285,23 @@ class AgentBrowserTest {
                             "() => document.querySelector('#receipts-auth-status')?.textContent === 'Сервис временно недоступен'",
                         )
                         assertTrue(page.locator("#receipts-search-status").textContent().startsWith("Поиск не выполнен:"))
-                        assertEquals(2, authProvider.refreshAttempts)
-                        captureDeliveryUi(page, "a09-receipts-transient-error.png")
-
+                        assertEquals(2, authProvider.protectedSearchCalls)
+                        captureDeliveryUi(page, "a09-receipts-protected-search-transient-failure.png")
                         authProvider.transientFailure = false
+                        page.locator("#receipts-search-form button[type='submit']").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#receipts-auth-status')?.textContent === 'Авторизация активна'",
+                        )
+                        assertEquals("Чеки за выбранный период не найдены.", page.locator("#receipts-search-status").textContent())
+                        assertEquals(3, authProvider.protectedSearchCalls)
+                        captureDeliveryUi(page, "a09-receipts-protected-search-recovered.png")
                         authProvider.rejectRefresh = true
                         page.locator("#receipts-search-form button[type='submit']").click()
                         page.waitForFunction(
                             "() => document.querySelector('#receipts-auth-status')?.textContent === 'Нужно войти'",
                         )
                         assertTrue(page.locator("#receipts-search-status").textContent().startsWith("Поиск не выполнен:"))
-                        assertTrue(page.locator("#receipts-browser-login").isVisible)
+                        assertEquals(4, authProvider.protectedSearchCalls)
                         captureDeliveryUi(page, "a09-receipts-browser-login-required.png")
                         page.locator("#receipts-browser-login").click()
                         page.waitForFunction(
@@ -3983,7 +3989,7 @@ private class BrowserContextualFollowUpGateway : ChatCompletionGateway {
     }
 }
 private class BrowserReceiptAuthProvider : ReceiptsMcpProvider {
-    var refreshAttempts = 0
+    var protectedSearchCalls = 0
     var rejectRefresh = false
     var transientFailure = false
     private var status = ReceiptsAuthStatus(
@@ -4009,7 +4015,7 @@ private class BrowserReceiptAuthProvider : ReceiptsMcpProvider {
         arguments: JsonObject,
     ): TbankToolCallResponse {
         require(tool == "search-receipts")
-        refreshAttempts += 1
+        protectedSearchCalls += 1
         if (rejectRefresh) {
             status = ReceiptsAuthStatus(authenticated = false, status = "login_required")
             return TbankToolCallResponse(
