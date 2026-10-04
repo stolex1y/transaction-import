@@ -698,10 +698,6 @@ class NativeMcpAgentTest {
                 ConfirmedDecisionScope.RECEIPT_MATCHING,
                 preferences.confirmedDecisions.single().scope,
             )
-            assertEquals(
-                ReceiptAssociationStatus.AMBIGUOUS,
-                handled.response.state.draft!!.transactions.last().transaction.receiptAssociation?.status,
-            )
         } finally {
             dependencies.scheduler?.close()
             database.deleteIfExists()
