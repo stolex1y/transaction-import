@@ -18,8 +18,10 @@ import io.github.stolex1y.transactionimport.core.SmartExpenseAgent
 import io.github.stolex1y.transactionimport.core.Usage
 import io.github.stolex1y.transactionimport.persistence.SqliteImportSessionRepository
 import io.github.stolex1y.transactionimport.persistence.SqliteSchedulerRepository
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.util.concurrent.atomic.AtomicInteger
 
 class FakeAgentGateway(
@@ -194,6 +196,10 @@ fun fakeAgentDependencies(
     schedulerAccountAvailable: Boolean = false,
     schedulerNowEpochMs: () -> Long = { System.currentTimeMillis() },
     schedulerMatchSelector: ReceiptMatchSelector? = null,
+    reasoningModes: List<ReasoningModeDefinition> = listOf(
+        ReasoningModeDefinition(id = "disabled", displayName = "Без reasoning"),
+    ),
+    defaultReasoningModeId: String = "disabled",
 ): AgentWebDependencies {
     val catalog = ProviderCatalog(
         providers = listOf(
@@ -206,9 +212,7 @@ fun fakeAgentDependencies(
                     ProviderModelDefinition(
                         id = "fake-model",
                         displayName = "Deterministic Fake",
-                        reasoningModes = listOf(
-                            ReasoningModeDefinition(id = "disabled", displayName = "Без reasoning"),
-                        ),
+                        reasoningModes = reasoningModes,
                         contextWindowTokens = gateway.contextWindowTokens
                             ?: FakeAgentGateway.DEFAULT_CONTEXT_WINDOW_TOKENS,
                     ),
@@ -219,7 +223,7 @@ fun fakeAgentDependencies(
     val runtime = AgentRuntimeConfig(
         defaultProviderId = "fake",
         defaultModelId = "fake-model",
-        defaultReasoningModeId = "disabled",
+        defaultReasoningModeId = defaultReasoningModeId,
         maxTokens = 4_096,
         defaultUserPrompt = "",
         contextManagement = contextManagement,

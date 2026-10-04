@@ -15,6 +15,7 @@ import io.github.stolex1y.transactionimport.core.Usage
 import io.github.stolex1y.transactionimport.core.ContextManagementConfig
 import io.github.stolex1y.transactionimport.core.AgentGatewayResolver
 import io.github.stolex1y.transactionimport.core.ContextStrategy
+import io.github.stolex1y.transactionimport.core.ReasoningModeDefinition
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import kotlinx.serialization.json.Json
@@ -40,8 +41,20 @@ class AgentBrowserTest {
         val database = Files.createTempFile("agent-provider-length-", ".sqlite")
         val gateway = BrowserLengthDiagnosticsGateway()
         val port = ServerSocket(0).use { it.localPort }
+        val dependencies = fakeAgentDependencies(
+            databasePath = database.toString(),
+            gateway = gateway,
+            reasoningModes = listOf(
+                ReasoningModeDefinition(
+                    id = "high",
+                    displayName = "Высокий",
+                    requestFields = buildJsonObject { put("reasoning_effort", "high") },
+                ),
+            ),
+            defaultReasoningModeId = "high",
+        )
         val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
-            module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
+            module(agentDependencies = dependencies)
         }.start(wait = false)
         try {
             Playwright.create().use { playwright ->
@@ -59,10 +72,19 @@ class AgentBrowserTest {
 
                         page.locator("#agent-message").fill("Synthetic expense statement")
                         page.locator("#send-message").click()
-                        page.locator("#operation-table").waitFor()
+                        page.locator("tr[data-transaction-id='1']").waitFor()
                         val originalAmount =
                             page.locator("tr[data-transaction-id='1'] input[name='amount']").inputValue()
                         val originalRowCount = page.locator("#operation-table tbody tr").count()
+                        val sessionId = page.evaluate(
+                            "() => window.location.pathname.split('/').pop()",
+                        ).toString()
+                        val stateBeforeFailure = Json.parseToJsonElement(
+                            browserSessionState(page, sessionId),
+                        ).jsonObject
+                        val draftBeforeFailure = stateBeforeFailure["draft"]
+                        val revisionBeforeFailure =
+                            stateBeforeFailure["session"]?.jsonObject?.get("revision")
 
                         page.locator("#agent-message").fill("Synthetic follow-up")
                         page.locator("#send-message").click()
@@ -74,7 +96,7 @@ class AgentBrowserTest {
                         listOf(
                             "provider=fake",
                             "model=fake-model",
-                            "reasoning_mode=disabled",
+                            "reasoning_mode=high",
                             "max_tokens_configured=4096",
                             "max_tokens_requested=3000",
                             "max_output_tokens_model=3000",
@@ -83,10 +105,65 @@ class AgentBrowserTest {
                         ).forEach { assertTrue(visibleError.contains(it), visibleError) }
                         assertFalse(visibleError.contains("SYNTHETIC_PRIVATE_REASONING"))
                         assertTrue(page.locator("#agent-status").getAttribute("class").contains("error"))
+                        val stateAfterFailure = Json.parseToJsonElement(
+                            browserSessionState(page, sessionId),
+                        ).jsonObject
+                        assertEquals(draftBeforeFailure, stateAfterFailure["draft"])
+                        assertEquals(
+                            revisionBeforeFailure,
+                            stateAfterFailure["session"]?.jsonObject?.get("revision"),
+                        )
                         assertEquals(originalAmount, page.locator("tr[data-transaction-id='1'] input[name='amount']").inputValue())
                         assertEquals(originalRowCount, page.locator("#operation-table tbody tr").count())
                         assertEquals(2, gateway.requests.size)
                         assertEquals(3_000, gateway.requests.last().maxTokens)
+                        assertEquals("json_object", gateway.requests.last().responseFormat?.type)
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 1_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun shortFollowUpUsesPreviouslyKnownOperationContext() {
+        val database = Files.createTempFile("agent-contextual-follow-up-", ".sqlite")
+        val gateway = BrowserContextualFollowUpGateway()
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+
+                        page.locator("#agent-message").fill(
+                            "Выписка: 10 сентября, 1250 рублей, ДЕМО МАРКЕТ. SYNTHETIC_CONTEXT_MARKER",
+                        )
+                        page.locator("#send-message").click()
+                        page.locator("#operation-table tbody tr[data-transaction-id='1']").waitFor()
+                        page.locator("#agent-message").fill("Исключи эту покупку.")
+                        page.locator("#send-message").click()
+                        page.waitForFunction(
+                            "() => document.querySelector(\"tr[data-transaction-id='1'] input[name='included']\")?.checked === false",
+                        )
+
+                        assertFalse(page.locator("tr[data-transaction-id='1'] input[name='included']").isChecked)
+                        assertEquals("Ответ агента получен. Черновик обновлён.", page.locator("#agent-status").textContent())
+                        assertEquals("Исключи эту покупку.", gateway.requests.last().messages.last().content)
+                        assertTrue(gateway.requests.last().messages.any {
+                            it.role == "user" && it.content.contains("SYNTHETIC_CONTEXT_MARKER")
+                        })
+                        assertFalse(gateway.requests.last().messages.last().content.contains("1250"))
+                        assertEquals(2, gateway.requests.size)
                     }
                 }
             }
@@ -374,6 +451,75 @@ class AgentBrowserTest {
                         )
                         assertTrue(page.locator("#draft-status").textContent().contains("900"))
                         assertEquals(2, gateway.requests.size)
+                    }
+                }
+            }
+        } finally {
+            server.stop(1_000, 1_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun ambiguousRefundAsksForPurchaseBeforeCreatingRelation() {
+        val database = Files.createTempFile("agent-ambiguous-refund-", ".sqlite")
+        val gateway = BrowserAmbiguousRefundGateway()
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        page.locator("#agent-message").fill("Synthetic purchases and partial refund")
+                        page.locator("#send-message").click()
+                        page.locator("tr[data-transaction-id='3']").waitFor()
+
+                        val amountsBefore = (1..3).map { transactionId ->
+                            page.locator("tr[data-transaction-id='$transactionId'] input[name='amount']").inputValue()
+                        }
+                        page.locator("#agent-message").fill("Сопоставь частичный возврат с подходящей покупкой.")
+                        page.locator("#send-message").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#message-list')?.textContent.includes(" +
+                                "'К какой покупке относится операция 2') === true",
+                        )
+
+                        val sessionId = page.evaluate("() => window.location.pathname.split('/').pop()").toString()
+                        val stateBeforeChoice = browserSessionState(page, sessionId)
+                        assertFalse(stateBeforeChoice.contains("purchase_transaction_id"))
+                        assertEquals(
+                            amountsBefore,
+                            (1..3).map { transactionId ->
+                                page.locator("tr[data-transaction-id='$transactionId'] input[name='amount']").inputValue()
+                            },
+                        )
+                        page.locator("#agent-message").fill("К покупке 3.")
+                        page.locator("#send-message").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#draft-status')?.textContent.includes(" +
+                                "'операция 2 связана с покупкой 3') === true",
+                        )
+
+                        val summary = page.locator("#draft-status").textContent()
+                        assertTrue(summary.contains("150"), summary)
+                        assertTrue(summary.contains("RUB"), summary)
+                        val stateAfterChoice = browserSessionState(page, sessionId)
+                        assertTrue(stateAfterChoice.contains("\"purchase_transaction_id\":\"3\""))
+                        assertTrue(stateAfterChoice.contains("\"refund_transaction_id\":\"2\""))
+                        assertEquals(
+                            amountsBefore,
+                            (1..3).map { transactionId ->
+                                page.locator("tr[data-transaction-id='$transactionId'] input[name='amount']").inputValue()
+                            },
+                        )
+                        assertEquals(3, gateway.requests.size)
                     }
                 }
             }
@@ -3234,6 +3380,118 @@ class AgentBrowserTest {
         }
     }
 
+    @Test
+    fun nativeImportMatchesOnlyConfirmedPurchaseInBrowser() {
+        val database = Files.createTempFile("agent-browser-purchase-eligibility-", ".sqlite")
+        val classifier = FakeAgentGateway(
+            ArrayDeque(
+                listOf(
+                    """{"items":[
+                        {"index":0,"category_id":"food.groceries"},
+                        {"index":1,"category_id":"food.groceries"},
+                        {"index":2,"category_id":null},
+                        {"index":3,"category_id":null}
+                    ],"merchant_canonical_candidates":[]}""",
+                ),
+            ),
+        )
+        val planner = BrowserEligibilityPlanGateway()
+        val source = BrowserEligibilityMcpSource()
+        val base = fakeAgentDependencies(database.toString(), classifier)
+        val runtime = base.runtimeConfig.copy(
+            mcpToolLoop = base.runtimeConfig.mcpToolLoop.copy(enabled = true),
+        )
+        val native = NativeMcpAgent(
+            agent = base.agent,
+            gatewayResolver = AgentGatewayResolver { planner },
+            mcpTools = source,
+            runtimeConfig = runtime,
+            receiptMatchSelector = ReceiptMatchSelector { _, _, choices, _, _ ->
+                choices.singleOrNull()?.let { ReceiptSelectionResponseView(it.alias, 0.98) }
+            },
+        )
+        val dependencies = AgentWebDependencies(
+            agent = base.agent,
+            catalog = base.catalog,
+            runtimeConfig = runtime,
+            availableProviderIds = base.availableProviderIds,
+            newSessionTitle = base.newSessionTitle,
+            mcpCatalog = base.mcpCatalog,
+            tbankMcp = base.tbankMcp,
+            nativeMcpAgent = native,
+            scheduler = base.scheduler,
+            receiptsProxy = base.receiptsProxy,
+        )
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = dependencies)
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        page.locator("#agent-message").fill(
+                            "Импортируй синтетические операции и сопоставь подходящие чеки.",
+                        )
+                        val importResponse = page.waitForResponse(
+                            { response ->
+                                response.request().method() == "POST" &&
+                                    response.url().endsWith("/messages")
+                            },
+                            { page.locator("#send-message").click() },
+                        )
+                        assertTrue(importResponse.status() in 200..299, importResponse.text())
+
+                        val preview = page.locator(".mcp-inline-preview").last()
+                        preview.waitFor()
+                        assertEquals(4, preview.locator("tbody tr").count())
+                        assertEquals(1, preview.locator(".receipt-association-status.matched").count())
+                        assertEquals(1, preview.locator(".receipt-association-status.ambiguous").count())
+                        assertEquals(
+                            1,
+                            preview.locator("tbody tr").nth(0)
+                                .locator(".receipt-association-status.matched").count(),
+                        )
+                        assertEquals(
+                            0,
+                            preview.locator("tbody tr").nth(1)
+                                .locator(".receipt-association-status.matched").count(),
+                        )
+                        assertEquals(
+                            0,
+                            preview.locator("tbody tr").nth(2)
+                                .locator(".receipt-association-status.matched").count(),
+                        )
+                        assertTrue(
+                            preview.locator("tbody tr").nth(3)
+                                .locator(".receipt-association-status.ambiguous").textContent()
+                                .contains("Сначала подтвердите, что это покупка или расход."),
+                        )
+                        assertEquals(1, source.searchCalls)
+                        assertEquals(1, source.detailCalls)
+                        assertEquals(1, classifier.requests.size)
+
+                        preview.locator("button").last().click()
+                        page.waitForFunction(
+                            "() => document.querySelectorAll('#operation-table tbody tr').length === 4",
+                        )
+                        assertEquals(1, page.locator("#operation-table .receipt-association-status.matched").count())
+                        assertEquals(1, page.locator("#operation-table .receipt-association-status.ambiguous").count())
+                    }
+                }
+            }
+        } finally {
+            base.scheduler?.close()
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
     private class BrowserReceiptsFixture : ReceiptsMcpProvider {
         var searchCalls = 0
         var detailCalls = 0
@@ -3375,6 +3633,45 @@ private class BrowserLengthDiagnosticsGateway : ChatCompletionGateway {
         )
     }
 }
+
+private class BrowserContextualFollowUpGateway : ChatCompletionGateway {
+    val requests = mutableListOf<ChatCompletionRequest>()
+
+    override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+        requests += request
+        val content = when (requests.size) {
+            1 -> """
+                {"status":"ready","rejection_reason":null,"transactions":[{
+                  "source_index":1,"included":true,"direction":"expense",
+                  "occurred_at":"2026-09-10T10:00:00","posted_at":null,
+                  "amount_minor":125000,"currency":"RUB","merchant":"ДЕМО МАРКЕТ",
+                  "description":"Синтетическая покупка","category_id":"food.groceries",
+                  "needs_review":false,"issues":[]
+                }],"unparsed_fragments":[]}
+            """.trimIndent()
+            2 -> {
+                val priorContextAvailable = request.messages.any {
+                    it.role == "user" && it.content.contains("SYNTHETIC_CONTEXT_MARKER")
+                }
+                val latestUserMessage = request.messages.lastOrNull { it.role == "user" }?.content
+                if (priorContextAvailable && latestUserMessage == "Исключи эту покупку.") {
+                    """
+                        {"intent":"correction","message":"Операция исключена.","operations":[{
+                          "transaction_id":"1","action":"set_included","field":null,"value":false
+                        }],"transactions":[]}
+                    """.trimIndent()
+                } else {
+                    FakeAgentGateway.FOLLOW_UP_NOOP_JSON
+                }
+            }
+            else -> error("Unexpected synthetic browser request ${requests.size}")
+        }
+        return ChatCompletionResponse(
+            choices = listOf(ChatChoice(ResponseMessage(content = content), "stop")),
+            usage = Usage(promptTokens = 20, completionTokens = 10, totalTokens = 30),
+        )
+    }
+}
 private class BrowserReceiptAuthProvider : ReceiptsMcpProvider {
     override suspend fun browserLogin() = ReceiptsAuthStatus(authenticated = true, status = "active")
 
@@ -3472,6 +3769,42 @@ private class BrowserRefundAssociationGateway : ChatCompletionGateway {
     }
 }
 
+private class BrowserAmbiguousRefundGateway : ChatCompletionGateway {
+    val requests = mutableListOf<ChatCompletionRequest>()
+
+    override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+        requests += request
+        val content = when (requests.size) {
+            1 -> """
+                {"status":"ready","rejection_reason":null,"transactions":[
+                  {"source_index":1,"included":true,"direction":"expense","occurred_at":"2026-09-10T10:00:00",
+                   "posted_at":null,"amount_minor":10000,"currency":"RUB","merchant":"Synthetic purchase one",
+                   "category_id":"food.groceries","needs_review":false,"issues":[]},
+                  {"source_index":2,"included":true,"direction":"income","occurred_at":"2026-09-12T10:00:00",
+                   "posted_at":null,"amount_minor":5000,"currency":"RUB","merchant":"Synthetic refund",
+                   "category_id":null,"needs_review":true,"issues":["category_id:тип дохода неизвестен"]},
+                  {"source_index":3,"included":true,"direction":"expense","occurred_at":"2026-09-11T10:00:00",
+                   "posted_at":null,"amount_minor":20000,"currency":"RUB","merchant":"Synthetic purchase two",
+                   "category_id":"food.groceries","needs_review":false,"issues":[]}
+                ],"unparsed_fragments":[]}
+            """.trimIndent()
+            2 -> """
+                {"intent":"needs_clarification","message":"К какой покупке относится операция 2 — к 1 или 3?",
+                 "operations":[],"transactions":[],"refund_associations":[]}
+            """.trimIndent()
+            3 -> """
+                {"intent":"refund_association","message":"Связал с покупкой 3.","operations":[],"transactions":[],
+                 "refund_associations":[{"purchase_transaction_id":"3","refund_transaction_id":"2"}]}
+            """.trimIndent()
+            else -> error("Unexpected synthetic refund request ${requests.size}")
+        }
+        return ChatCompletionResponse(
+            choices = listOf(ChatChoice(ResponseMessage(content = content), "stop")),
+            usage = Usage(promptTokens = 20, completionTokens = 10, totalTokens = 30),
+        )
+    }
+}
+
 private fun receiptToolCapabilities(): List<McpCallableTool> = listOf(
     McpCallableTool(
         serverId = "receipts",
@@ -3488,6 +3821,137 @@ private fun receiptToolCapabilities(): List<McpCallableTool> = listOf(
         inputSchema = buildJsonObject { put("type", "object") },
     ),
 )
+private class BrowserEligibilityPlanGateway : ChatCompletionGateway {
+    val requests = mutableListOf<ChatCompletionRequest>()
+
+    override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+        requests += request
+        val message = when (requests.size) {
+            1 -> ResponseMessage(
+                content = null,
+                toolCalls = listOf(
+                    ChatToolCall(
+                        id = "synthetic-eligibility-accounts",
+                        function = ChatFunctionCall(
+                            name = "mcp_tbank-transactions_list-accounts",
+                            arguments = "{}",
+                        ),
+                    ),
+                ),
+            )
+            2 -> ResponseMessage(
+                content = null,
+                toolCalls = listOf(
+                    ChatToolCall(
+                        id = "synthetic-eligibility-import",
+                        function = ChatFunctionCall(
+                            name = "mcp_tbank-transactions_get-account-transactions",
+                            arguments = """{"account_alias":"Synthetic account","from":"2026-09-10","to":"2026-09-10","limit":50}""",
+                        ),
+                    ),
+                ),
+            )
+            3 -> ResponseMessage(
+                content = null,
+                toolCalls = listOf(
+                    ChatToolCall(
+                        id = "synthetic-eligibility-receipts",
+                        function = ChatFunctionCall(
+                            name = "app_associate_receipts",
+                            arguments = "{}",
+                        ),
+                    ),
+                ),
+            )
+            4 -> ResponseMessage(content = "Synthetic import preview is ready.")
+            else -> error("Unexpected synthetic planner request ${requests.size}")
+        }
+        return ChatCompletionResponse(
+            choices = listOf(
+                ChatChoice(
+                    message = message,
+                    finishReason = if (message.toolCalls.isNullOrEmpty()) "stop" else "tool_calls",
+                ),
+            ),
+        )
+    }
+}
+
+private class BrowserEligibilityMcpSource : McpToolProvider {
+    var searchCalls = 0
+    var detailCalls = 0
+
+    override suspend fun allowedTools(): List<McpCallableTool> = listOf(
+        McpCallableTool(
+            serverId = "tbank-transactions",
+            serverDisplayName = "Synthetic bank",
+            name = "list-accounts",
+            description = "Read synthetic account",
+            inputSchema = buildJsonObject { put("type", "object") },
+        ),
+        McpCallableTool(
+            serverId = "tbank-transactions",
+            serverDisplayName = "Synthetic bank",
+            name = "get-account-transactions",
+            description = "Read synthetic operations",
+            inputSchema = buildJsonObject { put("type", "object") },
+        ),
+    ) + receiptToolCapabilities()
+
+    override suspend fun callConfiguredTool(
+        serverId: String,
+        tool: String,
+        arguments: JsonObject,
+    ): TbankToolCallResponse = when (serverId to tool) {
+        "tbank-transactions" to "list-accounts" -> TbankToolCallResponse(
+            tool = tool,
+            text = """
+                {"data":{"accounts":[{"id":"synthetic-account-id",
+                 "account_name":"Synthetic account","currency":"643","balance_minor":0}]}}
+            """.trimIndent(),
+        )
+        "tbank-transactions" to "get-account-transactions" -> TbankToolCallResponse(
+            tool = tool,
+            text = """
+                {"account_name":"Synthetic account","transactions":[
+                  {"date":"2026-09-10T10:00:00Z","amount_minor":-1000,"currency":"RUB",
+                   "merchant":"Synthetic purchase","description":"Synthetic purchase"},
+                  {"date":"2026-09-10T11:00:00Z","amount_minor":-5000,"currency":"RUB",
+                   "merchant":"Перевод","description":"Перевод между своими счетами"},
+                  {"date":"2026-09-10T12:00:00Z","amount_minor":12000,"currency":"RUB",
+                   "merchant":"Synthetic income","description":"Synthetic income"},
+                  {"date":"2026-09-10T13:00:00Z","amount_minor":-2500,"currency":"RUB",
+                   "merchant":"Synthetic unknown","description":"Synthetic unknown type"}
+                ]}
+            """.trimIndent(),
+        )
+        "receipts" to "search-receipts" -> {
+            searchCalls += 1
+            TbankToolCallResponse(
+                tool = tool,
+                text = """
+                    {"receipts":[{"receipt_key":"synthetic-browser-receipt-key",
+                     "merchant":"Synthetic purchase","received_at":"2026-09-10T10:05:00Z",
+                     "amount_minor":1000,"currency":"RUB"}],"has_more":false}
+                """.trimIndent(),
+            )
+        }
+        "receipts" to "get-receipt" -> {
+            detailCalls += 1
+            TbankToolCallResponse(
+                tool = tool,
+                text = """
+                    {"receipt_key":"synthetic-browser-receipt-key",
+                     "date_time":"2026-09-10T10:05:00Z","total_minor":1000,"currency":"RUB",
+                     "merchant":"Synthetic purchase","settlement_place":"Synthetic station",
+                     "items":[{"name":"Synthetic item","quantity":1,"price_minor":1000,"sum_minor":1000}]}
+                """.trimIndent(),
+            )
+        }
+        else -> error("Unexpected synthetic tool: $serverId/$tool")
+    }
+}
+
 
 private class BrowserNativePlanGateway(
     private val coreGateway: ChatCompletionGateway,
