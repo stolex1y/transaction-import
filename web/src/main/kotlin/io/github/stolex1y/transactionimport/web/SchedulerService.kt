@@ -501,8 +501,6 @@ class SchedulerService(
             val transactions = fetchTransactions(task, windowFrom, windowTo, trace)
             val sessionConfig = task.targetSessionId?.let { agent.getSession(it).session.config }
                 ?: runtimeConfig.defaultAgentConfig()
-            val enrichment = enrichTransactions(transactions, sessionConfig, trace)
-            val enriched = enrichment.transactions
             val targetState = task.targetSessionId?.let { agent.getSession(it) }
                 ?: agent.createSession(
                     title = "Scheduler: ${task.name}",
@@ -523,6 +521,13 @@ class SchedulerService(
                     detail = "target_session_bound=true",
                 )
             }
+            val classifiedTransactions = agent.classifyExternalTransactions(
+                sessionId = targetState.session.id,
+                candidates = transactions,
+                includeSessionContext = false,
+            )
+            val enrichment = enrichTransactions(classifiedTransactions, sessionConfig, trace)
+            val enriched = enrichment.transactions
             val existingRefs = targetState.draft?.transactions.orEmpty()
                 .mapNotNull { it.transaction.sourceRef }
                 .toSet()

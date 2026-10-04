@@ -41,7 +41,10 @@ class SchedulerServiceTest {
         val database = Files.createTempFile("scheduler-test-", ".sqlite")
         var now = epoch("2026-09-10")
         var id = 0
-        val dependencies = fakeAgentDependencies(database.toString())
+        val classifier = FakeAgentGateway(
+            ArrayDeque(listOf(FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON)),
+        )
+        val dependencies = fakeAgentDependencies(database.toString(), classifier)
         val source = RecordingSchedulerSource()
         val repository = SqliteSchedulerRepository(database.toString())
         val scheduler = SchedulerService(
@@ -68,6 +71,12 @@ class SchedulerServiceTest {
             assertEquals(emptyList(), emptyLinkedSession.messages)
             assertEquals(null, emptyLinkedSession.draft)
             assertEquals(java.time.ZoneId.systemDefault().id, created.timeZone)
+            val withPriorConversation = dependencies.agent.recordExternalExchange(
+                sessionId = linkedSessionId,
+                expectedRevision = emptyLinkedSession.session.revision,
+                userText = "SYNTHETIC_SCHEDULER_HISTORY",
+                assistantText = "SYNTHETIC_SCHEDULER_HISTORY_REPLY",
+            )
 
             val first = scheduler.runNow(created.id)
             val firstResult = assertNotNull(first.lastResult)
@@ -78,6 +87,11 @@ class SchedulerServiceTest {
             assertEquals(1, firstResult.receiptDetailCount)
             assertEquals(0, firstResult.unmatchedCount)
             assertEquals(0, firstResult.ambiguousCount)
+            assertEquals(1, classifier.requests.size)
+            assertFalse(classifier.requests.single().messages.any { message ->
+                message.content.contains("SYNTHETIC_SCHEDULER_HISTORY")
+            })
+            assertEquals(emptyLinkedSession.session.revision + 1, withPriorConversation.session.revision)
             assertEquals("2026-09-11", first.cursorDate)
             assertEquals(
                 listOf(
@@ -92,6 +106,7 @@ class SchedulerServiceTest {
             val session = dependencies.agent.getSession(linkedSessionId)
             val item = assertNotNull(session.draft).transactions.single()
             val transaction = item.transaction
+            assertEquals("food.groceries", transaction.categoryId)
             assertEquals("transaction-ref-001", transaction.sourceRef)
             assertEquals("Синтетический чек [идентификатор чека скрыт]", item.description)
             dependencies.agent.replaceTransaction(

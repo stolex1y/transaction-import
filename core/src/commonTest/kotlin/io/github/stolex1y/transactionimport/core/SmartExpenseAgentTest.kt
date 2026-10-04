@@ -1056,6 +1056,63 @@ class SmartExpenseAgentTest {
     }
 
     @Test
+    fun backgroundExternalClassificationOmitsPriorDraftAndConversation() = runBlocking {
+        val gateway = QueuedGateway(
+            """{"upserts":[{"key":"private","value":"SYNTHETIC_PRIVATE_STICKY_FACT"}],"delete_keys":[]}""",
+            initialDraftJson,
+            """{"items":[{"index":0,"category_id":"food.groceries"}]}""",
+        )
+        val agent = testAgent(
+            repository = MemoryImportSessionRepository(),
+            gateway = gateway,
+            runtimeConfig = AgentRuntimeConfig(
+                maxTokens = 100_000,
+                contextManagement = ContextManagementConfig(
+                    strategy = ContextStrategy.STICKY_FACTS,
+                    recentMessages = 2,
+                    maxFacts = 4,
+                ),
+            ),
+        )
+        val session = agent.createSession("Synthetic scheduler classification", defaultConfig)
+        val existing = agent.sendMessage(
+            sessionId = session.session.id,
+            expectedRevision = session.session.revision,
+            text = "SYNTHETIC_PRIVATE_HISTORY",
+        )
+
+        val classified = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-09-10",
+                    amountMinor = -34900,
+                    currency = "RUB",
+                    merchant = "CURRENT SYNTHETIC PURCHASE",
+                    description = "CURRENT SYNTHETIC PURCHASE",
+                ),
+            ),
+            includeSessionContext = false,
+        )
+        val classificationRequest = gateway.requests.last()
+
+        assertTrue(existing.draft != null)
+        assertEquals(listOf("SYNTHETIC_PRIVATE_STICKY_FACT"), existing.facts.map(StickyFact::value))
+        assertEquals(ReceiptStatus.READY_FOR_EXPORT, existing.receiptState.status)
+        assertEquals("food.groceries", classified.single().categoryId)
+        assertTrue(classificationRequest.messages.last().content.contains("CURRENT SYNTHETIC PURCHASE"))
+        assertTrue(classificationRequest.messages.any { it.content.contains("status: not_started") })
+        assertFalse(classificationRequest.messages.any { message ->
+            listOf(
+                "SYNTHETIC_PRIVATE_HISTORY",
+                "SYNTHETIC_PRIVATE_STICKY_FACT",
+                "DEMO MARKET",
+                "ready_for_export",
+            ).any(message.content::contains)
+        })
+    }
+
+    @Test
     fun preservesSourceMerchantWhenModelLeavesItUnknownAndKeepsAmbiguousCategoryOnReview() = runBlocking {
         val gateway = QueuedGateway(
             """{"items":[{"index":0,"merchant":null,"category_id":null},{"index":1,"merchant":null,"category_id":null}]}""",

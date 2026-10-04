@@ -337,6 +337,19 @@ suspend fun handle(
             if (toolCalls == 0 && candidates.isEmpty()) {
                 return NativeMcpHandlingResult.NotHandled
             }
+            val classification = if (candidates.isEmpty()) {
+                null
+            } else {
+                agent.classifyExternalTransactionsWithProposals(
+                    sessionId = sessionId,
+                    candidates = candidates,
+                    userText = text,
+                )
+            }
+            if (classification != null) {
+                candidates.clear()
+                candidates += classification.candidates
+            }
             var receiptSummary: McpReceiptMatchingSummary? = null
             var receiptStatusText: String? = null
             if (receiptsRequested) {
@@ -424,15 +437,6 @@ suspend fun handle(
             val assistantText = listOfNotNull(baseAssistantText, receiptStatusText)
                 .joinToString(" ")
                 .take(20_000)
-            val classification = if (candidates.isEmpty()) {
-                null
-            } else {
-                agent.classifyExternalTransactionsWithProposals(
-                    sessionId = sessionId,
-                    candidates = candidates,
-                    userText = text,
-                )
-            }
             val savedState = agent.recordExternalExchange(
                 sessionId = sessionId,
                 expectedRevision = expectedRevision,
@@ -445,7 +449,7 @@ suspend fun handle(
                 sessionId = sessionId,
                 revision = savedState.session.revision,
                 userText = text,
-                candidates = classification?.candidates.orEmpty(),
+                candidates = candidates.toList(),
                 fetchArguments = lastFetchArguments,
                 receiptMatching = receiptSummary,
             )

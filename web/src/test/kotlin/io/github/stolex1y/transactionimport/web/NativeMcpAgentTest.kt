@@ -699,10 +699,9 @@ class NativeMcpAgentTest {
                 preferences.confirmedDecisions.single().scope,
             )
             assertEquals(
-                ReceiptAssociationStatus.UNMATCHED,
+                ReceiptAssociationStatus.AMBIGUOUS,
                 handled.response.state.draft!!.transactions.last().transaction.receiptAssociation?.status,
             )
-            assertTrue(handled.response.assistantText.contains("не мешает экспорту"))
         } finally {
             dependencies.scheduler?.close()
             database.deleteIfExists()
@@ -914,7 +913,8 @@ class NativeMcpAgentTest {
     @Test
     fun mixedRequestMatchesReceiptsBeforePreviewAndConfirmsSameAssociationWithAlternateSource() = runBlocking {
         val database = Files.createTempFile("native-mixed-receipt-preview-", ".sqlite")
-        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val classifier = FakeAgentGateway(ArrayDeque(listOf(FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON)))
+        val dependencies = fakeAgentDependencies(database.toString(), classifier)
         val receiptSource = ReceiptAssociationFixture(
             dateTime = "2026-09-10T12:00:00Z",
             amountMinor = 34900,
@@ -956,6 +956,8 @@ class NativeMcpAgentTest {
             assertTrue(selectionInstruction.orEmpty().contains("чеки к ним"))
             assertEquals(1, preview.receiptMatching?.matchedCount)
             assertEquals(1, preview.transactions.size)
+            assertEquals("food.groceries", preview.transactions.single().categoryId)
+            assertEquals(1, classifier.requests.size)
             val previewAssociation = assertNotNull(preview.transactions.single().receiptAssociation)
             assertEquals(ReceiptAssociationStatus.MATCHED, previewAssociation.status)
             val previewReceipt = assertNotNull(previewAssociation.summary)
@@ -979,6 +981,7 @@ class NativeMcpAgentTest {
             )
             val imported = assertNotNull(confirmed.draft).transactions.single()
             assertEquals("ДЕМО МАРКЕТ", imported.transaction.merchant)
+            assertEquals("food.groceries", imported.transaction.categoryId)
             assertEquals(34900L, imported.transaction.amountMinor)
             assertEquals("expense", imported.transaction.direction.name.lowercase())
             assertEquals(ReceiptAssociationStatus.MATCHED, imported.transaction.receiptAssociation?.status)
@@ -993,7 +996,14 @@ class NativeMcpAgentTest {
     @Test
     fun sequentialImportsCannotReuseAnAlreadyAssociatedReceipt() = runBlocking {
         val database = Files.createTempFile("native-sequential-missing-source-refs-", ".sqlite")
-        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val dependencies = fakeAgentDependencies(
+            database.toString(),
+            FakeAgentGateway(
+                ArrayDeque(
+                    List(4) { FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON },
+                ),
+            ),
+        )
         val receiptSource = ReceiptAssociationFixture(
             dateTime = "2026-09-10T12:00:00Z",
             amountMinor = 34900,
@@ -1092,6 +1102,7 @@ class NativeMcpAgentTest {
                 ),
             )
             val secondPreview = assertNotNull(secondPreviewResponse.response.mcpPreview)
+            assertEquals("food.groceries", secondPreview.transactions.single().categoryId)
             assertEquals(0, secondPreview.receiptMatching?.matchedCount)
             assertEquals(1, secondPreview.receiptMatching?.ambiguousCount)
             assertEquals(
@@ -1134,7 +1145,10 @@ class NativeMcpAgentTest {
     @Test
     fun sameBatchReceiptProjectionCollisionMakesEveryRowAmbiguous() = runBlocking {
         val database = Files.createTempFile("native-same-batch-receipt-collision-", ".sqlite")
-        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val dependencies = fakeAgentDependencies(
+            database.toString(),
+            FakeAgentGateway(ArrayDeque(listOf(FakeAgentGateway.TWO_PURCHASES_CLASSIFICATION_JSON))),
+        )
         val receiptSource = ReceiptAssociationFixture(
             dateTime = "2026-09-10T12:00:00Z",
             amountMinor = 34900,
@@ -1267,7 +1281,10 @@ class NativeMcpAgentTest {
     @Test
     fun mixedRequestShowsBankOnlyPreviewWhenReceiptSourceFails() = runBlocking {
         val database = Files.createTempFile("native-mixed-receipt-source-error-", ".sqlite")
-        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val dependencies = fakeAgentDependencies(
+            database.toString(),
+            FakeAgentGateway(ArrayDeque(listOf(FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON))),
+        )
         val rawFailure = "synthetic-private-receipt-response"
         val receiptSource = ReceiptAssociationFixture(
             requestFailure = rawFailure,
@@ -1378,7 +1395,17 @@ class NativeMcpAgentTest {
     @Test
     fun newFetchCanReplacePendingPreviewAndStillAssociateReceipts() = runBlocking {
         val database = Files.createTempFile("native-replace-pending-preview-", ".sqlite")
-        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val dependencies = fakeAgentDependencies(
+            database.toString(),
+            FakeAgentGateway(
+                ArrayDeque(
+                    listOf(
+                        FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON,
+                        FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON,
+                    ),
+                ),
+            ),
+        )
         val receiptSource = ReceiptAssociationFixture(
             dateTime = "2026-09-10T12:00:00Z",
             amountMinor = 34900,
@@ -1559,7 +1586,10 @@ class NativeMcpAgentTest {
     @Test
     fun mixedRequestShowsBankOnlyPreviewWhenReceiptSelectorFails() = runBlocking {
         val database = Files.createTempFile("native-mixed-selector-error-", ".sqlite")
-        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val dependencies = fakeAgentDependencies(
+            database.toString(),
+            FakeAgentGateway(ArrayDeque(listOf(FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON))),
+        )
         val receiptSource = ReceiptAssociationFixture(
             dateTime = "2026-09-10T12:00:00Z",
             amountMinor = 34900,

@@ -90,6 +90,34 @@ class FakeAgentGateway(
             }
         """.trimIndent()
 
+        val PURCHASE_CLASSIFICATION_JSON = """
+            {
+              "items": [
+                {
+                  "index": 0,
+                  "category_id": "food.groceries"
+                }
+              ],
+              "merchant_canonical_candidates": []
+            }
+        """.trimIndent()
+
+        val TWO_PURCHASES_CLASSIFICATION_JSON = """
+            {
+              "items": [
+                {
+                  "index": 0,
+                  "category_id": "food.groceries"
+                },
+                {
+                  "index": 1,
+                  "category_id": "food.groceries"
+                }
+              ],
+              "merchant_canonical_candidates": []
+            }
+        """.trimIndent()
+
         val READY_DRAFT_WITH_MEMORY_CANDIDATE_JSON = READY_DRAFT_JSON.replace(
             "\"unparsed_fragments\": []",
             "\"unparsed_fragments\": [],\n  \"memory_candidates\": [{\"text\":\"Исключать переводы между своими счетами\",\"reason\":\"Правило явно подтверждается сообщением пользователя.\"}]",

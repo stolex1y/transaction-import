@@ -1244,25 +1244,32 @@ class SmartExpenseAgent(
         )
     }
 
+    /**
+     * Classifies external candidates. Set [includeSessionContext] to `false` for
+     * isolated background work that must not reuse the session draft or conversation.
+     */
     suspend fun classifyExternalTransactions(
         sessionId: String,
         candidates: List<ExternalTransactionCandidate>,
         userText: String = "",
+        includeSessionContext: Boolean = true,
     ): List<ExternalTransactionCandidate> =
         classifyExternalTransactionsWithProposals(
             sessionId = sessionId,
             candidates = candidates,
             userText = userText,
+            includeSessionContext = includeSessionContext,
         ).candidates
 
     suspend fun classifyExternalTransactionsWithProposals(
         sessionId: String,
         candidates: List<ExternalTransactionCandidate>,
         userText: String = "",
+        includeSessionContext: Boolean = true,
     ): ExternalClassificationResult {
         if (candidates.isEmpty()) return ExternalClassificationResult(emptyList())
         val state = getSession(sessionId)
-        val contextManagement = contextManagementFor(state)
+        val contextManagement = if (includeSessionContext) contextManagementFor(state) else null
         val categoryCatalog = CategoryCatalog(repository.listCategories(includeArchived = true))
         val activeCategories = categoryCatalog.categories.filter {
             !it.archived && categoryCatalog.isLeaf(it.id)
@@ -1271,10 +1278,14 @@ class SmartExpenseAgent(
             "- ${category.id}: ${categoryCatalog.displayPath(category.id)} " +
                 "(${category.type.name.lowercase()}) — ${category.hint}"
         }
-        val rawMemory = repository.readMemorySnapshot(
-            sessionId = sessionId,
-            selectedLayers = selectedMemoryLayers(state, contextManagement),
-        )
+        val rawMemory = if (includeSessionContext) {
+            repository.readMemorySnapshot(
+                sessionId = sessionId,
+                selectedLayers = selectedMemoryLayers(state, contextManagement),
+            )
+        } else {
+            MemorySnapshot(selectedLayers = emptyList())
+        }
         val memory = rawMemory.copy(longTerm = getPreferences())
         val preferences = requireNotNull(memory.longTerm) {
             "Для классификации операций не выбран долговременный слой памяти."
@@ -1352,7 +1363,7 @@ class SmartExpenseAgent(
                             числового суффикса возвращай базовый alias без числа.
                         """.trimIndent(),
                         preferences = preferences,
-                        receiptState = state.receiptState,
+                        receiptState = if (includeSessionContext) state.receiptState else ReceiptState(),
                         taskInvariants = SYSTEM_TASK_INVARIANTS,
                     ),
                 ),
