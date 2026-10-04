@@ -206,25 +206,6 @@ class AgentIntegrationTest {
                 assertEquals(0, receipts.refreshes)
                 assertEquals("Завершите вход в отдельном окне.", polled["message"]!!.jsonPrimitive.content)
 
-                val rejectedRetry = client.post("/api/agent/receipts/session/retry") {
-                    header("Origin", "https://attacker.example")
-                    header("Sec-Fetch-Site", "cross-site")
-                }
-                assertEquals(HttpStatusCode.Forbidden, rejectedRetry.status)
-                assertEquals(0, receipts.refreshes)
-
-                val rejectedOriginlessHostRetry = client.post("/api/agent/receipts/session/retry") {
-                    header("Host", "attacker.example")
-                }
-                assertEquals(HttpStatusCode.Forbidden, rejectedOriginlessHostRetry.status)
-                assertEquals(0, receipts.refreshes)
-
-                val refreshed = client.post("/api/agent/receipts/session/retry") {
-                    header("Host", "localhost")
-                }.jsonObject()
-                assertEquals("active", refreshed["status"]!!.jsonPrimitive.content)
-                assertEquals("persisted", refreshed["persistence_status"]!!.jsonPrimitive.content)
-                assertEquals(1, receipts.refreshes)
 
                 val rejectedLogout = client.post("/api/agent/receipts/logout") {
                     header("Origin", "https://attacker.example")
@@ -286,6 +267,10 @@ class AgentIntegrationTest {
                 assertEquals("2026-09-01", receipts.searchArguments.last()["from"]!!.jsonPrimitive.content)
                 assertEquals("2026-09-02", receipts.searchArguments.last()["to"]!!.jsonPrimitive.content)
                 assertFalse(receipts.searchArguments.last().containsKey("query"))
+                assertEquals(1, receipts.refreshes)
+                val refreshed = client.get("/api/agent/receipts/session").jsonObject()
+                assertEquals("active", refreshed["status"]!!.jsonPrimitive.content)
+                assertEquals(1, receipts.refreshes)
                 assertEquals(0, receipts.detailCalls)
 
                 val searchWithSeller = client.post("/api/agent/receipts/search") {
@@ -859,16 +844,6 @@ class AgentIntegrationTest {
             return status
         }
 
-        override suspend fun receiptsRetrySession(): ReceiptsAuthStatus {
-            refreshes += 1
-            status = ReceiptsAuthStatus(
-                authenticated = true,
-                status = "active",
-                persistenceStatus = "persisted",
-            )
-            return status
-        }
-
         override suspend fun receiptsLogout(): ReceiptsAuthStatus {
             logouts += 1
             status = ReceiptsAuthStatus(
@@ -879,10 +854,19 @@ class AgentIntegrationTest {
             return status
         }
 
+
         override suspend fun callReceiptTool(tool: String, arguments: JsonObject): TbankToolCallResponse =
             when (tool) {
                 "search-receipts" -> {
                     searchArguments += arguments
+                    if (status.status != "active") {
+                        refreshes += 1
+                        status = ReceiptsAuthStatus(
+                            authenticated = true,
+                            status = "active",
+                            persistenceStatus = "persisted",
+                        )
+                    }
                     val receiptsJson = (1..101).joinToString(",") { index ->
                         val currencyField = if (index == 1) "" else ",\"currency\":\"RUB\""
                         """{"receipt_key":"$RAW_KEY_PREFIX$index","merchant":"Булочная","received_at":"2026-09-01T10:00:00+03:00","amount_minor":4200$currencyField}"""

@@ -27,7 +27,6 @@ const elements = {
     receiptsAuthDetail: document.querySelector("#receipts-auth-detail"),
     receiptsBrowserLogin: document.querySelector("#receipts-browser-login"),
     receiptsRefreshSession: document.querySelector("#receipts-refresh-session"),
-    receiptsSessionRetry: document.querySelector("#receipts-session-retry"),
     receiptsLogout: document.querySelector("#receipts-logout"),
     receiptsSearchForm: document.querySelector("#receipts-search-form"),
     receiptsFrom: document.querySelector("#receipts-from"),
@@ -183,7 +182,6 @@ for (const button of [
 }
 elements.receiptsBrowserLogin?.addEventListener("click", handleReceiptsBrowserLogin);
 elements.receiptsRefreshSession?.addEventListener("click", refreshReceiptsSession);
-elements.receiptsSessionRetry?.addEventListener("click", handleReceiptsSessionRetry);
 elements.receiptsLogout?.addEventListener("click", handleReceiptsLogout);
 elements.receiptsSearchForm?.addEventListener("submit", searchReceipts);
 elements.receiptsSummaryList?.addEventListener("click", handleReceiptSummaryClick);
@@ -409,7 +407,6 @@ function renderReceiptsAuth(status) {
     const statusCode = allowedStatuses.has(status?.status) ? status.status : "recoverable_error";
     receiptsAuthState = {
         authenticated: statusCode === "active" && status?.authenticated === true,
-        retryable: statusCode === "recoverable_error" && status?.retryable === true,
         status: statusCode,
     };
     const labels = {
@@ -423,7 +420,7 @@ function renderReceiptsAuth(status) {
         authenticating: "Продолжите вход в отдельном официальном окне ФНС. Не вводите код в это приложение.",
         active: "Авторизация готова. Можно искать чеки за выбранный период.",
         login_required: "Нажмите «Войти в ФНС» и завершите вход в отдельном окне.",
-        recoverable_error: "Обновите статус или явно повторите проверку авторизации.",
+        recoverable_error: "Следующий защищённый запрос автоматически попробует обновить авторизацию. Если восстановление не удастся, выполните вход в ФНС.",
         logout_failed: "Повторите выход, чтобы удалить сохранённую авторизацию.",
     };
     const message = typeof status?.message === "string" ? status.message.trim().slice(0, 240) : "";
@@ -449,7 +446,6 @@ function renderReceiptsAuth(status) {
     elements.receiptsAuthStatus.className = `mcp-server-status ${statusCode === "active" ? "connected" : ""}`;
     elements.receiptsAuthDetail.textContent =
         [details[statusCode], message, persistenceNote].filter(Boolean).join(" ");
-    elements.receiptsSessionRetry.hidden = !receiptsAuthState.retryable;
     elements.receiptsLogout.hidden = !receiptsAuthState.authenticated && statusCode !== "logout_failed";
     elements.receiptsBrowserLogin.hidden = statusCode === "active" && status?.authenticated === true;
     elements.receiptsBrowserLogin.disabled = statusCode === "authenticating";
@@ -478,17 +474,6 @@ async function handleReceiptsBrowserLogin() {
     }
 }
 
-async function handleReceiptsSessionRetry() {
-    elements.receiptsSessionRetry.disabled = true;
-    try {
-        renderReceiptsAuth(await api("/api/agent/receipts/session/retry", { method: "POST" }));
-    } catch (_) {
-        elements.receiptsAuthDetail.textContent =
-            "Не удалось выполнить явное обновление авторизации; последнее состояние сохранено.";
-    } finally {
-        elements.receiptsSessionRetry.disabled = !receiptsAuthState?.retryable;
-    }
-}
 
 async function handleReceiptsLogout() {
     elements.receiptsLogout.disabled = true;
@@ -523,6 +508,7 @@ async function searchReceipts(event) {
         elements.receiptsSearchStatus.className = "control-note error";
     } finally {
         elements.receiptsSearchSubmit.disabled = false;
+        await refreshReceiptsSession();
     }
 }
 
@@ -557,6 +543,7 @@ async function handleReceiptSummaryClick(event) {
         elements.receiptDetail.textContent = `Детали недоступны: ${error.message}`;
     } finally {
         button.disabled = false;
+        await refreshReceiptsSession();
     }
 }
 

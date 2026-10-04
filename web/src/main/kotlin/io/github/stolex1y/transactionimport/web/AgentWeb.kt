@@ -270,13 +270,6 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
     get("/api/agent/receipts/session") {
         call.respond(dependencies.requireAgentRuntime().requireReceiptsProxy().session())
     }
-    post("/api/agent/receipts/session/retry") {
-        if (!call.hasTrustedLoopbackOrigin()) {
-            call.respond(HttpStatusCode.Forbidden)
-            return@post
-        }
-        call.respond(dependencies.requireAgentRuntime().requireReceiptsProxy().retrySession())
-    }
     post("/api/agent/receipts/logout") {
         if (!call.hasTrustedLoopbackOrigin()) {
             call.respond(HttpStatusCode.Forbidden)

@@ -327,8 +327,6 @@ class McpCatalogService private constructor(
     override suspend fun receiptsSession(): ReceiptsAuthStatus =
         receiptAuth("/receipts/session", post = false)
 
-    override suspend fun receiptsRetrySession(): ReceiptsAuthStatus =
-        receiptAuth("/receipts/session/retry", post = true)
 
     override suspend fun receiptsLogout(): ReceiptsAuthStatus =
         receiptAuth("/receipts/logout", post = true)
@@ -339,9 +337,8 @@ class McpCatalogService private constructor(
     ): TbankToolCallResponse = callConfiguredTool(RECEIPTS_SERVER_ID, tool, arguments)
 
     private suspend fun receiptAuth(path: String, post: Boolean): ReceiptsAuthStatus = mutex.withLock {
-        val canRetryRefresh = path == "/receipts/session/retry"
         val config = configs.firstOrNull { it.id == RECEIPTS_SERVER_ID && it.enabled }
-            ?: return@withLock unavailableReceiptAuth(retryable = canRetryRefresh)
+            ?: return@withLock unavailableReceiptAuth()
         try {
             val response = if (post) {
                 httpClient.post(serviceUrl(config, path))
@@ -349,13 +346,13 @@ class McpCatalogService private constructor(
                 httpClient.get(serviceUrl(config, path))
             }
             if (!response.status.isSuccess()) {
-                return@withLock unavailableReceiptAuth(retryable = canRetryRefresh)
+                return@withLock unavailableReceiptAuth()
             }
             response.body<ReceiptsAuthStatus>().sanitized()
         } catch (error: CancellationException) {
             throw error
         } catch (_: Throwable) {
-            unavailableReceiptAuth(retryable = canRetryRefresh)
+            unavailableReceiptAuth()
         }
     }
 
@@ -389,10 +386,9 @@ class McpCatalogService private constructor(
         )
     }
 
-    private fun unavailableReceiptAuth(retryable: Boolean) = ReceiptsAuthStatus(
+    private fun unavailableReceiptAuth() = ReceiptsAuthStatus(
         authenticated = false,
         status = "recoverable_error",
-        retryable = retryable,
         persistenceStatus = "unknown",
     )
 

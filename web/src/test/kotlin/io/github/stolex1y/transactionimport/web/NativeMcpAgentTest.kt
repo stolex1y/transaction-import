@@ -1849,6 +1849,177 @@ class NativeMcpAgentTest {
         }
     }
 
+    @Test
+    fun accountAliasFetchAutomaticallyResolvesOneExactAccount() = runBlocking {
+        val database = Files.createTempFile("native-account-alias-single-", ".sqlite")
+        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val runtime = nativeMcpEnabled(dependencies.runtimeConfig)
+        val gateway = GetTransactionsOnlyGateway("Основной счёт")
+        val provider = FakeNativeMcpProvider(transactionResponseText = """{"transactions":[]}""")
+        val session = dependencies.agent.createSession(
+            "Single account alias",
+            runtime.defaultAgentConfig(),
+        )
+        try {
+            val native = NativeMcpAgent(
+                agent = dependencies.agent,
+                gatewayResolver = AgentGatewayResolver { gateway },
+                mcpTools = provider,
+                runtimeConfig = runtime,
+            )
+            val handled = assertIs<NativeMcpHandlingResult.Handled>(
+                native.handle(
+                    sessionId = session.session.id,
+                    expectedRevision = session.session.revision,
+                    text = "Загрузи операции по Основному счёту.",
+                ),
+            )
+
+            assertEquals(listOf("list-accounts", "get-account-transactions"), provider.calls)
+            assertEquals("raw-account-001", provider.transactionArguments["account_ref"]?.jsonPrimitive?.content)
+            assertTrue(handled.response.state.messages.none { it.content.contains("raw-account-001") })
+            assertTrue(gateway.requests.flatMap { it.messages }.none {
+                it.content.contains("raw-account-001")
+            })
+        } finally {
+            dependencies.scheduler?.close()
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun ambiguousAccountAliasAsksBeforeFetchingTransactions() = runBlocking {
+        val database = Files.createTempFile("native-account-alias-ambiguous-", ".sqlite")
+        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val runtime = nativeMcpEnabled(dependencies.runtimeConfig)
+        val gateway = GetTransactionsOnlyGateway("Неизвестный счёт")
+        val provider = FakeNativeMcpProvider(
+            transactionResponseText = """{"transactions":[]}""",
+            accountResponseText = """{"accounts":[
+                {"id":"synthetic-account-1","name":"Синтетический счёт A"},
+                {"id":"synthetic-account-2","name":"Синтетический счёт B"}
+            ]}""",
+        )
+        val session = dependencies.agent.createSession(
+            "Ambiguous account alias",
+            runtime.defaultAgentConfig(),
+        )
+        try {
+            val native = NativeMcpAgent(
+                agent = dependencies.agent,
+                gatewayResolver = AgentGatewayResolver { gateway },
+                mcpTools = provider,
+                runtimeConfig = runtime,
+            )
+            val handled = assertIs<NativeMcpHandlingResult.Handled>(
+                native.handle(
+                    sessionId = session.session.id,
+                    expectedRevision = session.session.revision,
+                    text = "Загрузи операции за сентябрь.",
+                ),
+            )
+
+            assertTrue(handled.response.assistantText.contains("Уточните, какой счёт использовать"))
+            assertTrue(handled.response.assistantText.contains("Синтетический счёт A"))
+            assertTrue(handled.response.assistantText.contains("Синтетический счёт B"))
+            assertEquals(listOf("list-accounts"), provider.calls)
+            assertTrue(provider.transactionArguments.isEmpty())
+            assertTrue(handled.response.state.messages.none {
+                it.content.contains("synthetic-account-1") || it.content.contains("synthetic-account-2")
+            })
+            assertTrue(gateway.requests.flatMap { it.messages }.none {
+                it.content.contains("synthetic-account-1") || it.content.contains("synthetic-account-2")
+            })
+        } finally {
+            dependencies.scheduler?.close()
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun duplicateAccountAliasesAreExplicitlySelectable() = runBlocking {
+        val database = Files.createTempFile("native-account-alias-duplicates-", ".sqlite")
+        val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val runtime = nativeMcpEnabled(dependencies.runtimeConfig)
+        val gateway = DuplicateAccountAliasGateway()
+        val provider = FakeNativeMcpProvider(
+            transactionResponseText = """{"transactions":[]}""",
+            accountResponseText = """{"accounts":[
+                {"id":"synthetic-account-a","name":"Синтетический счёт"},
+                {"id":"synthetic-account-b","name":"Синтетический счёт"}
+            ]}""",
+        )
+        val session = dependencies.agent.createSession(
+            "Duplicate account aliases",
+            runtime.defaultAgentConfig(),
+        )
+        try {
+            val native = NativeMcpAgent(
+                agent = dependencies.agent,
+                gatewayResolver = AgentGatewayResolver { gateway },
+                mcpTools = provider,
+                runtimeConfig = runtime,
+            )
+            val ambiguous = assertIs<NativeMcpHandlingResult.Handled>(
+                native.handle(
+                    sessionId = session.session.id,
+                    expectedRevision = session.session.revision,
+                    text = "Загрузи операции по Синтетическому счёту.",
+                ),
+            )
+            assertTrue(ambiguous.response.assistantText.contains("Синтетический счёт #1"))
+            assertTrue(ambiguous.response.assistantText.contains("Синтетический счёт #2"))
+            assertEquals(listOf("list-accounts"), provider.calls)
+
+            val firstChoice = assertIs<NativeMcpHandlingResult.Handled>(
+                native.handle(
+                    sessionId = session.session.id,
+                    expectedRevision = ambiguous.response.state.session.revision,
+                    text = "Используй «Синтетический счёт #1».",
+                ),
+            )
+            assertEquals(
+                "synthetic-account-a",
+                provider.transactionArguments["account_ref"]?.jsonPrimitive?.content,
+            )
+            assertEquals(
+                listOf("list-accounts", "list-accounts", "get-account-transactions"),
+                provider.calls,
+            )
+
+            val secondChoice = assertIs<NativeMcpHandlingResult.Handled>(
+                native.handle(
+                    sessionId = session.session.id,
+                    expectedRevision = firstChoice.response.state.session.revision,
+                    text = "Используй «Синтетический счёт #2».",
+                ),
+            )
+            assertEquals(
+                "synthetic-account-b",
+                provider.transactionArguments["account_ref"]?.jsonPrimitive?.content,
+            )
+            assertEquals(
+                listOf(
+                    "list-accounts",
+                    "list-accounts",
+                    "get-account-transactions",
+                    "list-accounts",
+                    "get-account-transactions",
+                ),
+                provider.calls,
+            )
+            assertTrue(secondChoice.response.state.messages.none {
+                it.content.contains("synthetic-account-a") || it.content.contains("synthetic-account-b")
+            })
+            assertTrue(gateway.requests.flatMap { it.messages }.none {
+                it.content.contains("synthetic-account-a") || it.content.contains("synthetic-account-b")
+            })
+        } finally {
+            dependencies.scheduler?.close()
+            database.deleteIfExists()
+        }
+    }
+
     private fun io.github.stolex1y.transactionimport.core.ImportSessionState.sessionRevision(): Long =
         session.revision
 }
@@ -2113,14 +2284,86 @@ private class NoToolGateway : ChatCompletionGateway {
     }
 }
 
+private class DuplicateAccountAliasGateway : ChatCompletionGateway {
+    val requests = mutableListOf<ChatCompletionRequest>()
+    private val aliases = listOf("Синтетический счёт", "Синтетический счёт #1", "Синтетический счёт #2")
+    private var nextAlias = 0
+
+    override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+        requests += request
+        val message = if (request.messages.lastOrNull()?.role == "tool") {
+            ResponseMessage(content = "Операции получены.")
+        } else {
+            val alias = aliases.getOrNull(nextAlias++)
+                ?: error("Unexpected synthetic account resolution request")
+            ResponseMessage(
+                content = null,
+                toolCalls = listOf(
+                    ChatToolCall(
+                        id = "duplicate-account-fetch-$nextAlias",
+                        function = ChatFunctionCall(
+                            name = "mcp_tbank-transactions_get-account-transactions",
+                            arguments = """
+                                {"account_alias":"$alias","from":"2026-09-01","to":"2026-09-30"}
+                            """.trimIndent(),
+                        ),
+                    ),
+                ),
+            )
+        }
+        return ChatCompletionResponse(
+            choices = listOf(
+                ChatChoice(
+                    message = message,
+                    finishReason = if (message.toolCalls.isNullOrEmpty()) "stop" else "tool_calls",
+                ),
+            ),
+        )
+    }
+}
+
+private class GetTransactionsOnlyGateway(
+    private val accountAlias: String,
+) : ChatCompletionGateway {
+    val requests = mutableListOf<ChatCompletionRequest>()
+
+    override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+        requests += request
+        val message = if (requests.size == 1) {
+            ResponseMessage(
+                content = null,
+                toolCalls = listOf(
+                    ChatToolCall(
+                        id = "get-transactions",
+                        function = ChatFunctionCall(
+                            name = "mcp_tbank-transactions_get-account-transactions",
+                            arguments = """
+                                {"account_alias":"$accountAlias","from":"2026-09-01","to":"2026-09-30","limit":50}
+                            """.trimIndent(),
+                        ),
+                    ),
+                ),
+            )
+        } else {
+            ResponseMessage(content = "Операции получены.")
+        }
+        return ChatCompletionResponse(
+            choices = listOf(ChatChoice(message = message, finishReason = if (requests.size == 1) "tool_calls" else "stop")),
+            usage = Usage(promptTokens = 10, completionTokens = 5, totalTokens = 15),
+        )
+    }
+}
+
 private class FakeNativeMcpProvider(
     private val transactionDate: String = "2026-09-02",
     private val transactionFetchError: Boolean = false,
     private val transactionResponseText: String? = null,
+    private val accountResponseText: String =
+        """{"data":{"accounts":[{"id":"raw-account-001","account_name":"Основной счёт","currency":"643","balance_minor":100000}]}}""",
 ) : McpToolProvider {
     var transactionArguments: JsonObject = JsonObject(emptyMap())
     var callCount = 0
-
+    val calls = mutableListOf<String>()
     override suspend fun allowedTools(): List<McpCallableTool> = listOf(
         McpCallableTool(
             serverId = "tbank-transactions",
@@ -2159,10 +2402,11 @@ private class FakeNativeMcpProvider(
         arguments: JsonObject,
     ): TbankToolCallResponse {
         callCount += 1
+        calls += tool
         return when (tool) {
             "list-accounts" -> TbankToolCallResponse(
                 tool = tool,
-                text = """{"data":{"accounts":[{"id":"raw-account-001","account_name":"Основной счёт","currency":"643","balance_minor":100000}]}}""",
+                text = accountResponseText,
             )
             "get-account-transactions" -> {
                 transactionArguments = arguments

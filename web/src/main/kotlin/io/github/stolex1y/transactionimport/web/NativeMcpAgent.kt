@@ -138,12 +138,24 @@ data class McpReceiptMatchingSummary(
     @SerialName("candidate_count") val candidateCount: Int = 0,
     @SerialName("detail_count") val detailCount: Int = 0,
 )
+sealed interface NativeMcpArgumentPreparation {
+    data class Ready(val arguments: JsonObject) : NativeMcpArgumentPreparation
+    data class Clarification(val message: String) : NativeMcpArgumentPreparation
+}
+
 interface NativeMcpTransactionSourceAdapter {
     fun supports(tool: McpCallableTool): Boolean
 
     fun toolDefinition(tool: McpCallableTool): ChatToolDefinition
 
     fun prepareArguments(tool: McpCallableTool, arguments: JsonObject): JsonObject
+
+    suspend fun prepareArgumentsForExecution(
+        tool: McpCallableTool,
+        arguments: JsonObject,
+        userText: String,
+    ): NativeMcpArgumentPreparation =
+        NativeMcpArgumentPreparation.Ready(prepareArguments(tool, arguments))
 
     suspend fun normalize(
         tool: McpCallableTool,
@@ -263,7 +275,7 @@ suspend fun handle(
 
     val gateway = gatewayResolver.resolve(state.session.config)
     val bindings = tools.associateBy { functionName(it.serverId, it.name) }
-    val sourceAdapters = listOf<NativeMcpTransactionSourceAdapter>(TbankTransactionSourceAdapter()) +
+    val sourceAdapters = listOf<NativeMcpTransactionSourceAdapter>(TbankTransactionSourceAdapter(tools)) +
         transactionSourceAdapters
     val adaptersByFunction = tools.associate { tool ->
         val matchingAdapters = sourceAdapters.filter { it.supports(tool) }
@@ -632,6 +644,30 @@ suspend fun handle(
                     val rawArguments = planned.rawArguments
                     val binding = planned.binding
                     val sourceAdapter = planned.sourceAdapter
+                    val argumentPreparation = if (sourceAdapter?.isTransactionFetch(binding) == true) {
+                        withTimeout(loopConfig.callTimeoutMs) {
+                            sourceAdapter.prepareArgumentsForExecution(binding, rawArguments, text)
+                        }
+                    } else {
+                        NativeMcpArgumentPreparation.Ready(planned.sourceArguments)
+                    }
+                    if (argumentPreparation is NativeMcpArgumentPreparation.Clarification) {
+                        val assistantText = argumentPreparation.message
+                        val savedState = agent.recordExternalExchange(
+                            sessionId = sessionId,
+                            expectedRevision = expectedRevision,
+                            userText = text,
+                            assistantText = assistantText,
+                            metric = metric(state, response),
+                        )
+                        return NativeMcpHandlingResult.Handled(
+                            NativeMcpMessageResponse(
+                                state = savedState,
+                                assistantText = assistantText,
+                            ),
+                        )
+                    }
+                    val sourceArguments = (argumentPreparation as NativeMcpArgumentPreparation.Ready).arguments
                     if (sourceAdapter?.isTransactionFetch(binding) == true) {
                         lastFetchArguments = rawArguments
                     }
@@ -650,7 +686,7 @@ suspend fun handle(
                             mcpTools.callConfiguredTool(
                                 serverId = binding.serverId,
                                 tool = binding.name,
-                                arguments = planned.sourceArguments,
+                                arguments = sourceArguments,
                             )
                         }
                     }
@@ -1808,7 +1844,10 @@ private data class BankReceiptMatch(
     private fun normalizeAccounts(
         element: JsonElement,
         aliases: MutableMap<String, String>,
+        aliasBases: MutableMap<String, String>,
     ): NormalizedToolResult {
+        aliases.clear()
+        aliasBases.clear()
         val accounts = accountObjects(element)
         if (accounts.size > MAX_NATIVE_RESULT_ITEMS) {
             return NormalizedToolResult(
@@ -1817,21 +1856,36 @@ private data class BankReceiptMatch(
                 isError = true,
             )
         }
-        val used = aliases.keys.toMutableSet()
-        val normalized = accounts.mapNotNull { account ->
+        val eligibleAccounts = accounts.mapNotNull { account ->
             val ref = accountReference(account) ?: return@mapNotNull null
-            val name = accountName(account)
-            val baseAlias = name.ifBlank { "Счёт" }
-            var alias = baseAlias
-            var suffix = 2
-            while (!used.add(alias)) {
-                alias = "$baseAlias #$suffix"
-                suffix += 1
+            val baseAlias = accountName(account).ifBlank { "Счёт" }
+            Triple(account, ref, baseAlias)
+        }
+        val baseCounts = eligibleAccounts
+            .groupingBy { it.third.lowercase(java.util.Locale.ROOT) }
+            .eachCount()
+        val aliasOccurrences = mutableMapOf<String, Int>()
+        val used = mutableSetOf<String>()
+        val normalized = eligibleAccounts.map { (account, ref, baseAlias) ->
+            val baseKey = baseAlias.lowercase(java.util.Locale.ROOT)
+            val alias = if ((baseCounts[baseKey] ?: 0) > 1) {
+                val ordinal = (aliasOccurrences[baseKey] ?: 0) + 1
+                aliasOccurrences[baseKey] = ordinal
+                "$baseAlias #$ordinal"
+            } else {
+                baseAlias
             }
-            aliases[alias] = ref
+            var uniqueAlias = alias
+            var collisionSuffix = 2
+            while (!used.add(uniqueAlias.lowercase(java.util.Locale.ROOT))) {
+                uniqueAlias = "$alias ($collisionSuffix)"
+                collisionSuffix += 1
+            }
+            aliases[uniqueAlias] = ref
+            aliasBases[uniqueAlias] = baseAlias
             buildJsonObject {
-                put("account_alias", alias)
-                put("name", name.ifBlank { alias })
+                put("account_alias", uniqueAlias)
+                put("name", accountName(account).ifBlank { uniqueAlias })
                 val currency = normalizeCurrencyCode(
                     account["currency"]?.jsonPrimitive?.contentOrNull.orEmpty(),
                 )
@@ -2077,8 +2131,11 @@ private fun buildDescription(tool: McpCallableTool): String = buildString {
 private fun functionName(serverId: String, tool: String): String =
     "mcp_${serverId}_${tool}".replace(Regex("[^A-Za-z0-9_-]"), "_")
 
-    private inner class TbankTransactionSourceAdapter : NativeMcpTransactionSourceAdapter {
+    private inner class TbankTransactionSourceAdapter(
+        private val availableTools: List<McpCallableTool>,
+    ) : NativeMcpTransactionSourceAdapter {
         private val accountAliases = linkedMapOf<String, String>()
+        private val accountAliasBases = linkedMapOf<String, String>()
 
         override fun supports(tool: McpCallableTool): Boolean =
             tool.serverId in setOf(TBANK_SERVER_ID, LEGACY_TBANK_SERVER_ID) &&
@@ -2114,12 +2171,75 @@ private fun functionName(serverId: String, tool: String): String =
                 ?.trim()
                 ?.takeIf(String::isNotBlank)
                 ?: throw AgentResponseException("Для операций нужен account_alias из list-accounts.")
-            val accountRef = accountAliases[alias]
-                ?: throw AgentResponseException("Неизвестный account_alias; сначала запросите list-accounts.")
-            val sanitized = arguments.toMutableMap()
-            sanitized.remove("account_alias")
-            sanitized["account_ref"] = JsonPrimitive(accountRef)
-            return JsonObject(sanitized)
+            return JsonObject(arguments + ("account_alias" to JsonPrimitive(alias)))
+        }
+
+        override suspend fun prepareArgumentsForExecution(
+            tool: McpCallableTool,
+            arguments: JsonObject,
+            userText: String,
+        ): NativeMcpArgumentPreparation {
+            val prepared = prepareArguments(tool, arguments)
+            if (tool.name != TBANK_GET_TRANSACTIONS) {
+                return NativeMcpArgumentPreparation.Ready(prepared)
+            }
+            val alias = prepared["account_alias"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            if (accountAliases.isEmpty()) {
+                val listTool = availableTools.firstOrNull {
+                    it.serverId == tool.serverId && it.name == TBANK_LIST_ACCOUNTS
+                } ?: return NativeMcpArgumentPreparation.Clarification(
+                    "Не удалось получить список доступных счетов. Проверьте подключение и повторите запрос.",
+                )
+                val response = try {
+                    withTimeout(runtimeConfig.mcpToolLoop.callTimeoutMs) {
+                        mcpTools.callConfiguredTool(
+                            serverId = listTool.serverId,
+                            tool = listTool.name,
+                            arguments = buildJsonObject {},
+                        )
+                    }
+                } catch (error: kotlinx.coroutines.CancellationException) {
+                    throw error
+                } catch (_: Throwable) {
+                    return NativeMcpArgumentPreparation.Clarification(
+                        "Не удалось получить список доступных счетов. Проверьте подключение и повторите запрос.",
+                    )
+                }
+                val normalized = normalize(
+                    listTool,
+                    buildJsonObject {},
+                    NativeMcpToolCallResult(response.isError, response.text),
+                )
+                if (normalized.isError || accountAliases.isEmpty()) {
+                    return NativeMcpArgumentPreparation.Clarification(
+                        "Не удалось получить список доступных счетов. Проверьте подключение и повторите запрос.",
+                    )
+                }
+            }
+            val accountRef = resolveAccountRef(alias, userText)
+                ?: return NativeMcpArgumentPreparation.Clarification(
+                    "Уточните, какой счёт использовать: " +
+                        accountAliases.keys.joinToString("、") { "«$it»" } +
+                        ".",
+                )
+            val sourceArguments = prepared.toMutableMap()
+            sourceArguments.remove("account_alias")
+            sourceArguments["account_ref"] = JsonPrimitive(accountRef)
+            return NativeMcpArgumentPreparation.Ready(JsonObject(sourceArguments))
+        }
+
+        private fun resolveAccountRef(alias: String, userText: String): String? {
+            val normalizedAlias = accountAliases.keys.singleOrNull {
+                it.equals(alias, ignoreCase = true)
+            } ?: return null
+            val baseAlias = accountAliasBases[normalizedAlias] ?: normalizedAlias
+            val duplicateName = accountAliasBases.values.count {
+                it.equals(baseAlias, ignoreCase = true)
+            } > 1
+            if (!duplicateName) return accountAliases[normalizedAlias]
+            if (normalizedAlias.equals(baseAlias, ignoreCase = true)) return null
+            if (!userText.contains(normalizedAlias, ignoreCase = true)) return null
+            return accountAliases[normalizedAlias]
         }
 
         override suspend fun normalize(
@@ -2150,7 +2270,7 @@ private fun functionName(serverId: String, tool: String): String =
             }
             val redactedValues = sensitiveValues(element)
             val normalized = when (tool.name) {
-                TBANK_LIST_ACCOUNTS -> normalizeAccounts(element, accountAliases)
+                TBANK_LIST_ACCOUNTS -> normalizeAccounts(element, accountAliases, accountAliasBases)
                 TBANK_GET_TRANSACTIONS -> normalizeTransactions(element, arguments)
                 else -> NormalizedToolResult(redactJson(element).toString(), emptyList())
             }
@@ -2175,7 +2295,7 @@ private fun functionName(serverId: String, tool: String): String =
             properties.remove("account_id")
             properties["account_alias"] = buildJsonObject {
                 put("type", "string")
-                put("description", "Отображаемое имя из результата list-accounts")
+                put("description", "Отображаемый алиас счёта из списка list-accounts; перед fetch сопоставляется приложением, не передавай идентификаторы.")
             }
             schema["properties"] = JsonObject(properties)
             val required = (schema["required"] as? JsonArray)

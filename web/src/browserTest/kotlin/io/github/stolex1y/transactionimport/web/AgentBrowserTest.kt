@@ -12,6 +12,9 @@ import io.github.stolex1y.transactionimport.core.ChatFunctionCall
 import io.github.stolex1y.transactionimport.core.ChatToolCall
 import io.github.stolex1y.transactionimport.core.ResponseMessage
 import io.github.stolex1y.transactionimport.core.Usage
+import io.github.stolex1y.transactionimport.core.AgentRuntimeConfig
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import io.github.stolex1y.transactionimport.core.ContextManagementConfig
 import io.github.stolex1y.transactionimport.core.AgentGatewayResolver
 import io.github.stolex1y.transactionimport.core.ContextStrategy
@@ -235,12 +238,13 @@ class AgentBrowserTest {
     }
 
     @Test
-    fun receiptsRefreshFailureShowsSafeRecoveryState() {
-        val database = Files.createTempFile("agent-receipts-refresh-ui-", ".sqlite")
+    fun receiptsUseAutomaticRefreshWithoutManualAction() {
+        val database = Files.createTempFile("agent-receipts-auto-refresh-ui-", ".sqlite")
         val port = ServerSocket(0).use { it.localPort }
+        val authProvider = BrowserReceiptAuthProvider()
         val dependencies = fakeAgentDependencies(
             databasePath = database.toString(),
-            receiptsProxy = ReceiptsProxyService(BrowserReceiptAuthProvider()),
+            receiptsProxy = ReceiptsProxyService(authProvider),
         )
         val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
             module(agentDependencies = dependencies)
@@ -256,13 +260,41 @@ class AgentBrowserTest {
                         page.waitForFunction(
                             "() => document.querySelector('#receipts-auth-status')?.textContent === 'Сервис временно недоступен'",
                         )
-                        page.locator("#receipts-session-retry").click()
+                        assertEquals(0, page.locator("#receipts-session-retry").count())
+                        assertTrue(page.locator("#receipts-refresh-session").isVisible)
+                        page.locator("#receipts-refresh-session").click()
+                        page.waitForFunction("() => document.querySelector('#receipts-auth-status')?.textContent")
+                        assertEquals(0, authProvider.refreshAttempts)
+
+                        page.locator("#receipts-from").fill("2026-09-01")
+                        page.locator("#receipts-to").fill("2026-09-30")
+                        page.locator("#receipts-search-form button[type='submit']").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#receipts-auth-status')?.textContent === 'Авторизация активна'",
+                        )
+                        assertEquals("Чеки за выбранный период не найдены.", page.locator("#receipts-search-status").textContent())
+                        assertEquals(1, authProvider.refreshAttempts)
+
+                        authProvider.transientFailure = true
+                        page.locator("#receipts-search-form button[type='submit']").click()
                         page.waitForFunction(
                             "() => document.querySelector('#receipts-auth-status')?.textContent === 'Сервис временно недоступен'",
                         )
-                        assertTrue(page.locator("#receipts-auth-detail").textContent().contains("Обновите статус"))
-                        assertTrue(page.locator("#receipts-auth-detail").textContent().contains("Синтетическая ошибка обновления"))
-                        assertTrue(page.locator("#receipts-session-retry").isVisible)
+                        assertTrue(page.locator("#receipts-search-status").textContent().startsWith("Поиск не выполнен:"))
+                        assertEquals(2, authProvider.refreshAttempts)
+
+                        authProvider.transientFailure = false
+                        authProvider.rejectRefresh = true
+                        page.locator("#receipts-search-form button[type='submit']").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#receipts-auth-status')?.textContent === 'Нужно войти'",
+                        )
+                        assertTrue(page.locator("#receipts-search-status").textContent().startsWith("Поиск не выполнен:"))
+                        assertTrue(page.locator("#receipts-browser-login").isVisible)
+                        page.locator("#receipts-browser-login").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#receipts-auth-status')?.textContent === 'Авторизация активна'",
+                        )
                         assertFalse(page.locator("#receipts-auth-detail").textContent().contains("synthetic-secret"))
                     }
                 }
@@ -272,6 +304,113 @@ class AgentBrowserTest {
             database.deleteIfExists()
         }
     }
+    @Test
+    fun browserFetchResolvesOneAccountAliasBeforeImport() {
+        val database = Files.createTempFile("agent-account-alias-browser-", ".sqlite")
+        val base = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val runtime = base.runtimeConfig.copy(
+            mcpToolLoop = base.runtimeConfig.mcpToolLoop.copy(enabled = true),
+        )
+        val gateway = BrowserAccountFetchGateway("Synthetic account")
+        val source = BrowserAccountResolutionSource()
+        val dependencies = browserAccountDependencies(base, runtime, gateway, source)
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = dependencies)
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        page.locator("#agent-message").fill("Загрузи операции по Synthetic account за сентябрь.")
+                        val response = page.waitForResponse(
+                            { it.request().method() == "POST" && it.url().endsWith("/messages") },
+                            { page.locator("#send-message").click() },
+                        )
+                        assertTrue(response.status() in 200..299, response.text())
+                        assertEquals(listOf("list-accounts", "get-account-transactions"), source.calls)
+                        assertEquals(
+                            "synthetic-account-id",
+                            source.transactionArguments["account_ref"]?.jsonPrimitive?.content,
+                        )
+                        val visibleAssistantText =
+                            page.locator("#message-list .assistant").last().textContent()
+                        assertTrue(visibleAssistantText.isNotBlank(), visibleAssistantText)
+                        assertFalse(page.locator("#message-list").textContent().contains("synthetic-account-id"))
+                        assertTrue(gateway.requests.flatMap { it.messages }.none {
+                            it.content.contains("synthetic-account-id")
+                        })
+                    }
+                }
+            }
+        } finally {
+            base.scheduler?.close()
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun browserAmbiguousAccountAliasAsksBeforeImport() {
+        val database = Files.createTempFile("agent-account-ambiguous-browser-", ".sqlite")
+        val base = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+        val runtime = base.runtimeConfig.copy(
+            mcpToolLoop = base.runtimeConfig.mcpToolLoop.copy(enabled = true),
+        )
+        val gateway = BrowserAccountFetchGateway("Unknown account")
+        val source = BrowserAccountResolutionSource(
+            accountResponseText = """{"accounts":[
+                {"id":"synthetic-account-a","name":"Synthetic account A"},
+                {"id":"synthetic-account-b","name":"Synthetic account B"}
+            ]}""",
+        )
+        val dependencies = browserAccountDependencies(base, runtime, gateway, source)
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = dependencies)
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        page.locator("#agent-message").fill("Загрузи операции за сентябрь.")
+                        val response = page.waitForResponse(
+                            { it.request().method() == "POST" && it.url().endsWith("/messages") },
+                            { page.locator("#send-message").click() },
+                        )
+                        assertTrue(response.status() in 200..299, response.text())
+                        val visibleText = page.locator("#message-list").textContent()
+                        assertTrue(visibleText.contains("Уточните, какой счёт использовать"), visibleText)
+                        assertTrue(visibleText.contains("Synthetic account A"), visibleText)
+                        assertTrue(visibleText.contains("Synthetic account B"), visibleText)
+                        assertEquals(listOf("list-accounts"), source.calls)
+                        assertTrue(source.transactionArguments.isEmpty())
+                        assertFalse(visibleText.contains("synthetic-account-a"))
+                        assertFalse(visibleText.contains("synthetic-account-b"))
+                        assertTrue(gateway.requests.flatMap { it.messages }.none {
+                            it.content.contains("synthetic-account-a") ||
+                                it.content.contains("synthetic-account-b")
+                        })
+                    }
+                }
+            }
+        } finally {
+            base.scheduler?.close()
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
     @Test
     fun conflictingMerchantProposalLeavesSavedRuleUnchangedAndExplainsRecovery() {
         val database = Files.createTempFile("agent-merchant-conflict-", ".sqlite")
@@ -3278,9 +3417,12 @@ class AgentBrowserTest {
     @Test
     fun noReceiptMatchIsNeutralAndExportableInBrowser() {
         val database = Files.createTempFile("agent-browser-receipt-unmatched-", ".sqlite")
-        val gateway = BrowserNativePlanGateway(FakeAgentGateway())
+        val gateway = BrowserNativePlanGateway(
+            FakeAgentGateway(ArrayDeque(listOf(FakeAgentGateway.READY_DRAFT_JSON))),
+        )
         val baseDependencies = fakeAgentDependencies(database.toString(), gateway)
         var searchCalls = 0
+        var detailCalls = 0
         val emptyReceiptSource = object : McpToolProvider {
             override suspend fun allowedTools(): List<McpCallableTool> = receiptToolCapabilities()
 
@@ -3290,6 +3432,10 @@ class AgentBrowserTest {
                 arguments: JsonObject,
             ): TbankToolCallResponse {
                 assertEquals("receipts", serverId)
+                if (tool == "get-receipt") {
+                    detailCalls += 1
+                    error("Unknown purchase eligibility must not trigger detail fetch.")
+                }
                 assertEquals("search-receipts", tool)
                 searchCalls += 1
                 return TbankToolCallResponse(
@@ -3341,6 +3487,11 @@ class AgentBrowserTest {
                         page.locator("#operation-table").waitFor()
 
                         val excludedRow = page.locator("tr[data-transaction-id='2']")
+                        assertEquals(
+                            "",
+                            excludedRow.locator("select[name='category_id']").inputValue(),
+                            "The fixture row has unknown purchase eligibility.",
+                        )
                         excludedRow.locator("input[name='included']").uncheck()
                         excludedRow.locator("button[data-action='save-operation']").click()
                         page.waitForFunction(
@@ -3354,18 +3505,19 @@ class AgentBrowserTest {
 
                         val unmatched = page.locator(".receipt-association-status.unmatched")
                         unmatched.first().waitFor()
-                        assertEquals(1, unmatched.count())
-                        assertEquals("Без чека", unmatched.first().textContent())
-                        val excludedReview = excludedRow.locator(".receipt-association-status.ambiguous")
-                        assertEquals(1, excludedReview.count())
-                        assertTrue(
-                            excludedReview.textContent().contains(
-                                "Сначала подтвердите, что это покупка или расход.",
-                            ),
-                        )
+                        assertEquals(2, unmatched.count())
+                        assertTrue(unmatched.allTextContents().all { it == "Без чека" })
+                        assertTrue(excludedRow.locator(".receipt-association-status.unmatched").isVisible)
+                        assertEquals(0, excludedRow.locator(".receipt-association-status.ambiguous").count())
                         assertEquals("Готово к экспорту", page.locator("#receipt-status").textContent())
                         assertFalse(page.locator("#build-batch").isDisabled)
                         assertEquals(1, searchCalls)
+                        assertEquals(0, detailCalls)
+                        assertFalse(
+                            page.locator("#message-list .assistant").allTextContents().any {
+                                it.contains("подтвердите, что это покупка или расход", ignoreCase = true)
+                            },
+                        )
                         val download = page.waitForDownload {
                             page.locator("#build-batch").click()
                         }
@@ -3507,8 +3659,6 @@ class AgentBrowserTest {
                 persistenceMessage = "Проверочная session живёт только в памяти.",
             )
 
-        override suspend fun receiptsRetrySession() =
-            ReceiptsAuthStatus(authenticated = true, status = "active")
 
         override suspend fun receiptsLogout() =
             ReceiptsAuthStatus(authenticated = false, status = "login_required")
@@ -3573,10 +3723,132 @@ class AgentBrowserTest {
         )
     }
 
+    private fun browserAccountDependencies(
+        base: AgentWebDependencies,
+        runtime: AgentRuntimeConfig,
+        gateway: ChatCompletionGateway,
+        source: McpToolProvider,
+    ): AgentWebDependencies {
+        val native = NativeMcpAgent(
+            agent = base.agent,
+            gatewayResolver = AgentGatewayResolver { gateway },
+            mcpTools = source,
+            runtimeConfig = runtime,
+        )
+        return AgentWebDependencies(
+            agent = base.agent,
+            catalog = base.catalog,
+            runtimeConfig = runtime,
+            availableProviderIds = base.availableProviderIds,
+            newSessionTitle = base.newSessionTitle,
+            mcpCatalog = base.mcpCatalog,
+            tbankMcp = base.tbankMcp,
+            nativeMcpAgent = native,
+            scheduler = base.scheduler,
+            receiptsProxy = base.receiptsProxy,
+        )
+    }
+
     private companion object {
         val JSON = Json { ignoreUnknownKeys = true }
     }
 }
+private class BrowserAccountFetchGateway(
+    private val accountAlias: String,
+) : ChatCompletionGateway {
+    val requests = mutableListOf<ChatCompletionRequest>()
+
+    override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+        requests += request
+        val message = if (requests.size == 1) {
+            ResponseMessage(
+                content = null,
+                toolCalls = listOf(
+                    ChatToolCall(
+                        id = "browser-account-fetch",
+                        function = ChatFunctionCall(
+                            name = "mcp_tbank-transactions_get-account-transactions",
+                            arguments = """
+                                {"account_alias":"$accountAlias","from":"2026-09-01","to":"2026-09-30"}
+                            """.trimIndent(),
+                        ),
+                    ),
+                ),
+            )
+        } else {
+            ResponseMessage(content = "Операции получены.")
+        }
+        return ChatCompletionResponse(
+            choices = listOf(
+                ChatChoice(
+                    message = message,
+                    finishReason = if (requests.size == 1) "tool_calls" else "stop",
+                ),
+            ),
+        )
+    }
+}
+
+private class BrowserAccountResolutionSource(
+    private val accountResponseText: String =
+        """{"accounts":[{"id":"synthetic-account-id","name":"Synthetic account","currency":"643"}]}""",
+) : McpToolProvider {
+    val calls = mutableListOf<String>()
+    var transactionArguments = JsonObject(emptyMap())
+
+    override suspend fun allowedTools(): List<McpCallableTool> = listOf(
+        McpCallableTool(
+            serverId = "tbank-transactions",
+            serverDisplayName = "Synthetic bank",
+            name = "list-accounts",
+            description = "List synthetic accounts",
+            inputSchema = buildJsonObject { put("type", "object") },
+        ),
+        McpCallableTool(
+            serverId = "tbank-transactions",
+            serverDisplayName = "Synthetic bank",
+            name = "get-account-transactions",
+            description = "Fetch synthetic operations",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                put(
+                    "properties",
+                    buildJsonObject {
+                        put("account_ref", buildJsonObject { put("type", "string") })
+                        put("from", buildJsonObject { put("type", "string") })
+                        put("to", buildJsonObject { put("type", "string") })
+                    },
+                )
+                put(
+                    "required",
+                    buildJsonArray {
+                        add(JsonPrimitive("account_ref"))
+                        add(JsonPrimitive("from"))
+                        add(JsonPrimitive("to"))
+                    },
+                )
+            },
+        ),
+    )
+
+    override suspend fun callConfiguredTool(
+        serverId: String,
+        tool: String,
+        arguments: JsonObject,
+    ): TbankToolCallResponse {
+        calls += tool
+        return when (serverId to tool) {
+            "tbank-transactions" to "list-accounts" ->
+                TbankToolCallResponse(tool = tool, text = accountResponseText)
+            "tbank-transactions" to "get-account-transactions" -> {
+                transactionArguments = arguments
+                TbankToolCallResponse(tool = tool, text = """{"transactions":[]}""")
+            }
+            else -> error("Unexpected synthetic bank tool $serverId/$tool")
+        }
+    }
+}
+
 private class BrowserProviderFailureProfilesGateway : ChatCompletionGateway {
     val requests = mutableListOf<ChatCompletionRequest>()
     private val failures = listOf(
@@ -3673,28 +3945,60 @@ private class BrowserContextualFollowUpGateway : ChatCompletionGateway {
     }
 }
 private class BrowserReceiptAuthProvider : ReceiptsMcpProvider {
-    override suspend fun browserLogin() = ReceiptsAuthStatus(authenticated = true, status = "active")
-
-    override suspend fun receiptsSession() = ReceiptsAuthStatus(
+    var refreshAttempts = 0
+    var rejectRefresh = false
+    var transientFailure = false
+    private var status = ReceiptsAuthStatus(
         authenticated = false,
         status = "recoverable_error",
-        retryable = true,
-        message = "Синтетическая ошибка обновления access token.",
+        message = "Синтетическая временная ошибка авторизации.",
     )
 
-    override suspend fun receiptsRetrySession() = ReceiptsAuthStatus(
-        authenticated = false,
-        status = "recoverable_error",
-        retryable = true,
-        message = "Синтетическая ошибка обновления access token.",
-    )
+    override suspend fun browserLogin(): ReceiptsAuthStatus {
+        status = ReceiptsAuthStatus(authenticated = true, status = "active")
+        return status
+    }
 
-    override suspend fun receiptsLogout() = ReceiptsAuthStatus(authenticated = false, status = "login_required")
+    override suspend fun receiptsSession(): ReceiptsAuthStatus = status
+
+    override suspend fun receiptsLogout(): ReceiptsAuthStatus {
+        status = ReceiptsAuthStatus(authenticated = false, status = "login_required")
+        return status
+    }
 
     override suspend fun callReceiptTool(
         tool: String,
         arguments: JsonObject,
-    ): TbankToolCallResponse = error("Receipt tool must not be called in the auth recovery journey.")
+    ): TbankToolCallResponse {
+        require(tool == "search-receipts")
+        refreshAttempts += 1
+        if (rejectRefresh) {
+            status = ReceiptsAuthStatus(authenticated = false, status = "login_required")
+            return TbankToolCallResponse(
+                tool = tool,
+                isError = true,
+                text = "Synthetic protected request rejected after refresh.",
+            )
+        }
+        if (transientFailure) {
+            status = ReceiptsAuthStatus(
+                authenticated = false,
+                status = "recoverable_error",
+                message = "Синтетическая временная ошибка авторизации.",
+            )
+            return TbankToolCallResponse(
+                tool = tool,
+                isError = true,
+                text = "Synthetic temporary protected request failure.",
+            )
+        }
+
+        status = ReceiptsAuthStatus(authenticated = true, status = "active")
+        return TbankToolCallResponse(
+            tool = tool,
+            text = """{"receipts":[],"has_more":false}""",
+        )
+    }
 }
 
 private class BrowserConflictingMerchantRuleGateway : ChatCompletionGateway {
@@ -3920,7 +4224,7 @@ private class BrowserEligibilityMcpSource : McpToolProvider {
                    "merchant":"Перевод","description":"Перевод между своими счетами"},
                   {"date":"2026-09-10T12:00:00Z","amount_minor":12000,"currency":"RUB",
                    "merchant":"Synthetic income","description":"Synthetic income"},
-                  {"date":"2026-09-10T13:00:00Z","amount_minor":-2500,"currency":"RUB",
+                  {"date":"2026-09-10T13:00:00Z","amount_minor":-1000,"currency":"RUB",
                    "merchant":"Synthetic unknown","description":"Synthetic unknown type"}
                 ]}
             """.trimIndent(),

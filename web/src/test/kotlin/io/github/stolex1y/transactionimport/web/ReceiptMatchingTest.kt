@@ -19,12 +19,15 @@ import kotlin.test.assertTrue
 class ReceiptMatchingTest {
 
     @Test
-    fun avoidsReceiptSourceCallsWhenNoConfirmedPurchaseExists() = runBlocking {
-        val source = RecordingReceiptSource(pages = emptyMap(), details = emptyMap())
+    fun unknownExpenseWithoutSummaryCandidateIsUnmatchedAndTransfersStayUnsearched() = runBlocking {
+        val source = RecordingReceiptSource(
+            pages = mapOf(0 to """{"receipts":[],"has_more":false}"""),
+            details = emptyMap(),
+        )
         val result = ReceiptMatchingEngine(
             mcpTools = source,
             selector = ReceiptMatchSelector { _, _, _, _, _ ->
-                error("Unknown/non-purchase operations must not reach the selector.")
+                error("Non-purchase operations must not reach the selector.")
             },
         ).match(
             transactions = listOf(
@@ -36,15 +39,40 @@ class ReceiptMatchingTest {
             config = testConfig,
         )
 
-        assertTrue(source.searchCalls.isEmpty())
+        assertEquals(1, source.searchCalls.size)
         assertTrue(source.detailCalls.isEmpty())
         assertEquals(ReceiptAssociationStatus.UNMATCHED, result.transactions[0].receiptAssociation?.status)
         assertEquals(ReceiptAssociationStatus.UNMATCHED, result.transactions[1].receiptAssociation?.status)
-        assertEquals(ReceiptAssociationStatus.AMBIGUOUS, result.transactions[2].receiptAssociation?.status)
+        assertEquals(ReceiptAssociationStatus.UNMATCHED, result.transactions[2].receiptAssociation?.status)
     }
 
     @Test
-    fun receiptSearchOnlyConsidersPurchaseAndKeepsUnknownTypeForReview() = runBlocking {
+    fun unknownExpenseWithSummaryCandidateStaysReviewWithoutFetchingDetails() = runBlocking {
+        val source = singleReceiptSource(detail("2026-09-10T10:00:00Z", 500, "RUB", "Синтетический продавец"))
+        val result = ReceiptMatchingEngine(
+            mcpTools = source,
+            selector = ReceiptMatchSelector { _, _, _, _, _ ->
+                error("Unknown purchase eligibility must not reach the selector.")
+            },
+        ).match(
+            transactions = listOf(
+                candidate("unknown", "2026-09-10T10:00:00Z", -500, "RUB", "Неизвестный тип")
+                    .copy(categoryId = null),
+            ),
+            config = testConfig,
+        )
+
+        assertEquals(1, source.searchCalls.size)
+        assertTrue(source.detailCalls.isEmpty())
+        assertEquals(ReceiptAssociationStatus.AMBIGUOUS, result.transactions.single().receiptAssociation?.status)
+        assertEquals(
+            ReceiptReviewReason.OPERATION_TYPE_UNKNOWN,
+            result.transactions.single().receiptAssociation?.review?.reason,
+        )
+    }
+
+    @Test
+    fun purchaseGetsCandidateDetailsWhileUnknownTypeStaysReview() = runBlocking {
         val source = singleReceiptSource(detail("2026-09-10T10:00:00Z", 500, "RUB", "Синтетический продавец"))
         val result = ReceiptMatchingEngine(
             mcpTools = source,

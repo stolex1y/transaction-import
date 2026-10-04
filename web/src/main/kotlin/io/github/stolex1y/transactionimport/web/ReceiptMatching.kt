@@ -109,8 +109,10 @@ class ReceiptMatchingEngine(
         strictSelector: Boolean = false,
     ): ReceiptMatchingRun {
         if (transactions.isEmpty()) return ReceiptMatchingRun(emptyList(), 0, 0)
-        val matchableTransactions = transactions.filter { it.receiptEligibility() == ReceiptEligibility.PURCHASE }
-        val datedTransactions = matchableTransactions.map { transaction ->
+        val searchableTransactions = transactions.filter {
+            it.receiptEligibility() != ReceiptEligibility.NOT_A_PURCHASE
+        }
+        val datedTransactions = searchableTransactions.map { transaction ->
             transaction to parseDate(transaction.occurredAt)
         }
         val periodFrom = datedTransactions.minOfOrNull { it.second }?.minusDays(1)
@@ -143,7 +145,12 @@ class ReceiptMatchingEngine(
                 )
             }
         }
-        val wantedKeys = summariesByTransaction.values.flatten().map { it.key }.toSet()
+        val purchaseRefs = datedTransactions
+            .filter { (transaction, _) -> transaction.receiptEligibility() == ReceiptEligibility.PURCHASE }
+            .mapTo(hashSetOf()) { (transaction, _) -> transaction.sourceRef.orEmpty() }
+        val wantedKeys = summariesByTransaction
+            .filterKeys { it in purchaseRefs }
+            .values.flatten().map { it.key }.toSet()
         val detailCache = linkedMapOf<String, ReceiptDetailCandidate>()
         summaryCandidates.filter { it.key in wantedKeys }.forEach { summary ->
             if (summary.key !in detailCache) {
@@ -182,7 +189,9 @@ class ReceiptMatchingEngine(
                     )
                 }
         }
-        val ownershipCounts = eligibleByTransaction.values.flatten()
+        val ownershipCounts = eligibleByTransaction
+            .filterKeys { it in purchaseRefs }
+            .values.flatten()
             .groupingBy { it.summary.key }
             .eachCount()
         val safeReceiptRules = confirmedReceiptRules
@@ -200,15 +209,20 @@ class ReceiptMatchingEngine(
             when (transaction.receiptEligibility()) {
                 ReceiptEligibility.NOT_A_PURCHASE ->
                     MatchDecision(transaction, ReceiptAssociationStatus.UNMATCHED)
-                ReceiptEligibility.UNKNOWN ->
-                    MatchDecision(
-                        transaction = transaction,
-                        status = ReceiptAssociationStatus.AMBIGUOUS,
-                        issue = "receipt_operation_type_unknown: тип операции не подтверждён как покупка/расход",
-                        review = ReceiptReviewEvidence(
-                            reason = ReceiptReviewReason.OPERATION_TYPE_UNKNOWN,
-                        ),
-                    )
+                ReceiptEligibility.UNKNOWN -> {
+                    if (summariesByTransaction[transaction.sourceRef.orEmpty()].isNullOrEmpty()) {
+                        MatchDecision(transaction, ReceiptAssociationStatus.UNMATCHED)
+                    } else {
+                        MatchDecision(
+                            transaction = transaction,
+                            status = ReceiptAssociationStatus.AMBIGUOUS,
+                            issue = "receipt_operation_type_unknown: тип операции не подтверждён как покупка/расход",
+                            review = ReceiptReviewEvidence(
+                                reason = ReceiptReviewReason.OPERATION_TYPE_UNKNOWN,
+                            ),
+                        )
+                    }
+                }
                 ReceiptEligibility.PURCHASE -> {
                     val id = transaction.sourceRef.orEmpty()
                     val local = eligibleByTransaction[id].orEmpty()

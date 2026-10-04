@@ -47,7 +47,6 @@ private val LONG_SECRET = Regex("""[A-Za-z0-9_-]{40,}""")
 interface ReceiptsMcpProvider {
     suspend fun browserLogin(): ReceiptsAuthStatus
     suspend fun receiptsSession(): ReceiptsAuthStatus
-    suspend fun receiptsRetrySession(): ReceiptsAuthStatus
     suspend fun receiptsLogout(): ReceiptsAuthStatus
     suspend fun callReceiptTool(tool: String, arguments: JsonObject): TbankToolCallResponse
 }
@@ -105,7 +104,6 @@ class ReceiptsProxyService(
 ) {
     suspend fun browserLogin(): ReceiptsAuthStatus = provider.browserLogin().safeForBrowser()
     suspend fun session(): ReceiptsAuthStatus = provider.receiptsSession().safeForBrowser()
-    suspend fun retrySession(): ReceiptsAuthStatus = provider.receiptsRetrySession().safeForBrowser()
     suspend fun logout(): ReceiptsAuthStatus = provider.receiptsLogout().safeForBrowser()
 
     suspend fun search(request: ReceiptSearchRequest): ReceiptSearchResponse {
