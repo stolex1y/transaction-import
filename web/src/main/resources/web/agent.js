@@ -3490,18 +3490,7 @@ function createOperationTableRow(row) {
     return tableRow;
 }
 function receiptAssociationIndicator(association, transactionId = null) {
-    if (!association || typeof association.status !== "string") {
-        if (!transactionId) return null;
-        const indicator = document.createElement("div");
-        indicator.className = "receipt-association-status unmatched";
-        const title = document.createElement("p");
-        title.textContent = "Без чека";
-        indicator.append(
-            title,
-            receiptAssociationActionButton(transactionId, "match", "Сопоставить чеки"),
-        );
-        return indicator;
-    }
+    if (!association || typeof association.status !== "string") return null;
     const indicator = document.createElement("div");
     indicator.className = `receipt-association-status ${association.status}`;
     const title = document.createElement("p");
@@ -3578,9 +3567,6 @@ function receiptAssociationIndicator(association, transactionId = null) {
     if (association.status === "source_error") {
         title.textContent = "Источник чеков недоступен";
         indicator.append(title);
-        if (transactionId) {
-            indicator.append(receiptAssociationActionButton(transactionId, "match", "Повторить сопоставление"));
-        }
         return indicator;
     }
 
