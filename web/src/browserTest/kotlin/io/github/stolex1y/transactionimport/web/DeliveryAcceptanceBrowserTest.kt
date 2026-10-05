@@ -69,7 +69,7 @@ class DeliveryAcceptanceBrowserTest {
                         "Список счетов не загрузился: ${page.locator("#tbank-login-status").textContent()}",
                     )
                     page.locator("#open-session-drawer").click()
-                    page.locator("#empty-new-session").click()
+                    page.locator("#drawer-new-session").click()
                     page.waitForFunction(
                         "() => document.querySelector('#agent-message') && !document.querySelector('#agent-message').disabled",
                     )
