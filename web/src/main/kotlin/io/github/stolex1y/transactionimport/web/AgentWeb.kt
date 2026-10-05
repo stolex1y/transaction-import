@@ -146,6 +146,12 @@ data class UpdateDraftTransactionRequest(
 )
 
 @Serializable
+data class ReceiptCandidateActionRequest(
+    val revision: Long,
+    @SerialName("candidate_index") val candidateIndex: Int? = null,
+)
+
+@Serializable
 data class SetAllIncludedRequest(
     val revision: Long,
     val included: Boolean,
@@ -638,6 +644,56 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
                     sourceRef = existing.sourceRef,
                 ),
             ).withoutOpaqueSourceRefs(),
+        )
+    }
+
+    post("/api/agent/sessions/{id}/transactions/{transactionId}/receipt-association/match") {
+        val id = call.parameters["id"].requiredPathParameter("id")
+        val transactionId = call.parameters["transactionId"].requiredPathParameter("transactionId")
+        val request = call.receive<ReceiptCandidateActionRequest>()
+        val native = dependencies.requireAgentRuntime().nativeMcpAgent
+            ?: throw ProviderUnavailableException("Сопоставление чеков не настроено.")
+        call.respond(
+            native.refreshReceiptAssociation(id, request.revision, transactionId).withoutOpaqueSourceRefs(),
+        )
+    }
+
+    post("/api/agent/sessions/{id}/transactions/{transactionId}/receipt-association/approve") {
+        val id = call.parameters["id"].requiredPathParameter("id")
+        val transactionId = call.parameters["transactionId"].requiredPathParameter("transactionId")
+        val request = call.receive<ReceiptCandidateActionRequest>()
+        val candidateIndex = request.candidateIndex
+            ?: throw IllegalArgumentException("Не выбран кандидат чека.")
+        val native = dependencies.requireAgentRuntime().nativeMcpAgent
+            ?: throw ProviderUnavailableException("Сопоставление чеков не настроено.")
+        call.respond(
+            native.approveReceiptCandidate(id, request.revision, transactionId, candidateIndex)
+                .withoutOpaqueSourceRefs(),
+        )
+    }
+
+    post("/api/agent/sessions/{id}/transactions/{transactionId}/receipt-association/reject") {
+        val id = call.parameters["id"].requiredPathParameter("id")
+        val transactionId = call.parameters["transactionId"].requiredPathParameter("transactionId")
+        val request = call.receive<ReceiptCandidateActionRequest>()
+        val candidateIndex = request.candidateIndex
+            ?: throw IllegalArgumentException("Не выбран кандидат чека.")
+        val native = dependencies.requireAgentRuntime().nativeMcpAgent
+            ?: throw ProviderUnavailableException("Сопоставление чеков не настроено.")
+        call.respond(
+            native.rejectReceiptCandidate(id, request.revision, transactionId, candidateIndex)
+                .withoutOpaqueSourceRefs(),
+        )
+    }
+
+    post("/api/agent/sessions/{id}/transactions/{transactionId}/receipt-association/unlink") {
+        val id = call.parameters["id"].requiredPathParameter("id")
+        val transactionId = call.parameters["transactionId"].requiredPathParameter("transactionId")
+        val request = call.receive<ReceiptCandidateActionRequest>()
+        val native = dependencies.requireAgentRuntime().nativeMcpAgent
+            ?: throw ProviderUnavailableException("Сопоставление чеков не настроено.")
+        call.respond(
+            native.unlinkReceiptAssociation(id, request.revision, transactionId).withoutOpaqueSourceRefs(),
         )
     }
 

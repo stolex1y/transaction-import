@@ -249,6 +249,198 @@ class NativeMcpAgent(
     private val pendingPreviews = ConcurrentHashMap<String, PendingPreview>()
     private val receiptMatchingEngine = ReceiptMatchingEngine(mcpTools, receiptMatchSelector)
 
+    suspend fun refreshReceiptAssociation(
+        sessionId: String,
+        expectedRevision: Long,
+        rowId: String,
+    ): ImportSessionState = matchDraftReceiptAction(
+        sessionId = sessionId,
+        expectedRevision = expectedRevision,
+        rowId = rowId,
+        selectedSummary = null,
+    )
+
+    suspend fun approveReceiptCandidate(
+        sessionId: String,
+        expectedRevision: Long,
+        rowId: String,
+        candidateIndex: Int,
+    ): ImportSessionState {
+        val state = agent.getSession(sessionId)
+        requireRevision(state, expectedRevision)
+        val row = state.draft?.transactions?.singleOrNull { it.id == rowId }
+            ?: throw IllegalArgumentException("Операция не найдена.")
+        val association = row.transaction.receiptAssociation
+        require(association?.status == ReceiptAssociationStatus.AMBIGUOUS) {
+            "Для операции нет чека, ожидающего подтверждения."
+        }
+        val selected = association.review?.candidates?.getOrNull(candidateIndex)
+            ?: throw IllegalArgumentException("Кандидат изменился; сопоставьте чеки повторно.")
+        return matchDraftReceiptAction(
+            sessionId = sessionId,
+            expectedRevision = expectedRevision,
+            rowId = rowId,
+            selectedSummary = selected,
+        )
+    }
+
+    suspend fun rejectReceiptCandidate(
+        sessionId: String,
+        expectedRevision: Long,
+        rowId: String,
+        candidateIndex: Int,
+    ): ImportSessionState {
+        val state = agent.getSession(sessionId)
+        requireRevision(state, expectedRevision)
+        val row = state.draft?.transactions?.singleOrNull { it.id == rowId }
+            ?: throw IllegalArgumentException("Операция не найдена.")
+        val association = row.transaction.receiptAssociation
+        require(association?.status == ReceiptAssociationStatus.AMBIGUOUS) {
+            "Для операции нет кандидата на отклонение."
+        }
+        val review = association.review
+            ?: throw IllegalArgumentException("Для операции нет кандидата на отклонение.")
+        require(candidateIndex in review.candidates.indices) {
+            "Кандидат изменился; сопоставьте чеки повторно."
+        }
+        val remaining = review.candidates.filterIndexed { index, _ -> index != candidateIndex }
+        val update = if (remaining.isEmpty()) {
+            ReceiptMatchUpdate(ReceiptAssociationStatus.UNMATCHED)
+        } else {
+            ReceiptMatchUpdate(
+                status = ReceiptAssociationStatus.AMBIGUOUS,
+                review = review.copy(candidates = remaining),
+            )
+        }
+        return agent.recordReceiptAssociation(
+            sessionId = sessionId,
+            expectedRevision = expectedRevision,
+            userText = "Отклонить этот вариант чека.",
+            assistantText = "Вариант убран из текущего результата. При следующем сопоставлении он может появиться снова.",
+            updates = mapOf(rowId to update),
+            persistRule = false,
+        )
+    }
+
+    suspend fun unlinkReceiptAssociation(
+        sessionId: String,
+        expectedRevision: Long,
+        rowId: String,
+    ): ImportSessionState {
+        val state = agent.getSession(sessionId)
+        requireRevision(state, expectedRevision)
+        val row = state.draft?.transactions?.singleOrNull { it.id == rowId }
+            ?: throw IllegalArgumentException("Операция не найдена.")
+        require(row.transaction.receiptAssociation?.status == ReceiptAssociationStatus.MATCHED) {
+            "У операции нет связанного чека."
+        }
+        return agent.recordReceiptAssociation(
+            sessionId = sessionId,
+            expectedRevision = expectedRevision,
+            userText = "Отвязать чек от операции.",
+            assistantText = "Связь и сведения из чека удалены из draft; банковская операция не изменена.",
+            updates = mapOf(rowId to ReceiptMatchUpdate(ReceiptAssociationStatus.UNMATCHED)),
+            persistRule = false,
+        )
+    }
+
+    private suspend fun matchDraftReceiptAction(
+        sessionId: String,
+        expectedRevision: Long,
+        rowId: String,
+        selectedSummary: ReceiptAssociationSummary?,
+    ): ImportSessionState {
+        val state = agent.getSession(sessionId)
+        requireRevision(state, expectedRevision)
+        val draft = state.draft ?: throw IllegalArgumentException("В сессии ещё нет черновика.")
+        val target = draft.transactions.singleOrNull { it.id == rowId }
+            ?: throw IllegalArgumentException("Операция не найдена.")
+        require(target.transaction.receiptAssociation?.status != ReceiptAssociationStatus.MATCHED) {
+            "Сначала отвяжите текущий чек."
+        }
+        require(target.transaction.items.isEmpty()) {
+            "Операция содержит позиции без подтверждённой связи; draft не изменён."
+        }
+        val rows = draft.transactions.filter { row ->
+            row.transaction.receiptAssociation?.status != ReceiptAssociationStatus.MATCHED &&
+                row.transaction.items.isEmpty()
+        }
+        val candidates = rows.map { row ->
+            val transaction = row.transaction
+            ExternalTransactionCandidate(
+                occurredAt = transaction.occurredAt,
+                postedAt = transaction.postedAt,
+                amountMinor = if (transaction.direction == TransactionDirection.EXPENSE) {
+                    -transaction.amountMinor
+                } else {
+                    transaction.amountMinor
+                },
+                currency = transaction.currency,
+                merchant = transaction.merchant,
+                description = row.description,
+                sourceLabel = transaction.sourceLabel,
+                categoryId = transaction.categoryId,
+                sourceRef = row.id,
+            )
+        }
+        val matching = try {
+            receiptMatchingEngine.match(
+                transactions = candidates,
+                config = state.session.config,
+                selectedCandidates = selectedSummary?.let { mapOf(rowId to it) }.orEmpty(),
+                allowSelectorChoice = false,
+            )
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (_: ReceiptMatchingSourceException) {
+            return agent.recordReceiptAssociation(
+                sessionId = sessionId,
+                expectedRevision = expectedRevision,
+                userText = "Повторно сопоставить чек.",
+                assistantText = "Источник чеков недоступен; банковская операция не изменена.",
+                updates = mapOf(rowId to ReceiptMatchUpdate(ReceiptAssociationStatus.SOURCE_ERROR)),
+                persistRule = false,
+            )
+        }
+        val result = matching.transactions
+            .withReceiptReuseGuard(state.receiptUsage(exceptRowId = rowId))
+            .singleOrNull { it.sourceRef == rowId }
+            ?: throw IllegalStateException("Результат сопоставления не содержит выбранную операцию.")
+        val selectedStillUnique = result.receiptAssociation?.let {
+            it.status == ReceiptAssociationStatus.MATCHED && it.summary == selectedSummary
+        } == true
+        if (selectedSummary != null && !selectedStillUnique) {
+            throw IllegalArgumentException("Чек больше не подходит однозначно; draft не изменён.")
+        }
+        val association = result.receiptAssociation
+            ?: ReceiptAssociation(ReceiptAssociationStatus.UNMATCHED)
+        return agent.recordReceiptAssociation(
+            sessionId = sessionId,
+            expectedRevision = expectedRevision,
+            userText = if (selectedSummary == null) {
+                "Повторно сопоставить чек для операции."
+            } else {
+                "Утвердить выбранный чек."
+            },
+            assistantText = when (association.status) {
+                ReceiptAssociationStatus.MATCHED -> "Чек привязан после повторной проверки."
+                ReceiptAssociationStatus.AMBIGUOUS -> "Безопасный однозначный выбор не получен; выберите чек или отклоните его."
+                ReceiptAssociationStatus.UNMATCHED -> "Подходящий чек не найден."
+                ReceiptAssociationStatus.SOURCE_ERROR -> "Источник чеков недоступен; банковская операция не изменена."
+            },
+            updates = mapOf(
+                rowId to ReceiptMatchUpdate(
+                    status = association.status,
+                    items = result.items,
+                    summary = association.summary,
+                    review = association.review,
+                ),
+            ),
+            persistRule = false,
+        )
+    }
+
+
 suspend fun handle(
     sessionId: String,
     expectedRevision: Long,
@@ -1196,7 +1388,7 @@ private suspend fun handleReceiptAssociation(
                         ReceiptReviewReason.DUPLICATE_SELECTION ->
                             "этот чек уже использован другой операцией"
                         ReceiptReviewReason.OPERATION_TYPE_UNKNOWN ->
-                            "тип операции неизвестен; сначала подтвердите покупку"
+                            "Категория не определена; направление расхода известно."
                     }
                     val options = review.candidates.take(5).joinToString("; ") { summary ->
                         buildString {

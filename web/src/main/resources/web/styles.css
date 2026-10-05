@@ -2252,6 +2252,17 @@ html[data-theme="light"] .agent-body select {
     padding-left: 18px;
 }
 
+.receipt-association-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.receipt-association-status > button {
+    margin-top: 6px;
+}
+
 .scheduler-task > a {
     width: fit-content;
     color: var(--agent-accent);

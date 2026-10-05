@@ -2152,9 +2152,9 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
         val nextDraft = draft.copy(
             transactions = draft.transactions.map { row ->
                 val update = updates[row.id] ?: return@map row
-                if (row.transaction.receiptAssociation?.status == ReceiptAssociationStatus.MATCHED) {
-                    return@map row
-                }
+                val wasMatched = row.transaction.receiptAssociation?.status == ReceiptAssociationStatus.MATCHED
+                if (wasMatched && update.status != ReceiptAssociationStatus.UNMATCHED) return@map row
+                val unlinked = wasMatched && update.status == ReceiptAssociationStatus.UNMATCHED
                 val matched = update.status == ReceiptAssociationStatus.MATCHED &&
                     update.summary != null &&
                     update.items.isNotEmpty() &&
@@ -2171,7 +2171,11 @@ suspend fun sendMessage(sessionId: String, expectedRevision: Long, text: String)
                 }
                 row.copy(
                     transaction = row.transaction.copy(
-                        items = if (matched) update.items else row.transaction.items,
+                        items = when {
+                            matched -> update.items
+                            unlinked -> emptyList()
+                            else -> row.transaction.items
+                        },
                         receiptAssociation = ReceiptAssociation(
                             status = if (matched) ReceiptAssociationStatus.MATCHED else update.status,
                             summary = update.summary.takeIf { matched },

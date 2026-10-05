@@ -13,6 +13,11 @@ import io.github.stolex1y.transactionimport.core.ChatToolCall
 import io.github.stolex1y.transactionimport.core.ResponseMessage
 import io.github.stolex1y.transactionimport.core.Usage
 import io.github.stolex1y.transactionimport.core.AgentRuntimeConfig
+import io.github.stolex1y.transactionimport.core.ReceiptAssociationStatus
+import io.github.stolex1y.transactionimport.core.ReceiptMatchUpdate
+import io.github.stolex1y.transactionimport.core.ReceiptReviewEvidence
+import io.github.stolex1y.transactionimport.core.ReceiptReviewReason
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import io.github.stolex1y.transactionimport.core.ContextManagementConfig
@@ -2089,13 +2094,25 @@ class AgentBrowserTest {
                         assertTrue(page.locator("#receipts-summary-list").textContent().contains("Кофейня у дома"))
                         assertFalse(page.locator("#receipts-panel").textContent().contains(BrowserReceiptsFixture.RAW_KEY))
 
-                        page.locator("#receipts-summary-list .receipt-summary").click()
+                        val detailResponse = page.waitForResponse(
+                            { response -> response.url().contains("/api/agent/receipts/") },
+                            { page.locator("#receipts-summary-list .receipt-summary").click() },
+                        )
+                        val detailBody = detailResponse.text()
+                        assertTrue(detailResponse.status() in 200..299, detailBody)
                         page.locator("#receipt-detail-panel").waitFor()
                         page.waitForFunction(
                             "() => document.querySelector('#receipt-detail')?.textContent.includes('Кофе')",
                         )
                         assertTrue(page.locator("#receipt-detail").textContent().contains("Кофе"))
                         assertTrue(page.locator("#receipt-detail").textContent().contains("499"))
+                        assertFalse(page.locator("#receipts-panel").textContent().contains(BrowserReceiptsFixture.RAW_KEY))
+                        assertFalse(detailBody.contains("synthetic-private-fiscal-id"))
+                        assertFalse(detailBody.contains("synthetic-private-qr"))
+                        assertFalse(detailBody.contains("fiscal_document_number"))
+                        assertFalse(detailBody.contains("fiscal_drive_number"))
+                        assertFalse(detailBody.contains("fiscal_sign"))
+                        assertFalse(detailBody.contains("kkt_reg_id"))
                         assertFalse(
                             page.evaluate("() => document.querySelector('#receipts-panel').outerHTML")
                                 .toString().contains(BrowserReceiptsFixture.RAW_KEY),
@@ -3551,8 +3568,8 @@ class AgentBrowserTest {
     }
 
     @Test
-    fun nativeImportMatchesOnlyConfirmedPurchaseInBrowser() {
-        val database = Files.createTempFile("agent-browser-purchase-eligibility-", ".sqlite")
+    fun unknownExpenseReceiptControlsApproveRejectAndDetachInDraft() {
+        val database = Files.createTempFile("agent-browser-receipt-controls-", ".sqlite")
         val classifier = FakeAgentGateway(
             ArrayDeque(
                 listOf(
@@ -3560,7 +3577,8 @@ class AgentBrowserTest {
                         {"index":0,"category_id":"food.groceries"},
                         {"index":1,"category_id":"food.groceries"},
                         {"index":2,"category_id":null},
-                        {"index":3,"category_id":null}
+                        {"index":3,"category_id":null},
+                        {"index":4,"category_id":null}
                     ],"merchant_canonical_candidates":[]}""",
                 ),
             ),
@@ -3601,6 +3619,25 @@ class AgentBrowserTest {
                 playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
                     browser.newContext().use { context ->
                         val page = context.newPage()
+                        val actionBodies = mutableListOf<String>()
+                        page.onRequest { request ->
+                            if (request.url().contains("/receipt-association/")) {
+                                actionBodies += request.postData().orEmpty()
+                            }
+                        }
+                        val actionResponses = mutableListOf<String>()
+                        page.onResponse { response ->
+                            if (response.url().contains("/receipt-association/")) {
+                                actionResponses += response.text()
+                            }
+                        }
+                        val forbiddenReceiptMarkers = listOf(
+                            "synthetic-browser-receipt-key",
+                            "synthetic-private-fiscal-marker",
+                            "synthetic-private-qr-marker",
+                            "Synthetic private cashier",
+                            "Synthetic private buyer",
+                        )
                         page.navigate("http://127.0.0.1:$port/agent")
                         waitForAgentInitialized(page)
                         page.locator("#empty-new-session").click()
@@ -3616,46 +3653,270 @@ class AgentBrowserTest {
                             { page.locator("#send-message").click() },
                         )
                         assertTrue(importResponse.status() in 200..299, importResponse.text())
-
+                        assertTrue(forbiddenReceiptMarkers.none { importResponse.text().contains(it) })
                         val preview = page.locator(".mcp-inline-preview").last()
                         preview.waitFor()
-                        assertEquals(4, preview.locator("tbody tr").count())
-                        assertEquals(1, preview.locator(".receipt-association-status.matched").count())
+                        assertEquals(5, preview.locator("tbody tr").count())
+                        assertEquals(2, preview.locator(".receipt-association-status.matched").count(), preview.innerText())
                         assertEquals(1, preview.locator(".receipt-association-status.ambiguous").count())
-                        assertEquals(
-                            1,
-                            preview.locator("tbody tr").nth(0)
-                                .locator(".receipt-association-status.matched").count(),
-                        )
-                        assertEquals(
-                            0,
-                            preview.locator("tbody tr").nth(1)
-                                .locator(".receipt-association-status.matched").count(),
-                        )
-                        assertEquals(
-                            0,
-                            preview.locator("tbody tr").nth(2)
-                                .locator(".receipt-association-status.matched").count(),
-                        )
                         assertTrue(
                             preview.locator("tbody tr").nth(3)
                                 .locator(".receipt-association-status.ambiguous").textContent()
-                                .contains("Сначала подтвердите, что это покупка или расход."),
+                                .contains("Подошло несколько чеков."),
                         )
-                        val unresolvedPurchase = preview.locator("tbody tr").nth(3)
-                            .locator(".receipt-association-status.ambiguous")
-                        unresolvedPurchase.scrollIntoViewIfNeeded()
-                        captureDeliveryUi(page, "a11-unknown-with-receipt-candidate.png")
+                        val uniqueUnknownRow = preview.locator("tbody tr").nth(4)
+                        assertTrue(
+                            uniqueUnknownRow.locator("td").nth(4).textContent()
+                                .startsWith("Не выбрана"),
+                        )
+                        assertTrue(
+                            uniqueUnknownRow.locator(".receipt-association-status.matched")
+                                .textContent().contains("Synthetic unique receipt"),
+                        )
                         assertEquals(1, source.searchCalls)
-                        assertEquals(1, source.detailCalls)
+                        assertEquals(4, source.detailCalls)
                         assertEquals(1, classifier.requests.size)
 
-                        preview.locator("button").last().click()
-                        page.waitForFunction(
-                            "() => document.querySelectorAll('#operation-table tbody tr').length === 4",
+                        val confirmResponse = page.waitForResponse(
+                            { response ->
+                                response.url().contains("/mcp-previews/") &&
+                                    response.url().endsWith("/confirm")
+                            },
+                            { preview.locator("button").last().click() },
                         )
-                        assertEquals(1, page.locator("#operation-table .receipt-association-status.matched").count())
-                        assertEquals(1, page.locator("#operation-table .receipt-association-status.ambiguous").count())
+                        assertTrue(confirmResponse.status() in 200..299, confirmResponse.text())
+                        page.waitForFunction(
+                            "() => document.querySelectorAll('#operation-table tbody tr').length === 5",
+                        )
+                        val sessionId = page.evaluate(
+                            "() => window.location.pathname.split('/').pop()",
+                        ).toString()
+                        val savedState = runBlocking { base.agent.getSession(sessionId) }
+                        runBlocking {
+                            base.agent.recordReceiptAssociation(
+                                sessionId = sessionId,
+                                expectedRevision = savedState.session.revision,
+                                userText = "Synthetic legacy receipt review",
+                                assistantText = "Synthetic review state for migration coverage.",
+                                updates = mapOf(
+                                    "4" to ReceiptMatchUpdate(
+                                        status = ReceiptAssociationStatus.AMBIGUOUS,
+                                        review = ReceiptReviewEvidence(
+                                            reason = ReceiptReviewReason.OPERATION_TYPE_UNKNOWN,
+                                        ),
+                                    ),
+                                ),
+                                persistRule = false,
+                            )
+                        }
+                        page.reload()
+                        waitForAgentInitialized(page)
+                        page.waitForFunction(
+                            "() => document.querySelectorAll('#operation-table tbody tr').length === 5",
+                        )
+                        val ambiguousRow = page.locator("tr[data-transaction-id='4']")
+                        assertTrue(ambiguousRow.locator(".receipt-association-status.ambiguous").textContent()
+                            .contains("Категория не определена; направление операции известно."))
+                        assertEquals(0, ambiguousRow.locator(".receipt-association-status.ambiguous li").count())
+                        source.returnNoReceipts = true
+                        val noCandidateResponse = page.waitForResponse(
+                            { response -> response.url().contains("/receipt-association/match") },
+                            { ambiguousRow.locator("button[data-action='receipt-match']").click() },
+                        )
+                        assertTrue(noCandidateResponse.status() in 200..299, noCandidateResponse.text())
+                        ambiguousRow.locator(".receipt-association-status.unmatched").waitFor()
+                        assertTrue(
+                            ambiguousRow.locator(".receipt-association-status.unmatched")
+                                .textContent().contains("Без чека"),
+                        )
+                        assertEquals(4, source.detailCalls)
+                        source.returnNoReceipts = false
+                        val legacyMatchResponse = page.waitForResponse(
+                            { response -> response.url().contains("/receipt-association/match") },
+                            { ambiguousRow.locator("button[data-action='receipt-match']").click() },
+                        )
+                        assertTrue(legacyMatchResponse.status() in 200..299, legacyMatchResponse.text())
+                        page.waitForFunction(
+                            "() => document.querySelectorAll(\"tr[data-transaction-id='4'] " +
+                                ".receipt-association-status.ambiguous li\").length === 2",
+                        )
+                        val originalDirection = ambiguousRow.locator("select[name='direction']").inputValue()
+                        val originalMerchant = ambiguousRow.locator("input[name='merchant']").inputValue()
+                        val originalCategory = ambiguousRow.locator("select[name='category_id']").inputValue()
+                        val originalAmount = ambiguousRow.locator("input[name='amount']").inputValue()
+                        val actionCountBeforeDirtyEdit = actionBodies.size
+                        ambiguousRow.locator("input[name='amount']").fill("999.99")
+                        val dirtyApproval = ambiguousRow.locator(
+                            "button[data-action='receipt-approve'][data-candidate-index='1']",
+                        )
+                        assertTrue(dirtyApproval.isDisabled)
+                        page.evaluate(
+                            "() => document.querySelector(\"tr[data-transaction-id='4'] " +
+                                "button[data-action='receipt-approve'][data-candidate-index='1']\")" +
+                                "?.dispatchEvent(new MouseEvent('click', { bubbles: true }))",
+                        )
+                        assertEquals(actionCountBeforeDirtyEdit, actionBodies.size)
+                        page.reload()
+                        waitForAgentInitialized(page)
+                        page.waitForFunction(
+                            "() => document.querySelectorAll(\"tr[data-transaction-id='4'] " +
+                                ".receipt-association-status.ambiguous li\").length === 2",
+                        )
+                        val reloadedAmbiguousRow = page.locator("tr[data-transaction-id='4']")
+                        assertEquals(
+                            2,
+                            reloadedAmbiguousRow.locator("button[data-action='receipt-approve']").count(),
+                        )
+                        assertFalse(
+                            reloadedAmbiguousRow.locator(
+                                "button[data-action='receipt-approve'][data-candidate-index='1']",
+                            ).isDisabled,
+                        )
+                        var candidates = reloadedAmbiguousRow.locator(".receipt-association-status.ambiguous li")
+                        assertEquals(2, candidates.count())
+                        assertTrue(candidates.nth(0).textContent().contains("Synthetic receipt A"))
+                        assertTrue(candidates.nth(1).textContent().contains("Synthetic receipt B"))
+                        assertEquals(2, ambiguousRow.locator("button[data-action='receipt-approve']").count())
+                        assertEquals(2, ambiguousRow.locator("button[data-action='receipt-reject']").count())
+
+                        val firstRejectResponse = page.waitForResponse(
+                            { response -> response.url().contains("/receipt-association/reject") },
+                            {
+                                ambiguousRow.locator(
+                                    "button[data-action='receipt-reject'][data-candidate-index='0']",
+                                ).click()
+                            },
+                        )
+                        assertTrue(firstRejectResponse.status() in 200..299, firstRejectResponse.text())
+                        page.waitForFunction(
+                            "() => document.querySelectorAll(\"tr[data-transaction-id='4'] " +
+                                ".receipt-association-status.ambiguous li\").length === 1",
+                        )
+                        candidates = ambiguousRow.locator(".receipt-association-status.ambiguous li")
+                        assertEquals(1, candidates.count())
+                        assertTrue(candidates.first().textContent().contains("Synthetic receipt B"))
+                        ambiguousRow.locator(
+                            "button[data-action='receipt-reject'][data-candidate-index='0']",
+                        ).click()
+                        ambiguousRow.locator("button[data-action='receipt-match']").waitFor()
+                        assertEquals(0, ambiguousRow.locator(".receipt-association-status.ambiguous").count())
+
+                        val matchResponse = page.waitForResponse(
+                            { response -> response.url().contains("/receipt-association/match") },
+                            { ambiguousRow.locator("button[data-action='receipt-match']").click() },
+                        )
+                        assertTrue(matchResponse.status() in 200..299, matchResponse.text())
+                        page.waitForFunction(
+                            "() => document.querySelectorAll(\"tr[data-transaction-id='4'] " +
+                                ".receipt-association-status.ambiguous li\").length === 2",
+                        )
+                        candidates = ambiguousRow.locator(".receipt-association-status.ambiguous li")
+                        assertEquals(2, candidates.count())
+                        assertTrue(candidates.nth(0).textContent().contains("Synthetic receipt A"))
+                        assertTrue(candidates.nth(1).textContent().contains("Synthetic receipt B"))
+                        ambiguousRow.locator(
+                            "button[data-action='receipt-approve'][data-candidate-index='1']",
+                        ).click()
+                        page.locator("tr[data-transaction-id='4'] .receipt-association-status.matched").waitFor()
+                        val linkedRow = page.locator("tr[data-transaction-id='4']")
+                        assertTrue(
+                            linkedRow.locator(".receipt-association-status.matched").textContent()
+                                .contains("Synthetic receipt B"),
+                        )
+                        assertEquals(originalDirection, linkedRow.locator("select[name='direction']").inputValue())
+                        assertEquals(originalAmount, linkedRow.locator("input[name='amount']").inputValue())
+                        assertEquals(originalMerchant, linkedRow.locator("input[name='merchant']").inputValue())
+                        assertEquals(originalCategory, linkedRow.locator("select[name='category_id']").inputValue())
+
+                        val purchaseRow = page.locator("tr[data-transaction-id='1']")
+                        val purchaseAmount = purchaseRow.locator("input[name='amount']").inputValue()
+                        val purchaseMerchant = purchaseRow.locator("input[name='merchant']").inputValue()
+                        purchaseRow.locator("button[data-action='receipt-unlink']").click()
+                        purchaseRow.locator(".receipt-association-status.unmatched").waitFor()
+                        assertEquals(purchaseAmount, purchaseRow.locator("input[name='amount']").inputValue())
+                        assertEquals(purchaseMerchant, purchaseRow.locator("input[name='merchant']").inputValue())
+                        assertEquals(0, purchaseRow.locator(".transaction-items").count())
+
+                        purchaseRow.locator("button[data-action='receipt-match']").click()
+                        purchaseRow.locator(".receipt-association-status.matched").waitFor()
+                        page.locator("#card-view").click()
+                        waitForView(page, "cards")
+                        val linkedCard = page.locator("article[data-transaction-id='4']")
+                        assertTrue(linkedCard.locator("button[data-action='receipt-unlink']").isVisible)
+                        linkedCard.locator("button[data-action='receipt-unlink']").click()
+                        linkedCard.locator(".receipt-association-status.unmatched").waitFor()
+                        assertEquals(0, linkedCard.locator(".transaction-items").count())
+                        val cardMatchResponse = page.waitForResponse(
+                            { response -> response.url().contains("/receipt-association/match") },
+                            { linkedCard.locator("button[data-action='receipt-match']").click() },
+                        )
+                        assertTrue(cardMatchResponse.status() in 200..299, cardMatchResponse.text())
+                        page.waitForFunction(
+                            "() => document.querySelectorAll(\"article[data-transaction-id='4'] " +
+                                ".receipt-association-status.ambiguous li\").length === 2",
+                        )
+                        val cardRejectResponse = page.waitForResponse(
+                            { response -> response.url().contains("/receipt-association/reject") },
+                            {
+                                linkedCard.locator(
+                                    "button[data-action='receipt-reject'][data-candidate-index='0']",
+                                ).click()
+                            },
+                        )
+                        assertTrue(cardRejectResponse.status() in 200..299, cardRejectResponse.text())
+                        page.waitForFunction(
+                            "() => document.querySelectorAll(\"article[data-transaction-id='4'] " +
+                                ".receipt-association-status.ambiguous li\").length === 1",
+                        )
+                        assertTrue(linkedCard.innerText().contains("Synthetic receipt B"))
+                        val cardSecondRejectResponse = page.waitForResponse(
+                            { response -> response.url().contains("/receipt-association/reject") },
+                            {
+                                linkedCard.locator(
+                                    "button[data-action='receipt-reject'][data-candidate-index='0']",
+                                ).click()
+                            },
+                        )
+                        assertTrue(cardSecondRejectResponse.status() in 200..299, cardSecondRejectResponse.text())
+                        linkedCard.locator("button[data-action='receipt-match']").waitFor()
+                        val cardRematchResponse = page.waitForResponse(
+                            { response -> response.url().contains("/receipt-association/match") },
+                            { linkedCard.locator("button[data-action='receipt-match']").click() },
+                        )
+                        assertTrue(cardRematchResponse.status() in 200..299, cardRematchResponse.text())
+                        page.waitForFunction(
+                            "() => document.querySelectorAll(\"article[data-transaction-id='4'] " +
+                                ".receipt-association-status.ambiguous li\").length === 2",
+                        )
+                        linkedCard.locator(
+                            "button[data-action='receipt-approve'][data-candidate-index='1']",
+                        ).click()
+                        linkedCard.locator(".receipt-association-status.matched").waitFor()
+                        assertTrue(
+                            linkedCard.locator(".receipt-association-status.matched")
+                                .textContent().contains("Synthetic receipt B"),
+                        )
+                        assertEquals(originalDirection, linkedCard.locator("select[name='direction']").inputValue())
+                        assertEquals(originalAmount, linkedCard.locator("input[name='amount']").inputValue())
+                        assertEquals(originalMerchant, linkedCard.locator("input[name='merchant']").inputValue())
+                        assertEquals(originalCategory, linkedCard.locator("select[name='category_id']").inputValue())
+                        linkedCard.locator("button[data-action='receipt-unlink']").click()
+                        linkedCard.locator(".receipt-association-status.unmatched").waitFor()
+                        assertEquals(0, linkedCard.locator(".transaction-items").count())
+                        val browserAndSessionSurfaces = listOf(
+                            actionBodies.toString(),
+                            actionResponses.toString(),
+                            importResponse.text(),
+                            page.locator("body").textContent(),
+                            runBlocking { base.agent.getSession(sessionId) }.toString(),
+                            classifier.requests.toString(),
+                        )
+                        assertTrue(
+                            forbiddenReceiptMarkers.none { marker ->
+                                browserAndSessionSurfaces.any { surface -> surface.contains(marker) }
+                            },
+                        )
+                        captureDeliveryUi(page, "a12-unknown-expense-receipt-controls.png")
                     }
                 }
             }
@@ -3700,7 +3961,7 @@ class AgentBrowserTest {
                 detailCalls += 1
                 TbankToolCallResponse(
                     tool = tool,
-                    text = """{"receipt_key":"$RAW_KEY","date_time":"2026-09-10T10:00:00Z","fiscal_document_number":"123","total_minor":49900,"currency":"RUB","items":[{"name":"Кофе","quantity":1,"price_minor":49900,"sum_minor":49900}]}""",
+                    text = """{"receipt_key":"$RAW_KEY","date_time":"2026-09-10T10:00:00Z","fiscal_document_number":"synthetic-private-fiscal-id","fiscal_drive_number":"synthetic-private-drive-id","fiscal_sign":"synthetic-private-sign","kkt_reg_id":"synthetic-private-kkt","qr_code":"synthetic-private-qr","total_minor":49900,"currency":"RUB","items":[{"name":"Кофе","quantity":1,"price_minor":49900,"sum_minor":49900}]}""",
                 )
             }
             else -> TbankToolCallResponse(tool = tool, isError = true, text = "unexpected receipt tool")
@@ -4228,6 +4489,7 @@ private class BrowserEligibilityPlanGateway : ChatCompletionGateway {
 private class BrowserEligibilityMcpSource : McpToolProvider {
     var searchCalls = 0
     var detailCalls = 0
+    var returnNoReceipts = false
 
     override suspend fun allowedTools(): List<McpCallableTool> = listOf(
         McpCallableTool(
@@ -4268,8 +4530,10 @@ private class BrowserEligibilityMcpSource : McpToolProvider {
                    "merchant":"Перевод","description":"Перевод между своими счетами"},
                   {"date":"2026-09-10T12:00:00Z","amount_minor":12000,"currency":"RUB",
                    "merchant":"Synthetic income","description":"Synthetic income"},
-                  {"date":"2026-09-10T13:00:00Z","amount_minor":-1000,"currency":"RUB",
-                   "merchant":"Synthetic unknown","description":"Synthetic unknown type"}
+                  {"date":"2026-09-10T13:00:00Z","amount_minor":-2200,"currency":"RUB",
+                   "merchant":"Synthetic unknown","description":"Synthetic unknown type"},
+                  {"date":"2026-09-10T14:00:00Z","amount_minor":-3300,"currency":"RUB",
+                   "merchant":"Synthetic unique unknown","description":"Synthetic unique unknown type"}
                 ]}
             """.trimIndent(),
         )
@@ -4277,23 +4541,54 @@ private class BrowserEligibilityMcpSource : McpToolProvider {
             searchCalls += 1
             TbankToolCallResponse(
                 tool = tool,
-                text = """
-                    {"receipts":[{"receipt_key":"synthetic-browser-receipt-key",
-                     "merchant":"Synthetic purchase","received_at":"2026-09-10T10:05:00Z",
-                     "amount_minor":1000,"currency":"RUB"}],"has_more":false}
-                """.trimIndent(),
+                text = if (returnNoReceipts) {
+                    """{"receipts":[],"has_more":false}"""
+                } else {
+                    """
+                        {"receipts":[
+                          {"receipt_key":"synthetic-browser-receipt-key","merchant":"Synthetic purchase","received_at":"2026-09-10T10:05:00Z","amount_minor":1000,"currency":"RUB"},
+                          {"receipt_key":"synthetic-browser-receipt-key-a","merchant":"Synthetic receipt A","received_at":"2026-09-10T13:01:00Z","amount_minor":2200,"currency":"RUB"},
+                          {"receipt_key":"synthetic-browser-receipt-key-b","merchant":"Synthetic receipt B","received_at":"2026-09-10T13:02:00Z","amount_minor":2200,"currency":"RUB"},
+                          {"receipt_key":"synthetic-browser-receipt-key-unique","merchant":"Synthetic unique receipt","received_at":"2026-09-10T14:02:00Z","amount_minor":3300,"currency":"RUB"}
+                        ],"has_more":false}
+                    """.trimIndent()
+                },
             )
         }
         "receipts" to "get-receipt" -> {
             detailCalls += 1
             TbankToolCallResponse(
                 tool = tool,
-                text = """
-                    {"receipt_key":"synthetic-browser-receipt-key",
-                     "date_time":"2026-09-10T10:05:00Z","total_minor":1000,"currency":"RUB",
-                     "merchant":"Synthetic purchase","settlement_place":"Synthetic station",
-                     "items":[{"name":"Synthetic item","quantity":1,"price_minor":1000,"sum_minor":1000}]}
-                """.trimIndent(),
+                text = when (arguments["receipt_key"]?.jsonPrimitive?.content) {
+                    "synthetic-browser-receipt-key" -> """
+                        {"receipt_key":"synthetic-browser-receipt-key",
+                         "date_time":"2026-09-10T10:05:00Z","total_minor":1000,"currency":"RUB",
+                         "merchant":"Synthetic purchase","settlement_place":"Synthetic station",
+                         "items":[{"name":"Synthetic item","quantity":1,"price_minor":1000,"sum_minor":1000}]}
+                    """.trimIndent()
+                    "synthetic-browser-receipt-key-a" -> """
+                        {"receipt_key":"synthetic-browser-receipt-key-a",
+                         "date_time":"2026-09-10T13:01:00Z","total_minor":2200,"currency":"RUB",
+                         "merchant":"Synthetic receipt A","settlement_place":"Synthetic place A",
+                         "items":[{"name":"Synthetic item A","quantity":1,"price_minor":2200,"sum_minor":2200}]}
+                    """.trimIndent()
+                    "synthetic-browser-receipt-key-b" -> """
+                        {"receipt_key":"synthetic-browser-receipt-key-b",
+                         "date_time":"2026-09-10T13:02:00Z","total_minor":2200,"currency":"RUB",
+                         "merchant":"Synthetic receipt B","settlement_place":"Synthetic place B",
+                         "fiscal_document_number":"synthetic-private-fiscal-marker",
+                         "qr_code":"synthetic-private-qr-marker",
+                         "cashier":"Synthetic private cashier","buyer_name":"Synthetic private buyer",
+                         "items":[{"name":"Synthetic item B","quantity":1,"price_minor":2200,"sum_minor":2200}]}
+                    """.trimIndent()
+                    "synthetic-browser-receipt-key-unique" -> """
+                        {"receipt_key":"synthetic-browser-receipt-key-unique",
+                         "date_time":"2026-09-10T14:02:00Z","total_minor":3300,"currency":"RUB",
+                         "merchant":"Synthetic unique receipt","settlement_place":"Synthetic unique place",
+                         "items":[{"name":"Synthetic unique item","quantity":1,"price_minor":3300,"sum_minor":3300}]}
+                    """.trimIndent()
+                    else -> error("Unexpected synthetic receipt key")
+                },
             )
         }
         else -> error("Unexpected synthetic tool: $serverId/$tool")

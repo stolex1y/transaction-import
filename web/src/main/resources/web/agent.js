@@ -3404,7 +3404,7 @@ function createOperationCard(row) {
         fieldControl("Категория", categorySelect(editor.category_id, editor.direction), row, "category_id", editor.included),
         fieldControl("Счёт / карта", readOnlyInput("source_label", editor.source_label), row, "source_label", editor.included),
     );
-    const receiptStatus = receiptAssociationIndicator(row.transaction.receipt_association);
+    const receiptStatus = receiptAssociationIndicator(row.transaction.receipt_association, row.id);
     const itemDetails = transactionItemsDetails(row.transaction.items);
     const generalErrors = editor.included ? (row.field_errors?._transaction || []) : [];
     const footer = document.createElement("div");
@@ -3465,7 +3465,7 @@ function createOperationTableRow(row) {
         "description",
         editor.included,
     );
-    const receiptStatus = receiptAssociationIndicator(row.transaction.receipt_association);
+    const receiptStatus = receiptAssociationIndicator(row.transaction.receipt_association, row.id);
     const itemDetails = transactionItemsDetails(row.transaction.items);
     if (receiptStatus) descriptionCell.append(receiptStatus);
     if (itemDetails) descriptionCell.append(itemDetails);
@@ -3489,14 +3489,33 @@ function createOperationTableRow(row) {
     tableRow.append(tableCell(action));
     return tableRow;
 }
-function receiptAssociationIndicator(association) {
-    if (!association || typeof association.status !== "string") return null;
+function receiptAssociationIndicator(association, transactionId = null) {
+    if (!association || typeof association.status !== "string") {
+        if (!transactionId) return null;
+        const indicator = document.createElement("div");
+        indicator.className = "receipt-association-status unmatched";
+        const title = document.createElement("p");
+        title.textContent = "Без чека";
+        indicator.append(
+            title,
+            receiptAssociationActionButton(transactionId, "match", "Сопоставить чеки"),
+        );
+        return indicator;
+    }
     const indicator = document.createElement("div");
     indicator.className = `receipt-association-status ${association.status}`;
     const title = document.createElement("p");
+
     if (association.status === "unmatched") {
         title.textContent = "Без чека";
-    } else if (association.status === "ambiguous") {
+        indicator.append(title);
+        if (transactionId) {
+            indicator.append(receiptAssociationActionButton(transactionId, "match", "Сопоставить чеки"));
+        }
+        return indicator;
+    }
+
+    if (association.status === "ambiguous") {
         title.textContent = "Чек требует уточнения";
         const review = association.review;
         if (review && typeof review.reason === "string") {
@@ -3506,14 +3525,15 @@ function receiptAssociationIndicator(association) {
                 selector_uncertain: "Система не смогла уверенно выбрать один чек.",
                 shared_by_operations: "Один чек подходит нескольким операциям.",
                 duplicate_selection: "Этот чек уже использован другой операцией.",
-                operation_type_unknown: "Сначала подтвердите, что это покупка или расход.",
+                operation_type_unknown: "Категория не определена; направление операции известно.",
             };
             explanation.textContent = reasons[review.reason] || "Нужно уточнение.";
             indicator.append(title, explanation);
-            if (Array.isArray(review.candidates) && review.candidates.length > 0) {
+            const candidates = Array.isArray(review.candidates) ? review.candidates.slice(0, 5) : [];
+            if (candidates.length > 0) {
                 const options = document.createElement("ul");
                 options.setAttribute("aria-label", "Варианты чеков");
-                for (const candidate of review.candidates.slice(0, 5)) {
+                for (const [index, candidate] of candidates.entries()) {
                     const option = document.createElement("li");
                     const parts = [
                         candidate?.merchant,
@@ -3523,20 +3543,48 @@ function receiptAssociationIndicator(association) {
                             ? `${minorToMajor(Number(candidate.amount_minor), candidate.currency || "RUB")} ${candidate.currency || "RUB"}`
                             : null,
                     ].filter((value) => typeof value === "string" && value.trim());
-                    option.textContent = parts.join(" · ");
+                    option.append(document.createTextNode(parts.join(" · ")));
+                    if (transactionId) {
+                        const actions = document.createElement("div");
+                        actions.className = "receipt-association-actions";
+                        actions.append(
+                            receiptAssociationActionButton(transactionId, "approve", "Утвердить чек", index),
+                            receiptAssociationActionButton(transactionId, "reject", "Отклонить чек", index),
+                        );
+                        option.append(actions);
+                    }
                     options.append(option);
                 }
                 indicator.append(options);
             } else {
                 const note = document.createElement("p");
-                note.textContent = "Безопасно различимых вариантов нет.";
+                note.textContent = review.reason === "operation_type_unknown"
+                    ? "Варианты не сохранены в этом draft. Запустите сопоставление повторно."
+                    : "Безопасно различимых вариантов нет.";
                 indicator.append(note);
+            }
+            if (transactionId && candidates.length === 0) {
+                indicator.append(receiptAssociationActionButton(transactionId, "match", "Сопоставить чеки"));
             }
             return indicator;
         }
-    } else if (association.status === "source_error") {
+        indicator.append(title);
+        if (transactionId) {
+            indicator.append(receiptAssociationActionButton(transactionId, "match", "Сопоставить чеки"));
+        }
+        return indicator;
+    }
+
+    if (association.status === "source_error") {
         title.textContent = "Источник чеков недоступен";
-    } else if (association.status === "matched" && association.summary) {
+        indicator.append(title);
+        if (transactionId) {
+            indicator.append(receiptAssociationActionButton(transactionId, "match", "Повторить сопоставление"));
+        }
+        return indicator;
+    }
+
+    if (association.status === "matched" && association.summary) {
         const summary = association.summary;
         const parts = [
             summary.date_time || summary.date,
@@ -3545,11 +3593,50 @@ function receiptAssociationIndicator(association) {
             `${minorToMajor(Number(summary.amount_minor) || 0, summary.currency || "RUB")} ${summary.currency || "RUB"}`,
         ].filter((value) => typeof value === "string" && value.trim());
         title.textContent = `Чек: ${parts.join(" · ")}`;
-    } else {
-        return null;
+        indicator.append(title);
+        if (transactionId) {
+            indicator.append(receiptAssociationActionButton(transactionId, "unlink", "Отвязать чек"));
+        }
+        return indicator;
     }
-    indicator.append(title);
-    return indicator;
+
+    return null;
+}
+
+function receiptAssociationActionButton(transactionId, action, text, candidateIndex = null) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "compact-button";
+    button.dataset.action = `receipt-${action}`;
+    button.textContent = text;
+    if (candidateIndex !== null) button.dataset.candidateIndex = String(candidateIndex);
+    if (dirtyFields.has(transactionId)) {
+        button.disabled = true;
+        button.title = "Сначала сохраните изменения банковской операции.";
+    }
+    button.addEventListener("click", async () => {
+        if (!activeState) return;
+        if (dirtyFields.has(transactionId)) {
+            showError("Сначала сохраните изменения банковской операции.");
+            return;
+        }
+        await runBusy(async () => {
+            const request = { revision: activeState.session.revision };
+            if (candidateIndex !== null) request.candidate_index = candidateIndex;
+            const state = await api(
+                `/api/agent/sessions/${encodeURIComponent(activeState.session.id)}` +
+                    `/transactions/${encodeURIComponent(transactionId)}/receipt-association/${action}`,
+                jsonOptions("POST", request),
+            );
+            setActiveState(state, { preserveDirty: true });
+            showSuccess(action === "unlink"
+                ? "Чек отвязан; банковская операция не изменена."
+                : action === "reject"
+                    ? "Кандидат отклонён в текущем результате сопоставления."
+                    : "Результат сопоставления обновлён.");
+        }, true);
+    });
+    return button;
 }
 
 function transactionItemsDetails(items) {
@@ -3863,7 +3950,10 @@ function applyBusyState() {
     busy = value;
     elements.app.setAttribute("aria-busy", String(value));
     for (const control of elements.app.querySelectorAll("button, select, input, textarea")) {
-        control.disabled = value;
+        const rowId = control.closest("[data-transaction-id]")?.dataset.transactionId;
+        const dirtyReceiptAction =
+            control.matches("button[data-action^='receipt-']") && dirtyFields.has(rowId);
+        control.disabled = value || dirtyReceiptAction;
     }
     elements.globalUserPrompt.disabled = value;
     elements.categoryName.disabled = value;

@@ -705,6 +705,124 @@ class NativeMcpAgentTest {
     }
 
     @Test
+    fun receiptApprovalRejectAndDetachRevalidateRevisionAndPreserveBankFields() = runBlocking {
+        val database = Files.createTempFile("native-receipt-actions-", ".sqlite")
+        val dependencies = fakeAgentDependencies(database.toString())
+        val source = ReceiptAssociationFixture(
+            amountMinor = 9_900,
+            includeSecondReceipt = true,
+            secondReceiptMerchant = "Синтетический продавец 2",
+        )
+        val session = dependencies.agent.createSession(
+            "Synthetic receipt actions",
+            dependencies.runtimeConfig.defaultAgentConfig(),
+        )
+        try {
+            val imported = dependencies.agent.sendMessage(
+                sessionId = session.session.id,
+                expectedRevision = session.session.revision,
+                text = "Synthetic expense",
+            )
+            val original = imported.draft!!.transactions.single { it.id == "2" }
+            assertNull(original.transaction.categoryId)
+            val native = NativeMcpAgent(
+                agent = dependencies.agent,
+                gatewayResolver = AgentGatewayResolver { FakeAgentGateway() },
+                mcpTools = source,
+                runtimeConfig = nativeMcpEnabled(dependencies.runtimeConfig),
+            )
+            val review = native.refreshReceiptAssociation(
+                session.session.id,
+                imported.session.revision,
+                original.id,
+            )
+            val refreshedOriginal = review.draft!!.transactions.single { it.id == original.id }
+            val candidates = refreshedOriginal.transaction.receiptAssociation?.review?.candidates
+                ?: error("Synthetic ambiguous receipt candidates are missing.")
+            val summary = candidates.single { it.merchant == "Синтетический продавец 2" }
+
+            val approved = native.approveReceiptCandidate(
+                session.session.id,
+                review.session.revision,
+                original.id,
+                candidateIndex = candidates.indexOf(summary),
+            )
+            val approvedRow = approved.draft!!.transactions.single { it.id == original.id }
+            assertEquals(ReceiptAssociationStatus.MATCHED, approvedRow.transaction.receiptAssociation?.status)
+            assertEquals(summary, approvedRow.transaction.receiptAssociation?.summary)
+            assertEquals(listOf("Синтетическая позиция"), approvedRow.transaction.items.map { it.name })
+            assertEquals(original.transaction, approvedRow.transaction.copy(
+                items = original.transaction.items,
+                receiptAssociation = original.transaction.receiptAssociation,
+            ))
+
+            val detached = native.unlinkReceiptAssociation(
+                session.session.id,
+                approved.session.revision,
+                original.id,
+            )
+            val detachedRow = detached.draft!!.transactions.single { it.id == original.id }
+            assertEquals(ReceiptAssociationStatus.UNMATCHED, detachedRow.transaction.receiptAssociation?.status)
+            assertNull(detachedRow.transaction.receiptAssociation?.summary)
+            assertTrue(detachedRow.transaction.items.isEmpty())
+            assertEquals(original.transaction.direction, detachedRow.transaction.direction)
+            assertEquals(original.transaction.amountMinor, detachedRow.transaction.amountMinor)
+            assertEquals(original.transaction.currency, detachedRow.transaction.currency)
+            assertEquals(original.transaction.occurredAt, detachedRow.transaction.occurredAt)
+            assertEquals(original.transaction.categoryId, detachedRow.transaction.categoryId)
+            assertEquals(original.transaction.merchant, detachedRow.transaction.merchant)
+            assertEquals(original.description, detachedRow.description)
+
+            val reviewAgain = native.refreshReceiptAssociation(
+                session.session.id,
+                detached.session.revision,
+                original.id,
+            )
+            assertEquals(
+                ReceiptAssociationStatus.AMBIGUOUS,
+                reviewAgain.draft!!.transactions.single { it.id == original.id }
+                    .transaction.receiptAssociation?.status,
+            )
+            val rejected = native.rejectReceiptCandidate(
+                session.session.id,
+                reviewAgain.session.revision,
+                original.id,
+                candidateIndex = candidates.indexOf(summary),
+            )
+            val rejectedRow = rejected.draft!!.transactions.single { it.id == original.id }
+            assertEquals(ReceiptAssociationStatus.AMBIGUOUS, rejectedRow.transaction.receiptAssociation?.status)
+            assertTrue(rejectedRow.transaction.items.isEmpty())
+            val rematched = native.refreshReceiptAssociation(
+                session.session.id,
+                rejected.session.revision,
+                original.id,
+            )
+            assertEquals(
+                ReceiptAssociationStatus.AMBIGUOUS,
+                rematched.draft!!.transactions.single { it.id == original.id }
+                    .transaction.receiptAssociation?.status,
+            )
+            assertTrue(
+                rematched.draft!!.transactions.single { it.id == original.id }
+                    .transaction.receiptAssociation?.review?.candidates?.contains(summary) == true,
+            )
+            assertFailsWith<io.github.stolex1y.transactionimport.core.RevisionConflictException> {
+                native.unlinkReceiptAssociation(
+                    session.session.id,
+                    approved.session.revision,
+                    original.id,
+                )
+            }
+            assertFalse(rematched.toString().contains("synthetic-private-receipt-key"))
+            assertFalse(rematched.toString().contains("synthetic-fiscal-id"))
+            assertFalse(rematched.toString().contains("synthetic-qr-payload"))
+        } finally {
+            dependencies.scheduler?.close()
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
     fun plannerSelectedRememberRulePersistsWithoutSaveVerb() = runBlocking {
         val database = Files.createTempFile("native-receipt-always-rule-", ".sqlite")
         val planner = ApplicationActionPlanGateway(
@@ -2057,6 +2175,7 @@ private class ReceiptAssociationFixture(
     private val amountMinor: Long = 125050,
     private val includeSecondReceipt: Boolean = false,
     private val searchReceiptKeys: List<String> = listOf("synthetic-private-receipt-key"),
+    private val secondReceiptMerchant: String = "Синтетический продавец",
 ) : McpToolProvider {
     var detailCalls = 0
     var searchCalls = 0
@@ -2090,7 +2209,7 @@ private class ReceiptAssociationFixture(
                 val receiptKey = searchReceiptKeys.getOrElse(searchCalls) { searchReceiptKeys.last() }
                 searchCalls += 1
                 val secondReceipt = if (includeSecondReceipt) {
-                    """,{"receipt_key":"synthetic-private-receipt-key-2","merchant":"Синтетический продавец","received_at":"$dateTime","amount_minor":$amountMinor,"currency":"RUB"}"""
+                    """,{"receipt_key":"synthetic-private-receipt-key-2","merchant":"$secondReceiptMerchant","received_at":"$dateTime","amount_minor":$amountMinor,"currency":"RUB"}"""
                 } else {
                     ""
                 }
@@ -2102,12 +2221,17 @@ private class ReceiptAssociationFixture(
             "get-receipt" -> {
                 detailCalls += 1
                 val receiptKey = requireNotNull(arguments["receipt_key"]?.jsonPrimitive?.content)
+                val merchant = if (receiptKey == "synthetic-private-receipt-key-2") {
+                    secondReceiptMerchant
+                } else {
+                    "Синтетический продавец"
+                }
                 assertTrue(
                     receiptKey in searchReceiptKeys + "synthetic-private-receipt-key-2",
                 )
                 TbankToolCallResponse(
                     tool = tool,
-                    text = """{"receipt_key":"$receiptKey","date_time":"$dateTime","total_minor":$amountMinor,"currency":"RUB","merchant":"Синтетический продавец","settlement_place":"Синтетическая торговая точка","fiscal_document_number":"synthetic-fiscal-id","qr_code":"synthetic-qr-payload","cashier":"Синтетический кассир","items":[{"name":"Синтетическая позиция","quantity":1,"price_minor":$amountMinor,"sum_minor":$amountMinor}]}""",
+                    text = """{"receipt_key":"$receiptKey","date_time":"$dateTime","total_minor":$amountMinor,"currency":"RUB","merchant":"$merchant","settlement_place":"Синтетическая торговая точка","fiscal_document_number":"synthetic-fiscal-id","qr_code":"synthetic-qr-payload","cashier":"Синтетический кассир","items":[{"name":"Синтетическая позиция","quantity":1,"price_minor":$amountMinor,"sum_minor":$amountMinor}]}""",
                 )
             }
             else -> TbankToolCallResponse(tool = tool, isError = true, text = "unexpected synthetic receipt tool")

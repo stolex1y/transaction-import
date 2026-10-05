@@ -57,7 +57,6 @@ private val SENSITIVE_RECEIPT_VALUE_PATTERN = Regex(
 private enum class ReceiptEligibility {
     PURCHASE,
     NOT_A_PURCHASE,
-    UNKNOWN,
 }
 
 private data class ReceiptSummaryCandidate(
@@ -107,6 +106,8 @@ class ReceiptMatchingEngine(
         confirmedReceiptRules: List<String> = emptyList(),
         trace: MutableList<SchedulerTraceEvent>? = null,
         strictSelector: Boolean = false,
+        selectedCandidates: Map<String, ReceiptAssociationSummary> = emptyMap(),
+        allowSelectorChoice: Boolean = true,
     ): ReceiptMatchingRun {
         if (transactions.isEmpty()) return ReceiptMatchingRun(emptyList(), 0, 0)
         val searchableTransactions = transactions.filter {
@@ -209,24 +210,82 @@ class ReceiptMatchingEngine(
             when (transaction.receiptEligibility()) {
                 ReceiptEligibility.NOT_A_PURCHASE ->
                     MatchDecision(transaction, ReceiptAssociationStatus.UNMATCHED)
-                ReceiptEligibility.UNKNOWN -> {
-                    if (summariesByTransaction[transaction.sourceRef.orEmpty()].isNullOrEmpty()) {
-                        MatchDecision(transaction, ReceiptAssociationStatus.UNMATCHED)
-                    } else {
-                        MatchDecision(
-                            transaction = transaction,
-                            status = ReceiptAssociationStatus.AMBIGUOUS,
-                            issue = "receipt_operation_type_unknown: тип операции не подтверждён как покупка/расход",
-                            review = ReceiptReviewEvidence(
-                                reason = ReceiptReviewReason.OPERATION_TYPE_UNKNOWN,
-                            ),
-                        )
-                    }
-                }
                 ReceiptEligibility.PURCHASE -> {
                     val id = transaction.sourceRef.orEmpty()
                     val local = eligibleByTransaction[id].orEmpty()
                     if (local.isEmpty()) return@map MatchDecision(transaction, ReceiptAssociationStatus.UNMATCHED)
+                    selectedCandidates[id]?.let { requested ->
+                        val selected = local.singleOrNull { it.safeSummary() == requested }
+                        if (selected != null && ownershipCounts[selected.summary.key] == 1) {
+                            return@map MatchDecision(transaction, ReceiptAssociationStatus.MATCHED, selected)
+                        }
+                        val shared = selected != null && ownershipCounts[selected.summary.key] != 1
+                        return@map MatchDecision(
+                            transaction = transaction,
+                            status = ReceiptAssociationStatus.AMBIGUOUS,
+                            issue = if (shared) {
+                                "receipt_ambiguous: чек подходит нескольким операциям"
+                            } else {
+                                "receipt_ambiguous: выбранный чек больше не подходит однозначно"
+                            },
+                            review = ReceiptReviewEvidence(
+                                reason = if (shared) {
+                                    ReceiptReviewReason.SHARED_BY_OPERATIONS
+                                } else {
+                                    ReceiptReviewReason.SELECTOR_UNCERTAIN
+                                },
+                                candidates = local.map(ReceiptDetailCandidate::safeSummary)
+                                    .distinct()
+                                    .take(MAX_REVIEW_CANDIDATES),
+                            ),
+                        )
+                    }
+                    val hasExplicitSelectionContext = strictSelector ||
+                        safeInstruction.isNotBlank() ||
+                        safeReceiptRules.isNotEmpty()
+                    if (transaction.categoryId.isNullOrBlank() || transaction.categoryIssue != null) {
+                        val unique = local.singleOrNull()
+                            ?.takeIf { ownershipCounts[it.summary.key] == 1 }
+                        if (unique != null) {
+                            if (!hasExplicitSelectionContext) {
+                                return@map MatchDecision(transaction, ReceiptAssociationStatus.MATCHED, unique)
+                            }
+                        } else {
+                            val shared = local.size == 1
+                            return@map MatchDecision(
+                                transaction = transaction,
+                                status = ReceiptAssociationStatus.AMBIGUOUS,
+                                issue = if (shared) {
+                                    "receipt_ambiguous: чек подходит нескольким операциям"
+                                } else {
+                                    "receipt_ambiguous: несколько подходящих чеков требуют уточнения"
+                                },
+                                review = ReceiptReviewEvidence(
+                                    reason = if (shared) {
+                                        ReceiptReviewReason.SHARED_BY_OPERATIONS
+                                    } else {
+                                        ReceiptReviewReason.MULTIPLE_CANDIDATES
+                                    },
+                                    candidates = local.map(ReceiptDetailCandidate::safeSummary)
+                                        .distinct()
+                                        .take(MAX_REVIEW_CANDIDATES),
+                                ),
+                            )
+                        }
+                    }
+                    if (!allowSelectorChoice && local.size > 1) {
+                        return@map MatchDecision(
+                            transaction = transaction,
+                            status = ReceiptAssociationStatus.AMBIGUOUS,
+                            issue = "receipt_ambiguous: несколько подходящих чеков требуют уточнения",
+                            review = ReceiptReviewEvidence(
+                                reason = ReceiptReviewReason.MULTIPLE_CANDIDATES,
+                                candidates = local.map(ReceiptDetailCandidate::safeSummary)
+                                    .distinct()
+                                    .take(MAX_REVIEW_CANDIDATES),
+                            ),
+                        )
+                    }
                     val globallyUnique = local.filter { ownershipCounts[it.summary.key] == 1 }
                     val selectionCandidates = if (strictSelector || safeReceiptRules.isNotEmpty()) {
                         local
@@ -246,7 +305,25 @@ class ReceiptMatchingEngine(
                             ),
                         )
                     }
-                    val useSelector = selectionCandidates.size > 1 ||
+                    if (selectionCandidates.size > 1 &&
+                        !allowSelectorChoice &&
+                        safeInstruction.isBlank() &&
+                        safeReceiptRules.isEmpty()
+                    ) {
+                        return@map MatchDecision(
+                            transaction = transaction,
+                            status = ReceiptAssociationStatus.AMBIGUOUS,
+                            issue = "receipt_ambiguous: несколько подходящих чеков требуют уточнения",
+                            review = ReceiptReviewEvidence(
+                                reason = ReceiptReviewReason.MULTIPLE_CANDIDATES,
+                                candidates = selectionCandidates.map(ReceiptDetailCandidate::safeSummary)
+                                    .distinct()
+                                    .take(MAX_REVIEW_CANDIDATES),
+                            ),
+                        )
+                    }
+                    val useSelector = strictSelector ||
+                        selectionCandidates.size > 1 ||
                         safeInstruction.isNotBlank() ||
                         safeReceiptRules.isNotEmpty()
                     val selected = if (!useSelector) {
@@ -602,8 +679,6 @@ class ReceiptMatchingEngine(
             merchant.equals("Между своими счетами", ignoreCase = true) ||
             EXPLICIT_TRANSFER_MARKER.containsMatchIn(description) ->
             ReceiptEligibility.NOT_A_PURCHASE
-        categoryId.isNullOrBlank() || categoryIssue != null ->
-            ReceiptEligibility.UNKNOWN
         else -> ReceiptEligibility.PURCHASE
     }
 
