@@ -447,7 +447,7 @@ function renderReceiptsAuth(status) {
     elements.receiptsAuthDetail.textContent =
         [details[statusCode], message, persistenceNote].filter(Boolean).join(" ");
     elements.receiptsLogout.hidden = !receiptsAuthState.authenticated && statusCode !== "logout_failed";
-    elements.receiptsBrowserLogin.hidden = statusCode === "active" && status?.authenticated === true;
+    elements.receiptsBrowserLogin.hidden = statusCode !== "login_required";
     elements.receiptsBrowserLogin.disabled = statusCode === "authenticating";
     scheduleReceiptStatusPoll();
 }

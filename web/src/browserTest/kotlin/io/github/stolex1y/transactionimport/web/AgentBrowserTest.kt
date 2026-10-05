@@ -294,6 +294,7 @@ class AgentBrowserTest {
                         page.waitForFunction(
                             "() => document.querySelector('#receipts-auth-status')?.textContent === 'Сервис временно недоступен'",
                         )
+                        assertTrue(page.locator("#receipts-browser-login").isHidden)
                         assertEquals(0, page.locator("#receipts-session-retry").count())
                         captureDeliveryUi(page, "a09-receipts-status-read-only.png")
                         assertTrue(page.locator("#receipts-refresh-session").isVisible)
@@ -302,6 +303,7 @@ class AgentBrowserTest {
                         page.waitForFunction("() => document.querySelector('#receipts-auth-status')?.textContent")
                         assertEquals(0, authProvider.protectedSearchCalls)
                         captureDeliveryUi(page, "a09-receipts-status-unchanged-after-read.png")
+                        assertTrue(page.locator("#receipts-browser-login").isHidden)
 
                         page.locator("#receipts-from").fill("2026-09-01")
                         page.locator("#receipts-to").fill("2026-09-30")
@@ -311,6 +313,7 @@ class AgentBrowserTest {
                         )
                         assertEquals("Чеки за выбранный период не найдены.", page.locator("#receipts-search-status").textContent())
                         assertEquals(1, authProvider.protectedSearchCalls)
+                        assertTrue(page.locator("#receipts-browser-login").isHidden)
                         captureDeliveryUi(page, "a09-receipts-protected-search-success.png")
 
                         authProvider.transientFailure = true
@@ -321,6 +324,7 @@ class AgentBrowserTest {
                         assertTrue(page.locator("#receipts-search-status").textContent().startsWith("Поиск не выполнен:"))
                         assertEquals(2, authProvider.protectedSearchCalls)
                         captureDeliveryUi(page, "a09-receipts-protected-search-transient-failure.png")
+                        assertTrue(page.locator("#receipts-browser-login").isHidden)
                         authProvider.transientFailure = false
                         page.locator("#receipts-search-form button[type='submit']").click()
                         page.waitForFunction(
@@ -329,6 +333,7 @@ class AgentBrowserTest {
                         assertEquals("Чеки за выбранный период не найдены.", page.locator("#receipts-search-status").textContent())
                         assertEquals(3, authProvider.protectedSearchCalls)
                         captureDeliveryUi(page, "a09-receipts-protected-search-recovered.png")
+                        assertTrue(page.locator("#receipts-browser-login").isHidden)
                         authProvider.rejectRefresh = true
                         page.locator("#receipts-search-form button[type='submit']").click()
                         page.waitForFunction(
@@ -337,12 +342,19 @@ class AgentBrowserTest {
                         assertTrue(page.locator("#receipts-search-status").textContent().startsWith("Поиск не выполнен:"))
                         assertEquals(4, authProvider.protectedSearchCalls)
                         captureDeliveryUi(page, "a09-receipts-browser-login-required.png")
+                        assertTrue(page.locator("#receipts-browser-login").isVisible)
                         page.locator("#receipts-browser-login").click()
+                        page.waitForFunction(
+                            "() => document.querySelector('#receipts-auth-status')?.textContent === 'Вход выполняется'",
+                        )
+                        assertTrue(page.locator("#receipts-browser-login").isHidden)
+                        captureDeliveryUi(page, "a09-receipts-browser-login-authenticating.png")
                         page.waitForFunction(
                             "() => document.querySelector('#receipts-auth-status')?.textContent === 'Авторизация активна'",
                         )
                         assertFalse(page.locator("#receipts-auth-detail").textContent().contains("synthetic-secret"))
                         captureDeliveryUi(page, "a09-receipts-browser-login-active.png")
+                        assertTrue(page.locator("#receipts-browser-login").isHidden)
                     }
                 }
             }
@@ -2965,7 +2977,7 @@ class AgentBrowserTest {
     }
 
     @Test
-    fun fnsLoginButtonHidesOnlyForConfirmedActiveAuthorization() {
+    fun fnsLoginButtonIsVisibleOnlyWhenLoginIsRequired() {
         val database = Files.createTempFile("agent-browser-receipt-auth-", ".sqlite")
         val port = ServerSocket(0).use { it.localPort }
         val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
@@ -2994,7 +3006,7 @@ class AgentBrowserTest {
                                 }
                             """.trimIndent(),
                         ).toString()
-                        assertEquals("false,true,false,false,false", state)
+                        assertEquals("true,true,false,false,false", state)
                     }
                 }
             }
@@ -4319,7 +4331,7 @@ private class BrowserReceiptAuthProvider : ReceiptsMcpProvider {
 
     override suspend fun browserLogin(): ReceiptsAuthStatus {
         status = ReceiptsAuthStatus(authenticated = true, status = "active")
-        return status
+        return ReceiptsAuthStatus(authenticated = false, status = "authenticating")
     }
 
     override suspend fun receiptsSession(): ReceiptsAuthStatus = status
