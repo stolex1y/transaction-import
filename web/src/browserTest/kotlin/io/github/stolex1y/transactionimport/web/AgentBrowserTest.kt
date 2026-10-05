@@ -126,6 +126,7 @@ class AgentBrowserTest {
                         assertEquals(2, gateway.requests.size)
                         assertEquals(3_000, gateway.requests.last().maxTokens)
                         assertEquals("json_object", gateway.requests.last().responseFormat?.type)
+                        captureDeliveryUi(page, "a01-provider-length-diagnostic-preserves-draft.png")
                     }
                 }
             }
@@ -172,6 +173,7 @@ class AgentBrowserTest {
                         })
                         assertFalse(gateway.requests.last().messages.last().content.contains("1250"))
                         assertEquals(2, gateway.requests.size)
+                        captureDeliveryUi(page, "a03-short-followup-uses-existing-context.png")
                     }
                 }
             }
@@ -205,6 +207,15 @@ class AgentBrowserTest {
                         val originalAmount =
                             page.locator("tr[data-transaction-id='1'] input[name='amount']").inputValue()
                         val originalRowCount = page.locator("#operation-table tbody tr").count()
+                        val sessionId = page.evaluate(
+                            "() => window.location.pathname.split('/').pop()",
+                        ).toString()
+                        val stateBeforeFailures = Json.parseToJsonElement(
+                            browserSessionState(page, sessionId),
+                        ).jsonObject
+                        val draftBeforeFailures = stateBeforeFailures["draft"]
+                        val revisionBeforeFailures =
+                            stateBeforeFailures["session"]?.jsonObject?.get("revision")
                         val profiles = listOf(
                             "no choices" to "Провайдер не вернул choices.",
                             "blank final content" to "Провайдер вернул пустой final content.",
@@ -231,6 +242,24 @@ class AgentBrowserTest {
                                 page.locator("tr[data-transaction-id='1'] input[name='amount']").inputValue(),
                             )
                             assertEquals(originalRowCount, page.locator("#operation-table tbody tr").count())
+                            val stateAfterFailure = Json.parseToJsonElement(
+                                browserSessionState(page, sessionId),
+                            ).jsonObject
+                            assertEquals(draftBeforeFailures, stateAfterFailure["draft"])
+                            assertEquals(
+                                revisionBeforeFailures,
+                                stateAfterFailure["session"]?.jsonObject?.get("revision"),
+                            )
+                            captureDeliveryUi(
+                                page,
+                                when (label) {
+                                    "no choices" -> "a01-provider-no-choices.png"
+                                    "blank final content" -> "a01-provider-empty-final-content.png"
+                                    "malformed JSON" -> "a01-provider-malformed-json.png"
+                                    "schema-invalid JSON" -> "a01-provider-invalid-schema.png"
+                                    else -> "a01-provider-length-without-usage.png"
+                                },
+                            )
                         }
                         assertEquals(6, gateway.requests.size)
                     }
@@ -468,6 +497,7 @@ class AgentBrowserTest {
                         val assistantText = page.locator("#message-list .assistant").last().textContent()
                         assertTrue(assistantText.contains("Старое имя"), assistantText)
                         assertTrue(assistantText.contains("изменений нет"), assistantText)
+                        captureDeliveryUi(page, "a02-merchant-rule-conflict-does-not-change-saved-rule.png")
 
                         page.locator("#show-settings-panel").click()
                         assertTrue(page.locator("#merchant-rule-list").textContent().contains("Старое имя"))
@@ -479,6 +509,7 @@ class AgentBrowserTest {
                             "() => document.querySelector('#agent-status')?.textContent === 'Merchant rule обновлено.'",
                         )
                         assertTrue(page.locator("#merchant-rule-list").textContent().contains("КофеБон"))
+                        captureDeliveryUi(page, "a02-explicit-edit-resolves-rule-conflict.png")
                         assertEquals(2, gateway.requests.size)
                     }
                 }
@@ -522,11 +553,13 @@ class AgentBrowserTest {
                             "Coffeebon 37",
                             page.locator("tr[data-transaction-id='1'] input[name='merchant']").inputValue(),
                         )
+                        captureDeliveryUi(page, "a02-merchant-rule-action-card-pending.png")
                         card.locator("button").click()
                         page.waitForFunction(
                             "() => document.querySelector(\"tr[data-transaction-id='1'] input[name='merchant']\")?.value === 'КофеБон'",
                         )
 
+                        captureDeliveryUi(page, "a02-merchant-rule-applied-by-confirmation.png")
                         page.locator("#open-session-drawer").click()
                         page.locator("#drawer-new-session").click()
                         waitForSessionReady(page)
@@ -602,6 +635,7 @@ class AgentBrowserTest {
                             refundAmount,
                             page.locator("tr[data-transaction-id='2'] input[name='amount']").inputValue(),
                         )
+                        captureDeliveryUi(page, "a05-refund-linked-derived-net-source-rows-unchanged.png")
 
                         page.reload()
                         waitForAgentInitialized(page)
@@ -610,6 +644,7 @@ class AgentBrowserTest {
                             "() => document.querySelector('#draft-status')?.textContent.includes('операция 2 связана с покупкой 1') === true",
                         )
                         assertTrue(page.locator("#draft-status").textContent().contains("900"))
+                        captureDeliveryUi(page, "a05-refund-link-survives-reload.png")
                         assertEquals(2, gateway.requests.size)
                     }
                 }
@@ -654,6 +689,7 @@ class AgentBrowserTest {
                         val sessionId = page.evaluate("() => window.location.pathname.split('/').pop()").toString()
                         val stateBeforeChoice = browserSessionState(page, sessionId)
                         assertFalse(stateBeforeChoice.contains("purchase_transaction_id"))
+                        captureDeliveryUi(page, "a05-ambiguous-refund-asks-before-link.png")
                         assertEquals(
                             amountsBefore,
                             (1..3).map { transactionId ->
@@ -679,6 +715,7 @@ class AgentBrowserTest {
                                 page.locator("tr[data-transaction-id='$transactionId'] input[name='amount']").inputValue()
                             },
                         )
+                        captureDeliveryUi(page, "a05-ambiguous-refund-linked-after-choice.png")
                         assertEquals(3, gateway.requests.size)
                     }
                 }
@@ -1231,6 +1268,7 @@ class AgentBrowserTest {
                         )
                         assertEquals(0, page.locator(".memory-candidate button").count())
                         assertTrue(page.locator(".candidate-status").textContent().contains("Добавлено"))
+                        captureDeliveryUi(page, "a03-confirmed-decision-requires-explicit-action.png")
 
                         page.locator("#show-settings-panel").click()
                         val decisionInput = page.locator("#confirmed-decisions-list input.decision-editor")
@@ -3164,6 +3202,7 @@ class AgentBrowserTest {
                         assertTrue(ambiguous.first().textContent().contains("Синтетическая торговая точка"))
                         assertTrue(ambiguous.first().textContent().contains("Северная станция"))
                         assertTrue(ambiguous.first().textContent().contains("Южная станция"))
+                        captureDeliveryUi(page, "a06-receipt-one-to-one-ambiguous-and-unmatched-review.png")
                         val activeSessionId = page.evaluate(
                             "() => window.location.pathname.split('/').pop()",
                         ).toString()
@@ -3195,6 +3234,7 @@ class AgentBrowserTest {
                         )
                         assertTrue(page.locator(".receipt-association-status.matched").last()
                             .textContent().contains("Северная станция"))
+                        captureDeliveryUi(page, "a06-explicit-choice-resolves-ambiguous-receipt.png")
 
                         page.locator("#show-scheduler-panel").click()
                         page.waitForFunction(
@@ -3673,6 +3713,16 @@ class AgentBrowserTest {
                             uniqueUnknownRow.locator(".receipt-association-status.matched")
                                 .textContent().contains("Synthetic unique receipt"),
                         )
+                        assertTrue(preview.locator("tbody tr").nth(1).textContent().contains("Перевод"))
+                        assertTrue(preview.locator("tbody tr").nth(2).textContent().contains("Synthetic income"))
+                        listOf(1, 2).forEach { rowIndex ->
+                            assertEquals(
+                                0,
+                                preview.locator("tbody tr").nth(rowIndex)
+                                    .locator(".receipt-association-status.matched").count(),
+                            )
+                        }
+                        captureDeliveryUi(page, "a11-transfer-income-excluded-unknown-expense-eligible.png")
                         assertEquals(1, source.searchCalls)
                         assertEquals(4, source.detailCalls)
                         assertEquals(1, classifier.requests.size)
@@ -3718,6 +3768,7 @@ class AgentBrowserTest {
                         assertTrue(ambiguousRow.locator(".receipt-association-status.ambiguous").textContent()
                             .contains("Категория не определена; направление операции известно."))
                         assertEquals(0, ambiguousRow.locator(".receipt-association-status.ambiguous li").count())
+                        captureDeliveryUi(page, "a11-unknown-operation-type-remains-in-review.png")
                         source.returnNoReceipts = true
                         val noCandidateResponse = page.waitForResponse(
                             { response -> response.url().contains("/receipt-association/match") },
@@ -3729,6 +3780,7 @@ class AgentBrowserTest {
                             ambiguousRow.locator(".receipt-association-status.unmatched")
                                 .textContent().contains("Без чека"),
                         )
+                        captureDeliveryUi(page, "a11-unknown-expense-no-candidate.png")
                         assertEquals(4, source.detailCalls)
                         source.returnNoReceipts = false
                         val legacyMatchResponse = page.waitForResponse(
@@ -3777,6 +3829,7 @@ class AgentBrowserTest {
                         assertTrue(candidates.nth(0).textContent().contains("Synthetic receipt A"))
                         assertTrue(candidates.nth(1).textContent().contains("Synthetic receipt B"))
                         assertEquals(2, ambiguousRow.locator("button[data-action='receipt-approve']").count())
+                        captureDeliveryUi(page, "a12-ambiguous-expense-candidates-await-review.png")
                         assertEquals(2, ambiguousRow.locator("button[data-action='receipt-reject']").count())
 
                         val firstRejectResponse = page.waitForResponse(
@@ -3795,6 +3848,7 @@ class AgentBrowserTest {
                         candidates = ambiguousRow.locator(".receipt-association-status.ambiguous li")
                         assertEquals(1, candidates.count())
                         assertTrue(candidates.first().textContent().contains("Synthetic receipt B"))
+                        captureDeliveryUi(page, "a12-explicitly-rejected-candidate-removed.png")
                         ambiguousRow.locator(
                             "button[data-action='receipt-reject'][data-candidate-index='0']",
                         ).click()
@@ -3814,6 +3868,7 @@ class AgentBrowserTest {
                         assertEquals(2, candidates.count())
                         assertTrue(candidates.nth(0).textContent().contains("Synthetic receipt A"))
                         assertTrue(candidates.nth(1).textContent().contains("Synthetic receipt B"))
+                        captureDeliveryUi(page, "a12-rejection-clears-on-explicit-rematch.png")
                         ambiguousRow.locator(
                             "button[data-action='receipt-approve'][data-candidate-index='1']",
                         ).click()
@@ -3827,6 +3882,7 @@ class AgentBrowserTest {
                         assertEquals(originalAmount, linkedRow.locator("input[name='amount']").inputValue())
                         assertEquals(originalMerchant, linkedRow.locator("input[name='merchant']").inputValue())
                         assertEquals(originalCategory, linkedRow.locator("select[name='category_id']").inputValue())
+                        captureDeliveryUi(page, "a12-ambiguous-expense-approved-with-bank-fields-unchanged.png")
 
                         val purchaseRow = page.locator("tr[data-transaction-id='1']")
                         val purchaseAmount = purchaseRow.locator("input[name='amount']").inputValue()
@@ -3836,6 +3892,7 @@ class AgentBrowserTest {
                         assertEquals(purchaseAmount, purchaseRow.locator("input[name='amount']").inputValue())
                         assertEquals(purchaseMerchant, purchaseRow.locator("input[name='merchant']").inputValue())
                         assertEquals(0, purchaseRow.locator(".transaction-items").count())
+                        captureDeliveryUi(page, "a12-linked-receipt-unlinked-with-bank-fields-preserved.png")
 
                         purchaseRow.locator("button[data-action='receipt-match']").click()
                         purchaseRow.locator(".receipt-association-status.matched").waitFor()
@@ -3903,6 +3960,7 @@ class AgentBrowserTest {
                         linkedCard.locator("button[data-action='receipt-unlink']").click()
                         linkedCard.locator(".receipt-association-status.unmatched").waitFor()
                         assertEquals(0, linkedCard.locator(".transaction-items").count())
+                        captureDeliveryUi(page, "a12-card-receipt-unlinked-with-bank-fields-preserved.png")
                         val browserAndSessionSurfaces = listOf(
                             actionBodies.toString(),
                             actionResponses.toString(),
