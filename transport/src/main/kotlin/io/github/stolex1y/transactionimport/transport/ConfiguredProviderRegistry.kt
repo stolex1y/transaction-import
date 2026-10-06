@@ -38,7 +38,8 @@ class ConfiguredProviderRegistry(
 
     fun isAvailable(providerId: String): Boolean {
         val provider = catalog.providers.singleOrNull { it.id == providerId } ?: return false
-        return !credentialLookup(provider.credentialEnv).isNullOrBlank()
+        val credentialEnv = provider.credentialEnv ?: return true
+        return !credentialLookup(credentialEnv).isNullOrBlank()
     }
 
     fun availableProviderIds(): Set<String> =
@@ -46,12 +47,14 @@ class ConfiguredProviderRegistry(
 
     override fun resolve(config: AgentConfig): ChatCompletionGateway {
         val resolved = catalog.resolve(config)
-        val apiKey = credentialLookup(resolved.provider.credentialEnv)
-            ?.takeIf { it.isNotBlank() }
-            ?: throw ProviderUnavailableException(
+        val credentialEnv = resolved.provider.credentialEnv
+        val apiKey = credentialEnv?.let(credentialLookup)?.takeIf { it.isNotBlank() }
+        if (credentialEnv != null && apiKey == null) {
+            throw ProviderUnavailableException(
                 "Провайдер ${resolved.provider.displayName} недоступен: " +
-                    "не задана переменная ${resolved.provider.credentialEnv}.",
+                    "не задана переменная $credentialEnv.",
             )
+        }
         return ConfiguredChatCompletionGateway(httpClient, apiKey, resolved)
     }
 }
@@ -74,7 +77,7 @@ fun loadAgentRuntimeConfig(path: Path, catalog: ProviderCatalog): AgentRuntimeCo
 
 private class ConfiguredChatCompletionGateway(
     private val httpClient: HttpClient,
-    private val apiKey: String,
+    private val apiKey: String?,
     private val resolved: ResolvedAgentConfig,
 ) : ChatCompletionGateway {
     override val contextWindowTokens: Int? = resolved.model.contextWindowTokens
@@ -99,7 +102,9 @@ private class ConfiguredChatCompletionGateway(
         }
 
         val response = httpClient.post(endpoint) {
-            header(HttpHeaders.Authorization, "Bearer $apiKey")
+            if (apiKey != null) {
+                header(HttpHeaders.Authorization, "Bearer $apiKey")
+            }
             contentType(ContentType.Application.Json)
             setBody(JsonObject(bodyFields))
         }

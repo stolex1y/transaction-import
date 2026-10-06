@@ -39,20 +39,24 @@ data class ProviderDefinition(
     @SerialName("display_name") val displayName: String,
     @SerialName("base_url") val baseUrl: String,
     @SerialName("chat_completions_path") val chatCompletionsPath: String = "/chat/completions",
-    @SerialName("credential_env") val credentialEnv: String,
+    @SerialName("credential_env") val credentialEnv: String? = null,
     val models: List<ProviderModelDefinition>,
 ) {
     internal fun validate() {
         require(id.isNotBlank()) { "Идентификатор провайдера не должен быть пустым." }
         require(displayName.isNotBlank()) { "Название провайдера $id не должно быть пустым." }
-        require(baseUrl.startsWith("https://") || baseUrl.startsWith("http://localhost")) {
-            "base_url провайдера $id должен использовать HTTPS (localhost разрешён для тестов)."
+        val loopbackHttp = isLoopbackHttpUrl(baseUrl)
+        require(baseUrl.startsWith("https://") || loopbackHttp) {
+            "base_url провайдера $id должен использовать HTTPS или точный loopback HTTP host."
         }
         require(chatCompletionsPath.startsWith("/") && chatCompletionsPath.length > 1) {
             "chat_completions_path провайдера $id должен начинаться с '/'."
         }
-        require(ENV_NAME.matches(credentialEnv)) {
+        require(credentialEnv == null || ENV_NAME.matches(credentialEnv)) {
             "credential_env провайдера $id должен быть именем переменной окружения."
+        }
+        require(credentialEnv != null || loopbackHttp) {
+            "credential_env провайдера $id обязателен, кроме loopback HTTP provider."
         }
         require(models.isNotEmpty()) { "Провайдер $id должен содержать хотя бы одну модель." }
         require(models.map { it.id }.distinct().size == models.size) {
@@ -65,6 +69,26 @@ data class ProviderDefinition(
         val ENV_NAME = Regex("^[A-Z_][A-Z0-9_]*$")
     }
 }
+
+private fun isLoopbackHttpUrl(value: String): Boolean {
+    if (!value.startsWith("http://")) return false
+    val authorityAndPath = value.removePrefix("http://")
+    if (authorityAndPath.isEmpty() || authorityAndPath.any {
+            it.isWhitespace() || it == '?' || it == '#' || it == '\\'
+        }
+    ) {
+        return false
+    }
+    val authority = authorityAndPath.substringBefore('/')
+    if (authority.isEmpty() || '@' in authority) return false
+
+    val portSeparator = authority.lastIndexOf(':')
+    val host = if (portSeparator < 0) authority else authority.substring(0, portSeparator)
+    val port = if (portSeparator < 0) null else authority.substring(portSeparator + 1)
+    if (host != "localhost" && host != "127.0.0.1") return false
+    return port == null || port.toIntOrNull()?.let { it in 1..65_535 } == true
+}
+
 
 @Serializable
 data class ProviderModelDefinition(

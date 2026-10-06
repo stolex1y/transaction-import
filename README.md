@@ -501,9 +501,10 @@ SQLite, LLM context или application logs.
 несекретные параметры:
 
 - `id`, `display_name`, `base_url` и `chat_completions_path`;
-- имя переменной окружения `credential_env`, но не сам API key;
+- `credential_env` для удалённых providers; ключи хранятся только в окружении;
 - модели, режимы reasoning, `context_window_tokens` и необязательное поле
-  `max_output_tokens` для безопасного бюджета ответа.
+  `max_output_tokens` для бюджета ответа. Отсутствие `credential_env` разрешено
+  только для provider с loopback HTTP URL.
 
 Совместимого с OpenAI Chat Completions провайдера или модель можно добавить
 правкой каталога без перекомпиляции. Поля `request_fields` добавляются в JSON
@@ -514,14 +515,52 @@ SQLite, LLM context или application logs.
   (DeepSeek V4 Pro 0813); старый ID `deepseek-v4-flash` мигрируется при
   восстановлении сохранённых сессий.
 
-Путь к другому каталогу задаётся через `PROVIDER_CONFIG_PATH`. Провайдер
-отображается недоступным, если указанная в `credential_env` переменная не
-задана; это не блокирует другие настроенные провайдеры.
+Путь к другому каталогу задаётся через `PROVIDER_CONFIG_PATH`. Provider с
+`credential_env` отображается недоступным, если переменная окружения не задана.
+Credential-less provider допустим только на точном loopback HTTP host; его
+запросы не отправляют `Authorization`. Удалённые providers продолжают требовать
+ключ.
 
 Начальный каталог использует:
 
 - `DEEPSEEK_API_KEY` для DeepSeek;
 - `OPENROUTER_API_KEY` для OpenRouter.
+
+В каталоге также настроен локальный Ollama provider:
+
+- endpoint `http://127.0.0.1:11435/v1`, Chat Completions path `/chat/completions`;
+- модель `qwen2.5:3b` Q4_K_M; runtime и каталог используют context window 4096 tokens
+  (архитектурный максимум модели — 32768) и output limit 2048;
+- API key не нужен; HTTP-запросы разрешены только к loopback и не содержат
+  `Authorization`.
+
+Из корня проекта загрузите модель только по явному запросу:
+
+```bash
+./scripts/download-local-model.sh
+```
+
+Скрипт временно запускает loopback runtime на `127.0.0.1:11435`, выполняет
+`ollama pull` и останавливает его. Он использует тот же model store, что и
+startup: `OLLAMA_MODELS` если задан, иначе `~/.ollama/models` пользователя,
+запустившего скрипт. Так загрузка не зависит от systemd-службы Ollama с отдельным
+пользователем или каталогом моделей. Если runtime на `11435` уже запущен,
+остановите его перед загрузкой. Оба скрипта отклоняют занятый endpoint.
+Pull требует интернет; приложение и startup script модель автоматически не скачивают.
+
+Для локального inference запустите отдельный runtime в первом терминале:
+
+```bash
+./scripts/start-local-ollama.sh
+```
+
+Runtime проверяет установленную модель, связывается с `127.0.0.1:11435`,
+устанавливает `OLLAMA_NO_CLOUD=1` и `OLLAMA_CONTEXT_LENGTH=4096`, работает в
+foreground. При остановке нажмите `Ctrl+C`. Во втором терминале запустите
+приложение, затем в `/agent` выберите `Ollama (локально)` и `qwen2.5:3b`
+для конкретной сессии.
+Новые сессии по-прежнему используют DeepSeek; ошибки локального runtime видны и
+не переключают сессию на cloud provider.
 
 ## Конфигурация агента
 
@@ -759,8 +798,10 @@ UTF-8 upper-bound оценку без внешнего tokenizer API; она н�
 
 ## Запуск
 
-Для реального LLM-вызова задайте API key нужного провайдера из
-`config/providers.json`, затем из корня проекта:
+Для cloud LLM-вызова задайте API key нужного provider из
+`config/providers.json`. Для локального Ollama inference запустите
+`scripts/start-local-ollama.sh` по инструкции выше. Из корня проекта соберите
+distribution и запустите приложение:
 
 ```bash
 ./gradlew :web:installDist
@@ -768,8 +809,10 @@ UTF-8 upper-bound оценку без внешнего tokenizer API; она н�
 ```
 
 Порт меняется переменной `PORT`. Создание, просмотр и локальное редактирование
-сессий доступны без ключа; отправка сообщения требует доступного провайдера.
-Для запуска с DeepSeek нужен `DEEPSEEK_API_KEY`.
+сессий доступны без ключа; отправка сообщения требует выбранного доступного
+provider. В новой сессии default остаётся DeepSeek; для локального запроса явно
+выберите Ollama и `qwen2.5:3b`. Локальный provider не переключается на cloud
+provider при ошибке runtime.
 
 ## Проверки
 
@@ -778,6 +821,11 @@ UTF-8 upper-bound оценку без внешнего tokenizer API; она н�
 ```bash
 ./gradlew test
 ```
+
+`ConfiguredProviderRegistryTest` проверяет OpenAI-compatible HTTP body,
+обязательный Bearer для удалённого provider, credential-less loopback request
+без `Authorization` и отказ credential-less конфигурации для non-loopback URL.
+Эти тесты используют Ktor `MockEngine` и не обращаются к реальным провайдерам.
 
 Постоянный fake-provider проверяет HTTP-flow агента, prompt с общими
 инструкциями и системными инвариантами, вычисление и сохранение `receipt_state`,
@@ -791,6 +839,24 @@ UTF-8 upper-bound оценку без внешнего tokenizer API; она н�
 ./gradlew :web:playwrightInstall
 ./gradlew :web:browserTest
 ```
+
+`LocalProviderAcceptanceBrowserTest` содержит browser journeys для local-provider
+import/failure, сравнения DeepSeek и Ollama в отдельных сессиях через два
+loopback fake и отдельный opt-in smoke реальной модели. Fake acceptance задаёт
+`LOCAL_PROVIDER_ACCEPTANCE_BASE_URL` и `LOCAL_PROVIDER_ACCEPTANCE_REQUIRED=true`;
+fixture-only `D27_FAKE_DEEPSEEK_TOKEN` уходит только в loopback fake, cloud API
+keys пусты и реальные cloud calls не выполняются. Для отдельного real smoke запустите локальный Ollama
+runtime и Transaction Import, затем выполните:
+
+```bash
+LOCAL_PROVIDER_ACCEPTANCE_BASE_URL=http://127.0.0.1:8080 \
+LOCAL_PROVIDER_REAL_REQUIRED=true \
+xvfb-run -a -s "-screen 0 1440x1000x24" \
+./gradlew :web:browserTest --tests io.github.stolex1y.transactionimport.web.LocalProviderAcceptanceBrowserTest.realLocalProviderCompletesImport
+```
+
+Real smoke использует только синтетическую выписку и установленную локальную
+модель; он не входит в `./gradlew test`.
 
 Browser-тест проверяет создание сессии, отображение системных инвариантов,
 публичные статусы выписки, отсутствие ручных переходов, два последовательных

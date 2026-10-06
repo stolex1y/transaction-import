@@ -127,6 +127,27 @@
           ]
         }
       ]
+    },
+    {
+      "id": "ollama",
+      "display_name": "Ollama (локально)",
+      "base_url": "http://127.0.0.1:11435/v1",
+      "chat_completions_path": "/chat/completions",
+      "models": [
+        {
+          "id": "qwen2.5:3b",
+          "display_name": "Qwen2.5 3B (Q4_K_M)",
+          "context_window_tokens": 4096,
+          "max_output_tokens": 2048,
+          "reasoning_modes": [
+            {
+              "id": "disabled",
+              "display_name": "Отключён",
+              "request_fields": {}
+            }
+          ]
+        }
+      ]
     }
   ]
 }

@@ -7,6 +7,7 @@ import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.RequestMessage
 import io.github.stolex1y.transactionimport.core.ResponseFormat
 import io.github.stolex1y.transactionimport.core.ThinkingOptions
+import io.github.stolex1y.transactionimport.core.ProviderUnavailableException
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -23,6 +24,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
+import kotlin.test.assertFailsWith
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -133,6 +135,170 @@ class ConfiguredProviderRegistryTest {
             assertEquals("disabled", explicitRequest.getValue("thinking").jsonObject.getValue("type").jsonPrimitive.content)
             assertFalse(explicitRequest.containsKey("reasoning"))
             assertFalse(explicitRequest.containsKey("provider_preference"))
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun credentiallessLoopbackProviderUsesNoAuthAndCatalogModelLimits() = runBlocking {
+        var captured: HttpRequestData? = null
+        val engine = MockEngine { request ->
+            captured = request
+            respond(
+                content = """
+                    {
+                      "choices": [
+                        {
+                          "message": { "role": "assistant", "content": "{}" },
+                          "finish_reason": "stop"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val client = HttpClient(engine) {
+            install(ContentNegotiation) {
+                json(Json { ignoreUnknownKeys = true })
+            }
+        }
+        try {
+            val catalog = decodeProviderCatalog(
+                """
+                {
+                  "providers": [
+                    {
+                      "id": "ollama",
+                      "display_name": "Ollama (локально)",
+                      "base_url": "http://127.0.0.1:11435/v1",
+                      "models": [
+                        {
+                          "id": "qwen2.5:3b",
+                          "context_window_tokens": 4096,
+                          "max_output_tokens": 2048,
+                          "reasoning_modes": [
+                            { "id": "disabled", "request_fields": {} }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """.trimIndent(),
+            )
+            val registry = ConfiguredProviderRegistry(client, catalog) { null }
+            assertTrue(registry.isAvailable("ollama"))
+            assertEquals(setOf("ollama"), registry.availableProviderIds())
+            val gateway = registry.resolve(
+                AgentConfig("ollama", "qwen2.5:3b", "disabled"),
+            )
+            assertEquals(4096, gateway.contextWindowTokens)
+            assertEquals(2048, gateway.maxOutputTokens)
+
+            val response = gateway.complete(
+                ChatCompletionRequest(
+                    model = "qwen2.5:3b",
+                    messages = listOf(RequestMessage("user", "synthetic statement")),
+                    thinking = ThinkingOptions("disabled"),
+                    responseFormat = ResponseFormat("json_object"),
+                    maxTokens = 2048,
+                    stream = false,
+                ),
+            )
+
+            val request = requireNotNull(captured)
+            assertEquals(
+                "http://127.0.0.1:11435/v1/chat/completions",
+                request.url.toString(),
+            )
+            assertNull(request.headers[HttpHeaders.Authorization])
+            val body = Json.parseToJsonElement(request.bodyAsString()).jsonObject
+            assertEquals("qwen2.5:3b", body.getValue("model").jsonPrimitive.content)
+            assertEquals(
+                "json_object",
+                body.getValue("response_format").jsonObject.getValue("type").jsonPrimitive.content,
+            )
+            assertFalse(body.containsKey("thinking"))
+            assertFalse(body.containsKey("reasoning_effort"))
+            assertEquals("{}", response.choices.single().message.content)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun credentiallessProvidersRejectRemoteAndNonLoopbackUrls() {
+        val rejectedUrls = listOf(
+            "https://provider.example/v1",
+            "http://localhost.evil/v1",
+            "http://127.0.0.2:11435/v1",
+            "http://localhost@127.0.0.1:11435/v1",
+            "http://127.0.0.1:65536/v1",
+            "http://127.0.0.1:11435/v1?redirect=elsewhere",
+        )
+
+        rejectedUrls.forEach { url ->
+            assertFailsWith<IllegalArgumentException>(url) {
+                decodeProviderCatalog(
+                    """
+                    {
+                      "providers": [
+                        {
+                          "id": "local",
+                          "display_name": "Local",
+                          "base_url": "$url",
+                          "models": [
+                            {
+                              "id": "model",
+                              "reasoning_modes": [
+                                { "id": "disabled", "request_fields": {} }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                    """.trimIndent(),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun remoteProviderWithoutConfiguredCredentialRemainsUnavailable() {
+        val catalog = decodeProviderCatalog(
+            """
+            {
+              "providers": [
+                {
+                  "id": "remote",
+                  "display_name": "Remote",
+                  "base_url": "https://provider.example/v1",
+                  "credential_env": "REMOTE_API_KEY",
+                  "models": [
+                    {
+                      "id": "remote-model",
+                      "reasoning_modes": [
+                        { "id": "disabled", "request_fields": {} }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+        val client = HttpClient(MockEngine { error("Request must not be sent without a credential.") })
+        try {
+            val registry = ConfiguredProviderRegistry(client, catalog) { null }
+            assertFalse(registry.isAvailable("remote"))
+            assertTrue(registry.availableProviderIds().isEmpty())
+            assertFailsWith<ProviderUnavailableException> {
+                registry.resolve(AgentConfig("remote", "remote-model", "disabled"))
+            }
         } finally {
             client.close()
         }

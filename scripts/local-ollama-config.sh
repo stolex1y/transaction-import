@@ -1,0 +1,13 @@
+readonly LOCAL_OLLAMA_MODEL="qwen2.5:3b"
+readonly LOCAL_OLLAMA_HOST="127.0.0.1:11435"
+readonly LOCAL_OLLAMA_CONTEXT_LENGTH="4096"
+readonly LOCAL_OLLAMA_MODELS_DIR="${OLLAMA_MODELS:-${HOME}/.ollama/models}"
+
+ollama_local() {
+    env \
+        OLLAMA_HOST="$LOCAL_OLLAMA_HOST" \
+        OLLAMA_MODELS="$LOCAL_OLLAMA_MODELS_DIR" \
+        OLLAMA_CONTEXT_LENGTH="$LOCAL_OLLAMA_CONTEXT_LENGTH" \
+        OLLAMA_NO_CLOUD=1 \
+        ollama "$@"
+}
