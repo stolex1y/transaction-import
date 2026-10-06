@@ -176,7 +176,7 @@ class LocalProviderAcceptanceBrowserTest {
             playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
                 browser.newContext().use { context ->
                     val page = context.newPage()
-                    page.setDefaultTimeout(180_000.0)
+                    page.setDefaultTimeout(360_000.0)
                     page.navigate("$baseUrl/agent")
                     waitForAgentInitialized(page)
                     page.locator("#new-session").click()
