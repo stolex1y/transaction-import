@@ -3606,6 +3606,109 @@ class AgentBrowserTest {
     }
 
     @Test
+    fun nativeMcpPreviewShowsCafeCategoriesAndIncompleteClassifierIssue() {
+        val database = Files.createTempFile("agent-browser-category-preview-", ".sqlite")
+        val classifier = FakeAgentGateway(
+            ArrayDeque(
+                listOf(
+                    """{"items":[
+                        {"index":0,"merchant":"Стритфуд","description":"","category_id":"food.cafe"},
+                        {"index":1,"merchant":"Перевод","description":"","category_id":null},
+                        {"index":2,"merchant":"Synthetic income","description":"","category_id":null},
+                        {"index":4,"merchant":"КофеБон","description":"","category_id":"food.cafe"}
+                    ]}""",
+                ),
+            ),
+        )
+        val planner = BrowserEligibilityPlanGateway()
+        val source = BrowserEligibilityMcpSource(cafeMerchantExamples = true)
+        val base = fakeAgentDependencies(database.toString(), classifier)
+        runBlocking {
+            base.agent.updatePreferences(
+                "Операции «Стритфуд» и «КофеБон» относить к категории «Кафе и рестораны».",
+            )
+        }
+        val runtime = base.runtimeConfig.copy(
+            mcpToolLoop = base.runtimeConfig.mcpToolLoop.copy(enabled = true),
+        )
+        val native = NativeMcpAgent(
+            agent = base.agent,
+            gatewayResolver = AgentGatewayResolver { planner },
+            mcpTools = source,
+            runtimeConfig = runtime,
+            receiptMatchSelector = ReceiptMatchSelector { _, _, choices, _, _ ->
+                if (choices.size > 1) error("Synthetic selector failure for ambiguous receipts.")
+                choices.singleOrNull()?.let { ReceiptSelectionResponseView(it.alias, 0.98) }
+            },
+        )
+        val dependencies = AgentWebDependencies(
+            agent = base.agent,
+            catalog = base.catalog,
+            runtimeConfig = runtime,
+            availableProviderIds = base.availableProviderIds,
+            newSessionTitle = base.newSessionTitle,
+            mcpCatalog = base.mcpCatalog,
+            tbankMcp = base.tbankMcp,
+            nativeMcpAgent = native,
+            scheduler = base.scheduler,
+            receiptsProxy = base.receiptsProxy,
+        )
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = dependencies)
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        page.locator("#agent-message").fill("Импортируй синтетические операции и чеки.")
+                        page.locator("#send-message").click()
+
+                        val preview = page.locator(".mcp-inline-preview").last()
+                        preview.waitFor()
+                        assertEquals(5, preview.locator("tbody tr").count())
+                        val streetFoodRow = preview.locator("tbody tr").nth(0)
+                        assertTrue(streetFoodRow.locator("td").nth(2).textContent().contains("Стритфуд"))
+                        assertTrue(
+                            streetFoodRow.locator("td").nth(4).textContent().contains("Кафе и рестораны"),
+                        )
+                        val coffeeRow = preview.locator("tbody tr").nth(4)
+                        assertTrue(coffeeRow.locator("td").nth(2).textContent().contains("КофеБон"))
+                        assertTrue(
+                            coffeeRow.locator("td").nth(4).textContent().contains("Кафе и рестораны"),
+                        )
+                        val incompleteRow = preview.locator("tbody tr").nth(3)
+                        val incompleteCategory = incompleteRow.locator("td").nth(4).textContent()
+                        assertTrue(incompleteCategory.contains("Ответ классификатора неполный"))
+                        val receiptStatus = preview.locator(".receipt-matching-status").textContent().orEmpty()
+                        assertTrue(receiptStatus.contains("Сопоставление чеков завершено"))
+                        assertTrue(receiptStatus.contains("неоднозначных 1"))
+                        assertTrue(
+                            incompleteRow.locator("td").nth(6).textContent()
+                                .contains("Чек требует уточнения"),
+                        )
+                        assertFalse(page.locator("#message-list").textContent().contains("в очеред"))
+                        val sessionId = page.evaluate(
+                            "() => window.location.pathname.split('/').pop()",
+                        ).toString()
+                        assertEquals(null, runBlocking { base.agent.getSession(sessionId).draft })
+                        captureDeliveryUi(page, "a13-cafe-categories-and-classifier-diagnostic.png")
+                    }
+                }
+            }
+        } finally {
+            base.scheduler?.close()
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
     fun unknownExpenseReceiptControlsApproveRejectAndDetachInDraft() {
         val database = Files.createTempFile("agent-browser-receipt-controls-", ".sqlite")
         val classifier = FakeAgentGateway(
@@ -4542,7 +4645,9 @@ private class BrowserEligibilityPlanGateway : ChatCompletionGateway {
     }
 }
 
-private class BrowserEligibilityMcpSource : McpToolProvider {
+private class BrowserEligibilityMcpSource(
+    private val cafeMerchantExamples: Boolean = false,
+) : McpToolProvider {
     var searchCalls = 0
     var detailCalls = 0
     var returnNoReceipts = false
@@ -4576,9 +4681,8 @@ private class BrowserEligibilityMcpSource : McpToolProvider {
                  "account_name":"Synthetic account","currency":"643","balance_minor":0}]}}
             """.trimIndent(),
         )
-        "tbank-transactions" to "get-account-transactions" -> TbankToolCallResponse(
-            tool = tool,
-            text = """
+        "tbank-transactions" to "get-account-transactions" -> {
+            val transactionText = """
                 {"account_name":"Synthetic account","transactions":[
                   {"date":"2026-09-10T10:00:00Z","amount_minor":-1000,"currency":"RUB",
                    "merchant":"Synthetic purchase","description":"Synthetic purchase"},
@@ -4591,8 +4695,15 @@ private class BrowserEligibilityMcpSource : McpToolProvider {
                   {"date":"2026-09-10T14:00:00Z","amount_minor":-3300,"currency":"RUB",
                    "merchant":"Synthetic unique unknown","description":"Synthetic unique unknown type"}
                 ]}
-            """.trimIndent(),
-        )
+            """.trimIndent()
+            val cafeExamples = transactionText
+                .replace("Synthetic purchase", "Стритфуд")
+                .replace("Synthetic unique unknown", "КофеБон")
+            TbankToolCallResponse(
+                tool = tool,
+                text = if (cafeMerchantExamples) cafeExamples else transactionText,
+            )
+        }
         "receipts" to "search-receipts" -> {
             searchCalls += 1
             TbankToolCallResponse(

@@ -4,7 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
-import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -70,6 +70,12 @@ private val DRAFT_RULES_REVIEW_SYSTEM_PROMPT = """
 
 private const val EXTERNAL_CATEGORY_FALLBACK_ISSUE =
     "Категория не определена автоматически; проверьте операцию вручную."
+private const val EXTERNAL_CATEGORY_PROVIDER_ISSUE =
+    "Классификатор недоступен; категория не назначена автоматически. Проверьте операцию вручную."
+private const val EXTERNAL_CATEGORY_RESPONSE_ISSUE =
+    "Ответ классификатора неполный или некорректный; категория не назначена автоматически. Проверьте операцию вручную."
+private const val EXTERNAL_CATEGORY_INVALID_ISSUE =
+    "Категория из ответа отсутствует в активном каталоге или не подходит по направлению; проверьте вручную."
 
 private val MERCHANT_RULE_WHITESPACE_PATTERN = Regex("""\s+""")
 private val EMPTY_DESCRIPTION_MARKER_SEPARATOR = Regex("""[^\p{L}\p{N}]+""")
@@ -1344,6 +1350,13 @@ class SmartExpenseAgent(
                             Категория должна соответствовать direction. Если
                             подходящей категории нет или выбор неоднозначен,
                             верни category_id=null.
+                            Используй merchant, description, display path и hint
+                            каталога семантически, не только по буквальному совпадению.
+                            Для явных кафе, кофеен и street-food заведений выбирай
+                            активную совместимую категорию «Кафе и рестораны», если
+                            она есть в каталоге; «Стритфуд» и «КофеБон» — такие
+                            примеры. Найди ID этой категории в каталоге, не выдумывай
+                            его и не переноси ID из примеров.
 
                             Каталог:
                             $categoriesPrompt
@@ -1435,11 +1448,16 @@ class SmartExpenseAgent(
             )
         } catch (_: Exception) {
             return ExternalClassificationResult(
-                candidates = fallbackExternalCategories(candidates, categoryCatalog, preferences),
+                candidates = fallbackExternalCategories(
+                    candidates = candidates,
+                    categoryCatalog = categoryCatalog,
+                    preferences = preferences,
+                    issue = EXTERNAL_CATEGORY_PROVIDER_ISSUE,
+                ),
             )
         }
         val content = response.choices.firstOrNull()?.message?.content
-        val decoded = try {
+        val parsed = try {
             require(!content.isNullOrBlank())
             val jsonContent = content.trim().let { raw ->
                 if (raw.startsWith("```")) {
@@ -1448,22 +1466,44 @@ class SmartExpenseAgent(
                     raw
                 }
             }
-            EXTERNAL_CLASSIFICATION_JSON.decodeFromString<ExternalCategoryClassification>(jsonContent)
+            val responseJson = EXTERNAL_CLASSIFICATION_JSON.parseToJsonElement(jsonContent)
+            EXTERNAL_CLASSIFICATION_JSON.decodeFromJsonElement<ExternalCategoryClassification>(responseJson) to
+                responseJson
         } catch (_: Exception) {
             return ExternalClassificationResult(
-                candidates = fallbackExternalCategories(candidates, categoryCatalog, preferences),
+                candidates = fallbackExternalCategories(
+                    candidates = candidates,
+                    categoryCatalog = categoryCatalog,
+                    preferences = preferences,
+                    issue = EXTERNAL_CATEGORY_RESPONSE_ISSUE,
+                ),
             )
         }
-        val duplicateIndex = decoded.items
-            .groupingBy(ExternalCategoryAssignment::index)
-            .eachCount()
-            .any { it.value > 1 }
-        if (duplicateIndex) {
-            return ExternalClassificationResult(
-                candidates = fallbackExternalCategories(candidates, categoryCatalog, preferences),
-            )
+        val decoded = parsed.first
+        val responseJson = parsed.second
+        val responseItems = (responseJson as? JsonObject)?.get("items") as? JsonArray
+        val explicitCategoryIndexes = responseItems
+            ?.mapIndexedNotNull { itemIndex, item ->
+                if (
+                    (item as? JsonObject)?.containsKey("category_id") == true
+                ) {
+                    decoded.items.getOrNull(itemIndex)?.index
+                } else {
+                    null
+                }
+            }
+            ?.toSet()
+            .orEmpty()
+        val assignments = mutableMapOf<Int, ExternalCategoryAssignment>()
+        val duplicateIndexes = mutableSetOf<Int>()
+        decoded.items.forEach { assignment ->
+            val index = assignment.index
+            if (index !in candidates.indices || index in duplicateIndexes) return@forEach
+            if (assignments.put(index, assignment) != null) {
+                assignments.remove(index)
+                duplicateIndexes += index
+            }
         }
-        val assignments = decoded.items.associateBy { it.index }
         return ExternalClassificationResult(
             candidates = candidates.mapIndexed { index, candidate ->
                 val assignment = assignments[index]
@@ -1505,9 +1545,15 @@ class SmartExpenseAgent(
                         categoryIssue = null,
                     )
                 } else {
+                    val issue = when {
+                        assignment == null || index !in explicitCategoryIndexes ->
+                            EXTERNAL_CATEGORY_RESPONSE_ISSUE
+                        categoryId == null -> EXTERNAL_CATEGORY_FALLBACK_ISSUE
+                        else -> EXTERNAL_CATEGORY_INVALID_ISSUE
+                    }
                     canonicalEnriched.copy(
                         categoryId = null,
-                        categoryIssue = EXTERNAL_CATEGORY_FALLBACK_ISSUE,
+                        categoryIssue = issue,
                     )
                 }
             },
@@ -1530,6 +1576,7 @@ class SmartExpenseAgent(
         candidates: List<ExternalTransactionCandidate>,
         categoryCatalog: CategoryCatalog,
         preferences: UserPreferences,
+        issue: String = EXTERNAL_CATEGORY_FALLBACK_ISSUE,
     ): List<ExternalTransactionCandidate> {
         val merchantCanonicalRules = merchantCanonicalRulesFor(preferences)
         return candidates.map { candidate ->
@@ -1561,7 +1608,7 @@ class SmartExpenseAgent(
             } else {
                 enriched.copy(
                     categoryId = null,
-                    categoryIssue = EXTERNAL_CATEGORY_FALLBACK_ISSUE,
+                    categoryIssue = issue,
                 )
             }
         }

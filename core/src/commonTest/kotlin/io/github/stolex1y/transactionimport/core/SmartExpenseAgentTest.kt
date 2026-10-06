@@ -1256,23 +1256,26 @@ class SmartExpenseAgentTest {
     @Test
     fun externalPreviewAppliesConfirmedCategoryRuleToMatchingMerchant() = runBlocking {
         val repository = MemoryImportSessionRepository()
+        val generalInstruction =
+            "Явные кофейни и street-food заведения, включая «Стритфуд» и «КофеБон», относить к «Кафе и ресторанам»."
+        val confirmedDecision =
+            "Операции с мерчантом «Стритфуд» относить к категории «Кафе и рестораны»."
         repository.saveLongTermMemory(
             repository.readLongTermMemory().copy(
+                userPrompt = generalInstruction,
                 confirmedDecisions = listOf(
                     ConfirmedDecision(
                         id = "decision-category-preview",
-                        text = "Операции с мерчантом «Два Дантиста» относить к категории «Здоровье».",
+                        text = confirmedDecision,
                         createdAtEpochMs = 1L,
                     ),
                 ),
             ),
         )
-        val agent = testAgent(
-            repository = repository,
-            gateway = QueuedGateway(
-                """{"items":[{"index":0,"merchant":"Два Дантиста","description":"","category_id":"health.pharmacy"}]}""",
-            ),
+        val gateway = QueuedGateway(
+            """{"items":[{"index":0,"merchant":"Стритфуд","description":"","category_id":"food.cafe"}]}""",
         )
+        val agent = testAgent(repository, gateway)
         val session = agent.createSession("Category preview", defaultConfig)
 
         val enriched = agent.classifyExternalTransactions(
@@ -1283,14 +1286,203 @@ class SmartExpenseAgentTest {
                     occurredAt = "2026-02-08",
                     amountMinor = -1_500,
                     currency = "RUB",
-                    merchant = "Два Дантиста",
-                    description = "",
+                    merchant = "Стритфуд",
+                    description = "Бургер",
                 ),
             ),
         )
 
-        assertEquals("health.pharmacy", enriched.single().categoryId)
+        assertEquals("food.cafe", enriched.single().categoryId)
         assertNull(enriched.single().categoryIssue)
+        val classifierPrompt = gateway.requests.single().messages.first().content
+        assertTrue(classifierPrompt.contains(generalInstruction))
+        assertTrue(classifierPrompt.contains(confirmedDecision))
+        assertTrue(
+            classifierPrompt.lines().any { line ->
+                line.contains("food.cafe:") && line.contains("Кафе и рестораны")
+            },
+        )
+        assertTrue(classifierPrompt.contains("Для явных кафе, кофеен и street-food заведений"))
+    }
+
+    @Test
+    fun missingExternalClassificationRowKeepsValidSiblingAndExplainsItsCategory() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        val gateway = QueuedGateway(
+            """{"items":[
+                {"index":0,"merchant":"Стритфуд","description":"","category_id":"food.cafe"},
+                {"index":2,"merchant":"Лишняя строка","description":"","category_id":null}
+            ]}""".trimIndent(),
+        )
+        val agent = testAgent(repository, gateway)
+        val session = agent.createSession("Incomplete classification", defaultConfig)
+
+        val enriched = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            userText = "Импортируй операции и примени подтверждённые правила.",
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -1_000,
+                    currency = "RUB",
+                    merchant = "Стритфуд",
+                    description = "Бургер",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -640,
+                    currency = "RUB",
+                    merchant = "КофеБон",
+                    description = "Кофе",
+                ),
+            ),
+        )
+
+        assertEquals("food.cafe", enriched[0].categoryId)
+        assertNull(enriched[0].categoryIssue)
+        assertNull(enriched[1].categoryId)
+        assertTrue(enriched[1].categoryIssue.orEmpty().contains("Ответ классификатора неполный"))
+    }
+
+    @Test
+    fun duplicateExternalClassificationIndexesInvalidateOnlyTheirRow() = runBlocking {
+        val gateway = QueuedGateway(
+            """{"items":[
+                {"index":0,"merchant":"Стритфуд","description":"Бургер","category_id":"food.cafe"},
+                {"index":1,"merchant":"Первая версия","description":"","category_id":"food.cafe"},
+                {"index":1,"merchant":"Вторая версия","description":"","category_id":"food.cafe"},
+                {"index":1,"merchant":"Третья версия","description":"","category_id":"food.cafe"}
+            ]}""".trimIndent(),
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val session = agent.createSession("Duplicate classifier indexes", defaultConfig)
+        val enriched = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            userText = "Импортируй синтетические операции.",
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -1_000,
+                    currency = "RUB",
+                    merchant = "Стритфуд",
+                    description = "Бургер",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -640,
+                    currency = "RUB",
+                    merchant = "КофеБон",
+                    description = "Кофе",
+                ),
+            ),
+        )
+
+        assertEquals("food.cafe", enriched[0].categoryId)
+        assertNull(enriched[0].categoryIssue)
+        assertNull(enriched[1].categoryId)
+        assertTrue(enriched[1].categoryIssue.orEmpty().contains("Ответ классификатора неполный"))
+    }
+
+    @Test
+    fun externalClassificationRejectsUnsupportedCategoryIdsWithoutDiscardingValidSibling() = runBlocking {
+        val gateway = QueuedGateway(
+            """{"items":[
+                {"index":0,"merchant":"Стритфуд","description":"Бургер","category_id":"food.cafe"},
+                {"index":1,"merchant":"Неизвестная категория","description":"","category_id":"unknown.category"},
+                {"index":2,"merchant":"Архивная категория","description":"","category_id":"transfer.internal"},
+                {"index":3,"merchant":"Группа категорий","description":"","category_id":"category.food"},
+                {"index":4,"merchant":"Категория дохода для расхода","description":"","category_id":"income.salary"}
+            ]}""".trimIndent(),
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val session = agent.createSession("Unsupported category IDs", defaultConfig)
+        val merchants = listOf(
+            "Стритфуд",
+            "Неизвестная категория",
+            "Архивная категория",
+            "Группа категорий",
+            "Категория дохода для расхода",
+        )
+
+        val enriched = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            userText = "Импортируй синтетические операции.",
+            candidates = merchants.map { merchant ->
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -1_000,
+                    currency = "RUB",
+                    merchant = merchant,
+                    description = "",
+                )
+            },
+        )
+
+        assertEquals("food.cafe", enriched.first().categoryId)
+        assertNull(enriched.first().categoryIssue)
+        assertTrue(enriched.drop(1).all { it.categoryId == null })
+        assertTrue(enriched.drop(1).all {
+            it.categoryIssue.orEmpty().contains(
+                "Категория из ответа отсутствует в активном каталоге или не подходит по направлению",
+            )
+        })
+    }
+
+    @Test
+    fun malformedExternalClassifierJsonHasSafeDiagnosticDistinctFromProviderFailure() = runBlocking {
+        val gateway = QueuedGateway(
+            """{"items":[{"index":0,"merchant":"Синтетическое кафе","description":"","category_id":}]}""",
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val session = agent.createSession("Malformed classifier response", defaultConfig)
+
+        val enriched = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            userText = "Импортируй синтетическую операцию.",
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -1_000,
+                    currency = "RUB",
+                    merchant = "Синтетическое кафе",
+                    description = "",
+                ),
+            ),
+        ).single()
+
+        assertNull(enriched.categoryId)
+        assertTrue(enriched.categoryIssue.orEmpty().contains("Ответ классификатора неполный или некорректный"))
+        assertFalse(enriched.categoryIssue.orEmpty().contains("Классификатор недоступен"))
+    }
+
+    @Test
+    fun classifierFailureExplainsUnassignedCategoryWithoutLeakingProviderError() = runBlocking {
+        val rawError = "SYNTHETIC_PRIVATE_CLASSIFIER_ERROR"
+        val gateway = object : ChatCompletionGateway {
+            override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+                throw IllegalStateException(rawError)
+            }
+        }
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val session = agent.createSession("Classifier failure", defaultConfig)
+
+        val enriched = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            userText = "Импортируй операцию.",
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-02-08",
+                    amountMinor = -1_000,
+                    currency = "RUB",
+                    merchant = "Синтетическое кафе",
+                ),
+            ),
+        ).single()
+
+        assertNull(enriched.categoryId)
+        assertTrue(enriched.categoryIssue.orEmpty().contains("Классификатор недоступен"))
+        assertFalse(enriched.categoryIssue.orEmpty().contains("Ответ классификатора"))
+        assertFalse(enriched.categoryIssue.orEmpty().contains(rawError))
     }
 
     @Test

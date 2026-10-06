@@ -1220,6 +1220,82 @@ class NativeMcpAgentTest {
             database.deleteIfExists()
         }
     }
+
+    @Test
+    fun nativeImportPreviewKeepsCafeCategoriesForStreetFoodAndCoffeeShop() = runBlocking {
+        val database = Files.createTempFile("native-category-preview-", ".sqlite")
+        val classifier = FakeAgentGateway(
+            ArrayDeque(
+                listOf(
+                    """{"items":[
+                        {"index":0,"merchant":"Стритфуд","description":"","category_id":"food.cafe"},
+                        {"index":1,"merchant":"КофеБон","description":"","category_id":"food.cafe"}
+                    ]}""",
+                ),
+            ),
+        )
+        val dependencies = fakeAgentDependencies(database.toString(), classifier)
+        dependencies.agent.updatePreferences(
+            "Операции «Стритфуд» и «КофеБон» относить к категории «Кафе и рестораны».",
+        )
+        val adapter = SyntheticTransactionAdapter(
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-09-10",
+                    amountMinor = -1_000,
+                    currency = "RUB",
+                    merchant = "Стритфуд",
+                    description = "Бургер",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-09-10",
+                    amountMinor = -640,
+                    currency = "RUB",
+                    merchant = "КофеБон",
+                    description = "Кофе",
+                ),
+            ),
+            returnAllCandidatesInOneFetch = true,
+        )
+        val planner = SyntheticMixedPlanGateway(requestReceiptAssociation = false)
+        val session = dependencies.agent.createSession(
+            "Synthetic category import",
+            dependencies.runtimeConfig.defaultAgentConfig(),
+        )
+        try {
+            val native = NativeMcpAgent(
+                agent = dependencies.agent,
+                gatewayResolver = AgentGatewayResolver { planner },
+                mcpTools = SyntheticSourceWithReceipts(ReceiptAssociationFixture()),
+                runtimeConfig = nativeMcpEnabled(dependencies.runtimeConfig),
+                transactionSourceAdapters = listOf(adapter),
+            )
+            val handled = assertIs<NativeMcpHandlingResult.Handled>(
+                native.handle(
+                    sessionId = session.session.id,
+                    expectedRevision = session.session.revision,
+                    text = "Импортируй синтетические операции.",
+                ),
+            )
+            val preview = assertNotNull(handled.response.mcpPreview)
+            assertEquals(listOf("food.cafe", "food.cafe"), preview.transactions.map { it.categoryId })
+            assertTrue(preview.transactions.all { it.categoryIssue == null })
+
+            val confirmed = native.confirm(
+                sessionId = session.session.id,
+                expectedRevision = preview.sessionRevision,
+                previewId = preview.id,
+            )
+            assertEquals(
+                listOf("food.cafe", "food.cafe"),
+                assertNotNull(confirmed.draft).transactions.map { it.transaction.categoryId },
+            )
+        } finally {
+            dependencies.scheduler?.close()
+            database.deleteIfExists()
+        }
+    }
+
     @Test
     fun sequentialImportsCannotReuseAnAlreadyAssociatedReceipt() = runBlocking {
         val database = Files.createTempFile("native-sequential-missing-source-refs-", ".sqlite")
