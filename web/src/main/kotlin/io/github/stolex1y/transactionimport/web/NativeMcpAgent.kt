@@ -125,8 +125,6 @@ enum class ReceiptMatchingStageStatus {
     @SerialName("source_error")
     SOURCE_ERROR,
 
-    @SerialName("selector_error")
-    SELECTOR_ERROR,
 }
 
 @Serializable
@@ -507,6 +505,7 @@ suspend fun handle(
     var iterations = 0
     var toolCalls = 0
     var lastFetchArguments: JsonObject? = null
+    var respectExplicitReceiptInstruction = false
     var receiptsRequested = false
     var receiptCatalogLoaded = false
     var receiptInfoRead = false
@@ -563,6 +562,7 @@ suspend fun handle(
                             candidates = candidates,
                             state = state,
                             userText = text,
+                            respectExplicitInstruction = respectExplicitReceiptInstruction,
                         )
                     } else {
                         BankReceiptMatch(
@@ -598,7 +598,11 @@ suspend fun handle(
                         state = state,
                         expectedRevision = expectedRevision,
                         userText = text,
-                        instructionContext = receiptInstructionContext(state, text),
+                        instructionContext = receiptInstructionContext(
+                            state,
+                            text,
+                            preserveCurrentMessage = true,
+                        ),
                         persistRule = persistReceiptRule,
                     )
                 } else {
@@ -730,13 +734,17 @@ suspend fun handle(
                 }
 
                 APP_ASSOCIATE_RECEIPTS -> {
-                    val requestedRule = receiptRuleRequested(rawArguments)
+                    val request = receiptAssociationRequest(rawArguments)
                     if (candidates.isEmpty() && state.draft?.transactions.isNullOrEmpty()) {
                         throw AgentResponseException(
                             "Сначала получите допустимые transaction-source операции.",
                         )
                     }
-                    PreparedPlanCall.AssociateReceipts(call, requestedRule)
+                    PreparedPlanCall.AssociateReceipts(
+                        call = call,
+                        rememberRule = request.rememberRule,
+                        respectExplicitInstruction = request.respectExplicitInstruction,
+                    )
                 }
                 APP_READ_RECEIPT_CATALOG -> {
                     requireEmptyActionArguments(rawArguments)
@@ -797,9 +805,12 @@ suspend fun handle(
                         }
                     }
                     receiptsRequested = true
+                    respectExplicitReceiptInstruction = planned.respectExplicitInstruction
                     messages += RequestMessage(
                         role = "tool",
-                        content = "Шаг принят; сопоставление выполнится после завершения текущего плана.",
+                        content =
+                            "Запрос на сопоставление принят. Чеки будут сопоставлены в этом же запросе " +
+                                "до сохранения ответа и формирования preview; итоговый статус добавит приложение.",
                         toolCallId = planned.call.id,
                         name = planned.call.function.name,
                     )
@@ -966,8 +977,10 @@ private fun applicationActions(
             APP_ASSOCIATE_RECEIPTS,
             "Сопоставить чеки приложением с текущим draft либо после transaction-source fetch. " +
                 "$sourceStatus remember_rule=true используй только если план сохраняет правило " +
-                "для существующего draft. При pending preview вызывай только после нового fetch. " +
-                "Не вызывай receipts tools напрямую.",
+                "для существующего draft. respect_explicit_instruction=true используй только " +
+                "когда пользователь ограничил, какие чеки и операции связывать; для общего " +
+                "запроса «сопоставь чеки» оставь false. При pending preview вызывай только " +
+                "после нового fetch. Не вызывай receipts tools напрямую.",
         )
     }
 }
@@ -988,6 +1001,17 @@ private fun appActionDefinition(name: String, description: String): ChatToolDefi
                                 buildJsonObject {
                                     put("type", "boolean")
                                     put("description", "Сохранить receipt rule и применить его к существующему draft")
+                                },
+                            )
+                            put(
+                                "respect_explicit_instruction",
+                                buildJsonObject {
+                                    put("type", "boolean")
+                                    put(
+                                        "description",
+                                        "true только если пользователь явно ограничил область сопоставления; " +
+                                            "false для общего запроса сопоставить чеки",
+                                    )
                                 },
                             )
                         }
@@ -1032,6 +1056,10 @@ private fun appActionDefinition(name: String, description: String): ChatToolDefi
                         add(JsonPrimitive("operation_ref"))
                         add(JsonPrimitive("fields"))
                     }
+                } else if (name == APP_ASSOCIATE_RECEIPTS) {
+                    putJsonArray("required") {
+                        add(JsonPrimitive("respect_explicit_instruction"))
+                    }
                 }
                 put("additionalProperties", false)
             },
@@ -1044,13 +1072,33 @@ private fun requireEmptyActionArguments(arguments: JsonObject) {
         throw AgentResponseException("Действие приложения получило недопустимые аргументы.")
     }
 }
-private fun receiptRuleRequested(arguments: JsonObject): Boolean {
-    if (arguments.keys.any { it != "remember_rule" }) {
+private data class ReceiptAssociationRequest(
+    val rememberRule: Boolean,
+    val respectExplicitInstruction: Boolean,
+)
+
+private fun receiptAssociationRequest(arguments: JsonObject): ReceiptAssociationRequest {
+    val allowedArguments = setOf("remember_rule", "respect_explicit_instruction")
+    if (arguments.keys.any { it !in allowedArguments }) {
         throw AgentResponseException("Действие приложения получило недопустимые аргументы.")
     }
-    val value = arguments["remember_rule"] ?: return false
-    return (value as? JsonPrimitive)?.booleanOrNull
-        ?: throw AgentResponseException("Значение remember_rule должно быть логическим.")
+    fun booleanArgument(name: String, required: Boolean = false): Boolean {
+        val value = arguments[name]
+        if (value == null) {
+            if (required) {
+                throw AgentResponseException("Обязательный параметр $name отсутствует.")
+            }
+            return false
+        }
+        return (value as? JsonPrimitive)
+            ?.takeIf { !it.isString }
+            ?.booleanOrNull
+            ?: throw AgentResponseException("Значение $name должно быть логическим.")
+    }
+    return ReceiptAssociationRequest(
+        rememberRule = booleanArgument("remember_rule"),
+        respectExplicitInstruction = booleanArgument("respect_explicit_instruction", required = true),
+    )
 }
 
 private val RECEIPT_INFO_FIELDS = setOf(
@@ -1135,6 +1183,7 @@ private fun receiptCatalogResponse(
 private fun receiptInstructionContext(
     state: ImportSessionState,
     text: String,
+    preserveCurrentMessage: Boolean = false,
 ): List<RequestMessage> = buildList {
     state.messages.takeLast(MAX_HISTORY_MESSAGES).forEach { message ->
         add(
@@ -1148,11 +1197,21 @@ private fun receiptInstructionContext(
             ),
         )
     }
+    val redactedCurrentMessage = redactText(text.trim())
+    val preserveScope = preserveCurrentMessage || hasExplicitReceiptScopeMarker(text)
+    val safeCurrentMessage = if (preserveScope) {
+        sanitizeReceiptMatchingInstruction(redactedCurrentMessage)
+    } else {
+        sanitizeReceiptMatchingText(redactedCurrentMessage)
+    }
     add(
         RequestMessage(
             role = "user",
-            content = sanitizeReceiptMatchingText(redactText(text.trim()))
-                .take(MAX_RECEIPT_INSTRUCTION_MESSAGE_CHARS),
+            content = if (preserveScope) {
+                safeCurrentMessage
+            } else {
+                safeCurrentMessage.take(MAX_RECEIPT_INSTRUCTION_MESSAGE_CHARS)
+            },
         ),
     )
 }
@@ -1161,7 +1220,7 @@ private fun safeReceiptInstruction(instructionContext: List<RequestMessage>): St
     instructionContext.lastOrNull()?.let { current ->
         add(
             "Текущее сообщение пользователя: " +
-                sanitizeReceiptMatchingText(redactText(current.content)),
+                sanitizeReceiptMatchingInstruction(redactText(current.content)),
         )
     }
     instructionContext.dropLast(1).takeLast(MAX_RECEIPT_MATCHING_CONTEXT_MESSAGES)
@@ -1170,6 +1229,52 @@ private fun safeReceiptInstruction(instructionContext: List<RequestMessage>): St
             add("${message.role}: ${sanitizeReceiptMatchingText(redactText(message.content))}")
         }
 }.joinToString("\n")
+
+private val EXPLICIT_RECEIPT_SCOPE_MARKERS = listOf(
+    "только",
+    "лишь",
+    "кроме",
+    "исключ",
+    "не связыва",
+    "не сопоставля",
+    "не привязыва",
+    "именно",
+    "указанн",
+    "конкретн",
+    "выбранн",
+    "only",
+    "selected",
+    "привяжи чек к",
+    "привяжи этот чек",
+    "привязать чек к",
+    "сопоставь чек с",
+    "сопоставить чек с",
+    "свяжи чек с",
+    "связать чек с",
+    "attach receipt to",
+    "link this receipt",
+    "associate this receipt",
+    "match this receipt",
+    "except",
+    "excluding",
+    "exclude",
+    "do not link",
+    "don't link",
+    "do not match",
+    "don't match",
+    "specific transaction",
+    "selected transaction",
+)
+
+private fun hasExplicitReceiptScopeMarker(text: String): Boolean {
+    val normalizedText = text.lowercase()
+    return EXPLICIT_RECEIPT_SCOPE_MARKERS.any(normalizedText::contains)
+}
+
+private fun hasExplicitReceiptScope(instructionContext: List<RequestMessage>): Boolean =
+    instructionContext.any { message ->
+        message.role == "user" && hasExplicitReceiptScopeMarker(message.content)
+    }
 
 private suspend fun receiptInfoResponse(
     state: ImportSessionState,
@@ -1240,7 +1345,9 @@ private suspend fun receiptInfoResponse(
         receiptMatchingEngine.match(
             transactions = listOf(candidate),
             config = state.session.config,
-            explicitInstruction = safeReceiptInstruction(receiptInstructionContext(state, userText)),
+            explicitInstruction = safeReceiptInstruction(
+                receiptInstructionContext(state, userText, preserveCurrentMessage = true),
+            ),
             strictSelector = true,
         )
     } catch (error: kotlinx.coroutines.CancellationException) {
@@ -1433,6 +1540,7 @@ private suspend fun matchBankCandidatesForPreview(
     candidates: List<ExternalTransactionCandidate>,
     state: ImportSessionState,
     userText: String,
+    respectExplicitInstruction: Boolean,
 ): BankReceiptMatch {
     val identifiedCandidates = candidates.withUniqueReceiptMatchingRefs()
     if (identifiedCandidates.isEmpty()) {
@@ -1443,15 +1551,26 @@ private suspend fun matchBankCandidatesForPreview(
         )
     }
     val preferences = agent.getPreferences()
+    val instructionContext = receiptInstructionContext(
+        state,
+        userText,
+        preserveCurrentMessage = respectExplicitInstruction,
+    )
+    val hasExplicitScope = respectExplicitInstruction || hasExplicitReceiptScope(instructionContext)
     return try {
         val matching = receiptMatchingEngine.match(
             transactions = identifiedCandidates,
             config = state.session.config,
-            explicitInstruction = safeReceiptInstruction(receiptInstructionContext(state, userText)),
+            explicitInstruction = if (hasExplicitScope) {
+                safeReceiptInstruction(instructionContext)
+            } else {
+                ""
+            },
             confirmedReceiptRules = preferences.confirmedDecisions
                 .filter { it.scope == ConfirmedDecisionScope.RECEIPT_MATCHING }
                 .map { it.text },
-            strictSelector = true,
+            strictSelector = false,
+            autoLinkUniqueReceipt = !hasExplicitScope,
         )
         val candidatesWithRestoredRefs = matching.transactions
             .withReceiptReuseGuard(state.receiptUsage())
@@ -1481,14 +1600,6 @@ private suspend fun matchBankCandidatesForPreview(
             statusText =
                 "Источник чеков недоступен или не авторизован; preview содержит банковские операции " +
                     "без сопоставления с чеками.",
-        )
-    } catch (_: ReceiptMatchingSelectionException) {
-        BankReceiptMatch(
-            candidates = candidates.toList(),
-            summary = McpReceiptMatchingSummary(status = ReceiptMatchingStageStatus.SELECTOR_ERROR),
-            statusText =
-                "Источник чеков ответил, но безопасно сопоставить чеки не удалось; preview " +
-                    "содержит банковские операции без сопоставления.",
         )
     }
 }
@@ -1695,6 +1806,9 @@ private data class BankReceiptMatch(
                     полному сообщению и контексту; фиксированные списки слов его не заменяют.
                     Сопоставление чеков выполняется только через typed-действие
                     app_associate_receipts; receipts tools напрямую не вызывай.
+                    После завершения плана приложение синхронно сопоставляет чеки
+                    внутри того же запроса до возврата preview; не называй этот шаг
+                    очередью или фоновым.
                     Для явного вопроса пользователя о данных чека сначала вызови
                     app_read_receipt_catalog. Это отдельный read-only путь: он не запускает
                     сопоставление и не меняет draft. Затем вызови app_read_receipt_info только
@@ -1705,8 +1819,11 @@ private data class BankReceiptMatch(
                             "операции и сопоставление чеков, сначала получи весь новый набор " +
                             "операций, затем отдельным шагом вызови app_associate_receipts. " +
                             "Для существующего draft это действие запускает сопоставление с его " +
-                            "несвязанными операциями. Запоминание receipt rule указывай отдельным " +
-                            "параметром remember_rule только если смысл запроса включает сохранение."
+                            "несвязанными операциями. Всегда указывай обязательный параметр " +
+                            "respect_explicit_instruction: true, если пользователь ограничил, " +
+                            "какие операции или чеки связывать, иначе false для общего запроса. " +
+                            "Запоминание receipt rule указывай в remember_rule только если смысл " +
+                            "запроса включает сохранение."
                     } else {
                         "Источники чеков недоступны. Если план включает сопоставление чеков, " +
                             "вызови предложенное typed-действие app_associate_receipts; приложение " +
@@ -2548,8 +2665,8 @@ private fun functionName(serverId: String, tool: String): String =
         data class AssociateReceipts(
             override val call: ChatToolCall,
             val rememberRule: Boolean,
+            val respectExplicitInstruction: Boolean,
         ) : PreparedPlanCall
-
         data class ReadReceiptCatalog(
             override val call: ChatToolCall,
         ) : PreparedPlanCall

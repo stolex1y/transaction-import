@@ -431,7 +431,7 @@ class NativeMcpAgentTest {
             followingActions = listOf(
                 "app_read_receipt_info" to
                     """{"operation_ref":"receipt-operation-1","fields":["items"]}""",
-                "app_associate_receipts" to "{}",
+                "app_associate_receipts" to """{"respect_explicit_instruction":false}""",
             ),
         )
         val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
@@ -580,6 +580,51 @@ class NativeMcpAgentTest {
         }
     }
 
+
+    @Test
+    fun receiptAssociationRequiresBooleanExplicitScopeArgument() = runBlocking {
+        for (arguments in listOf(
+            "{}",
+            """{"respect_explicit_instruction":"false"}""",
+        )) {
+            val database = Files.createTempFile("native-receipt-scope-schema-", ".sqlite")
+            val planner = ApplicationActionPlanGateway("app_associate_receipts", arguments)
+            val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
+            val source = ReceiptAssociationFixture()
+            val session = dependencies.agent.createSession(
+                "Synthetic receipt scope validation",
+                dependencies.runtimeConfig.defaultAgentConfig(),
+            )
+            try {
+                val imported = dependencies.agent.sendMessage(
+                    sessionId = session.session.id,
+                    expectedRevision = session.session.revision,
+                    text = "Синтетическая выписка",
+                )
+                val native = NativeMcpAgent(
+                    agent = dependencies.agent,
+                    gatewayResolver = AgentGatewayResolver { planner },
+                    mcpTools = source,
+                    runtimeConfig = nativeMcpEnabled(dependencies.runtimeConfig),
+                )
+                val failure = runCatching {
+                    native.handle(
+                        sessionId = session.session.id,
+                        expectedRevision = imported.session.revision,
+                        text = "Сопоставь чек только с операцией из моего условия.",
+                    )
+                }.exceptionOrNull()
+
+                assertIs<AgentResponseException>(failure)
+                assertEquals(0, source.searchCalls)
+                assertEquals(imported.draft?.transactions, dependencies.agent.getSession(session.session.id).draft?.transactions)
+            } finally {
+                dependencies.scheduler?.close()
+                database.deleteIfExists()
+            }
+        }
+    }
+
     @Test
     fun plannerSelectedReceiptActionRunsForCompositeRequestWithoutAssociationVerb() = runBlocking {
         val database = Files.createTempFile("native-receipt-planner-semantic-", ".sqlite")
@@ -636,7 +681,7 @@ class NativeMcpAgentTest {
         val database = Files.createTempFile("native-receipt-association-", ".sqlite")
         val planner = ApplicationActionPlanGateway(
             "app_associate_receipts",
-            """{"remember_rule":true}""",
+            """{"remember_rule":true,"respect_explicit_instruction":false}""",
         )
         val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
         val source = ReceiptAssociationFixture()
@@ -827,7 +872,7 @@ class NativeMcpAgentTest {
         val database = Files.createTempFile("native-receipt-always-rule-", ".sqlite")
         val planner = ApplicationActionPlanGateway(
             "app_associate_receipts",
-            """{"remember_rule":true}""",
+            """{"remember_rule":true,"respect_explicit_instruction":false}""",
         )
         val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
         val source = ReceiptAssociationFixture()
@@ -878,7 +923,7 @@ class NativeMcpAgentTest {
         val database = Files.createTempFile("native-receipt-rule-plan-false-", ".sqlite")
         val planner = ApplicationActionPlanGateway(
             "app_associate_receipts",
-            """{"remember_rule":false}""",
+            """{"remember_rule":false,"respect_explicit_instruction":false}""",
         )
         val dependencies = fakeAgentDependencies(database.toString(), FakeAgentGateway())
         val source = ReceiptAssociationFixture()
@@ -1035,7 +1080,7 @@ class NativeMcpAgentTest {
         )
         val source = SyntheticSourceWithReceipts(receiptSource)
         val planner = SyntheticMixedPlanGateway()
-        var selectionInstruction: String? = null
+        var selectorCalls = 0
         val session = dependencies.agent.createSession(
             "Synthetic mixed import",
             dependencies.runtimeConfig.defaultAgentConfig(),
@@ -1049,8 +1094,8 @@ class NativeMcpAgentTest {
                 runtimeConfig = runtime,
                 transactionSourceAdapters = listOf(SyntheticTransactionAdapter()),
                 idGenerator = { "mixed-preview" },
-                receiptMatchSelector = ReceiptMatchSelector { _, _, choices, explicitInstruction, _ ->
-                    selectionInstruction = explicitInstruction
+                receiptMatchSelector = ReceiptMatchSelector { _, _, choices, _, _ ->
+                    selectorCalls += 1
                     ReceiptSelectionResponseView(
                         receiptAlias = choices.single().alias,
                         confidence = 0.99,
@@ -1067,7 +1112,7 @@ class NativeMcpAgentTest {
             )
             val preview = assertNotNull(handled.response.mcpPreview)
             assertEquals("completed", preview.receiptMatching?.status?.name?.lowercase())
-            assertTrue(selectionInstruction.orEmpty().contains("чеки к ним"))
+            assertEquals(0, selectorCalls)
             assertEquals(1, preview.receiptMatching?.matchedCount)
             assertEquals(1, preview.transactions.size)
             assertEquals("food.groceries", preview.transactions.single().categoryId)
@@ -1082,6 +1127,18 @@ class NativeMcpAgentTest {
             assertEquals(1, source.transactionFetchCalls)
             assertEquals(1, receiptSource.searchCalls)
             assertEquals(1, receiptSource.detailCalls)
+            assertTrue(
+                handled.response.assistantText.contains("Сопоставление чеков завершено: привязано 1"),
+            )
+            assertFalse(handled.response.assistantText.contains("в очеред"))
+            assertFalse(handled.response.assistantText.contains("выполнится после завершения текущего плана"))
+            assertTrue(
+                planner.requests.last().messages.any { message ->
+                    message.role == "tool" &&
+                        message.name == "app_associate_receipts" &&
+                        message.content.contains("в этом же запросе")
+                },
+            )
             assertTrue(planner.requests.first().tools.orEmpty().any {
                 it.function.name == "app_associate_receipts"
             })
@@ -1107,6 +1164,62 @@ class NativeMcpAgentTest {
         }
     }
 
+    @Test
+    fun explicitReceiptScopeIsNotBypassedForUniquePreviewCandidate() = runBlocking {
+        val database = Files.createTempFile("native-explicit-receipt-scope-", ".sqlite")
+        val classifier = FakeAgentGateway(ArrayDeque(listOf(FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON)))
+        val selectorGateway = FakeAgentGateway(
+            ArrayDeque(listOf("""{"receipt_alias":null,"confidence":0.0,"not_target":true}""")),
+        )
+        val dependencies = fakeAgentDependencies(database.toString(), classifier)
+        val receiptSource = ReceiptAssociationFixture(
+            dateTime = "2026-09-10T12:00:00Z",
+            amountMinor = 34900,
+        )
+        val source = SyntheticSourceWithReceipts(receiptSource)
+        val planner = SyntheticMixedPlanGateway(respectExplicitInstruction = false)
+
+        val session = dependencies.agent.createSession(
+            "Synthetic explicit receipt scope",
+            dependencies.runtimeConfig.defaultAgentConfig(),
+        )
+        try {
+            val native = NativeMcpAgent(
+                agent = dependencies.agent,
+                gatewayResolver = AgentGatewayResolver { planner },
+                mcpTools = source,
+                runtimeConfig = nativeMcpEnabled(dependencies.runtimeConfig),
+                transactionSourceAdapters = listOf(SyntheticTransactionAdapter()),
+                receiptMatchSelector = LlmReceiptMatchSelector(AgentGatewayResolver { selectorGateway }),
+            )
+
+            val scopedRequest = "Import operations for September. " +
+                "ordinary context ".repeat(130) +
+                "only link the receipt to DEMO MARKET."
+            assertTrue(scopedRequest.indexOf("only link the receipt to DEMO MARKET") > 2_000)
+            val handled = assertIs<NativeMcpHandlingResult.Handled>(
+                native.handle(
+                    sessionId = session.session.id,
+                    expectedRevision = session.session.revision,
+                    text = scopedRequest,
+                ),
+            )
+            val preview = assertNotNull(handled.response.mcpPreview)
+
+            assertEquals(1, selectorGateway.requests.size)
+            assertTrue(
+                selectorGateway.requests.single().messages.last().content
+                    .contains("only link the receipt to DEMO MARKET"),
+            )
+            assertEquals(0, preview.receiptMatching?.matchedCount)
+            assertEquals(1, preview.receiptMatching?.unmatchedCount)
+            assertEquals(ReceiptAssociationStatus.UNMATCHED, preview.transactions.single().receiptAssociation?.status)
+            assertEquals(1, receiptSource.searchCalls)
+        } finally {
+            dependencies.scheduler?.close()
+            database.deleteIfExists()
+        }
+    }
     @Test
     fun sequentialImportsCannotReuseAnAlreadyAssociatedReceipt() = runBlocking {
         val database = Files.createTempFile("native-sequential-missing-source-refs-", ".sqlite")
@@ -1698,7 +1811,7 @@ class NativeMcpAgentTest {
     }
 
     @Test
-    fun mixedRequestShowsBankOnlyPreviewWhenReceiptSelectorFails() = runBlocking {
+    fun mixedRequestKeepsPreviewWhenReceiptSelectorFails() = runBlocking {
         val database = Files.createTempFile("native-mixed-selector-error-", ".sqlite")
         val dependencies = fakeAgentDependencies(
             database.toString(),
@@ -1708,6 +1821,7 @@ class NativeMcpAgentTest {
             dateTime = "2026-09-10T12:00:00Z",
             amountMinor = 34900,
             includeSecondReceipt = true,
+            secondReceiptMerchant = "Синтетический продавец 2",
         )
         val source = SyntheticSourceWithReceipts(receiptSource)
         val planner = SyntheticMixedPlanGateway()
@@ -1736,12 +1850,18 @@ class NativeMcpAgentTest {
                     text = "Загрузи операции за 10 сентября и найди соответствующие чеки.",
                 ),
             )
-            assertTrue(selectionInstruction.orEmpty().contains("Загрузи операции за 10 сентября"))
+            assertEquals("", selectionInstruction)
 
             val preview = assertNotNull(handled.response.mcpPreview)
-            assertEquals("selector_error", preview.receiptMatching?.status?.name?.lowercase())
+            assertEquals("completed", preview.receiptMatching?.status?.name?.lowercase())
+            assertEquals(0, preview.receiptMatching?.matchedCount)
+            assertEquals(1, preview.receiptMatching?.ambiguousCount)
+            assertEquals(0, preview.receiptMatching?.unmatchedCount)
             assertEquals(1, preview.transactions.size)
-            assertTrue(handled.response.assistantText.contains("безопасно сопоставить чеки не удалось"))
+            val previewAssociation = assertNotNull(preview.transactions.single().receiptAssociation)
+            assertEquals(ReceiptAssociationStatus.AMBIGUOUS, previewAssociation.status)
+            assertEquals(2, previewAssociation.review?.candidates?.size)
+            assertTrue(handled.response.assistantText.contains("неоднозначных 1"))
             assertFalse(handled.response.assistantText.contains("synthetic-selector-private-response"))
             assertEquals(2, receiptSource.detailCalls)
 
@@ -1754,7 +1874,7 @@ class NativeMcpAgentTest {
             assertEquals("ДЕМО МАРКЕТ", imported.transaction.merchant)
             assertEquals(34900L, imported.transaction.amountMinor)
             assertEquals("expense", imported.transaction.direction.name.lowercase())
-            assertEquals(null, imported.transaction.receiptAssociation)
+            assertEquals(ReceiptAssociationStatus.AMBIGUOUS, imported.transaction.receiptAssociation?.status)
         } finally {
             dependencies.scheduler?.close()
             database.deleteIfExists()
@@ -2142,7 +2262,11 @@ private fun nativeMcpEnabled(config: AgentRuntimeConfig): AgentRuntimeConfig =
 
 private class ApplicationActionPlanGateway(
     private val action: String,
-    private val arguments: String = "{}",
+    private val arguments: String = if (action == "app_associate_receipts") {
+        """{"respect_explicit_instruction":false}"""
+    } else {
+        "{}"
+    },
     private val followingActions: List<Pair<String, String>> = emptyList(),
 ) : ChatCompletionGateway {
     val requests = mutableListOf<ChatCompletionRequest>()
@@ -2649,6 +2773,7 @@ private class SyntheticMixedPlanGateway(
     private val rememberRule: Boolean = false,
     private val requestReceiptAssociation: Boolean = true,
     private val requestDates: List<String> = listOf("2026-09-10", "2026-09-20"),
+    private val respectExplicitInstruction: Boolean = false,
 ) : ChatCompletionGateway {
     val requests = mutableListOf<ChatCompletionRequest>()
     private var index = 0
@@ -2681,7 +2806,14 @@ private class SyntheticMixedPlanGateway(
                         id = "associate-receipts",
                         function = ChatFunctionCall(
                             name = "app_associate_receipts",
-                            arguments = if (rememberRule) """{"remember_rule":true}""" else "{}",
+                            arguments = when {
+                                rememberRule && respectExplicitInstruction ->
+                                    """{"remember_rule":true,"respect_explicit_instruction":true}"""
+                                rememberRule ->
+                                    """{"remember_rule":true,"respect_explicit_instruction":false}"""
+                                respectExplicitInstruction -> """{"respect_explicit_instruction":true}"""
+                                else -> """{"respect_explicit_instruction":false}"""
+                            },
                         ),
                     ),
                 ),

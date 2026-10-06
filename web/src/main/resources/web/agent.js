@@ -2734,10 +2734,6 @@ function renderInlineMcpPreview(preview) {
         } else if (receiptMatching.status === "source_error") {
             receiptStatus.textContent =
                 "Источник чеков недоступен или не авторизован. Показаны банковские операции без сопоставления с чеками.";
-        } else if (receiptMatching.status === "selector_error") {
-            receiptStatus.textContent =
-                "Источник чеков ответил, но безопасно сопоставить чеки не удалось. " +
-                "Показаны банковские операции без сопоставления с чеками.";
         } else {
             receiptStatus.textContent =
                 "Статус сопоставления чеков неизвестен; банковские операции показаны без подтверждённой связи.";

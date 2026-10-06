@@ -918,20 +918,6 @@ class AgentBrowserTest {
                             "Принять операции",
                             page.locator(".mcp-inline-preview button").last().textContent(),
                         )
-                        page.evaluate(
-                            """
-                                () => renderMcpPreview({
-                                  id: "selector-error-preview",
-                                  session_revision: 1,
-                                  transactions: [],
-                                  receipt_matching: { status: "selector_error" }
-                                })
-                            """.trimIndent(),
-                        )
-                        assertTrue(
-                            page.locator(".receipt-matching-status").textContent()
-                                .contains("безопасно сопоставить чеки не удалось"),
-                        )
                         page.evaluate("() => renderMcpPreview(null)")
                         assertEquals(1, page.locator("#metrics-table-body tr").count())
                         assertTrue(page.locator("#metrics-summary").textContent().contains("За сессию всего"))
@@ -3053,7 +3039,7 @@ class AgentBrowserTest {
         """.trimIndent()
         val gateway = BrowserNativePlanGateway(
             FakeAgentGateway(ArrayDeque(listOf(draftJson, FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON))),
-            actionArguments = """{"remember_rule":true}""",
+            actionArguments = """{"remember_rule":true,"respect_explicit_instruction":false}""",
         )
         val schedulerRules = mutableListOf<List<String>>()
         val schedulerNow = LocalDate.parse("2026-09-10")
@@ -4537,7 +4523,7 @@ private class BrowserEligibilityPlanGateway : ChatCompletionGateway {
                         id = "synthetic-eligibility-receipts",
                         function = ChatFunctionCall(
                             name = "app_associate_receipts",
-                            arguments = "{}",
+                            arguments = """{"respect_explicit_instruction":false}""",
                         ),
                     ),
                 ),
@@ -4668,7 +4654,7 @@ private class BrowserEligibilityMcpSource : McpToolProvider {
 
 private class BrowserNativePlanGateway(
     private val coreGateway: ChatCompletionGateway,
-    private val actionArguments: String = "{}",
+    private val actionArguments: String = """{"respect_explicit_instruction":false}""",
     private val actionSequence: List<Pair<String, String>> = emptyList(),
 ) : ChatCompletionGateway {
     val requests = mutableListOf<ChatCompletionRequest>()
@@ -4688,7 +4674,7 @@ private class BrowserNativePlanGateway(
                 name == "app_associate_receipts" &&
                 defaultAssociationInvocations++ > 0
             ) {
-                "{}"
+                """{"respect_explicit_instruction":false}"""
             } else {
                 configuredArguments
             }

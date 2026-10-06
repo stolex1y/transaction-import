@@ -115,6 +115,113 @@ class ReceiptMatchingTest {
     }
 
     @Test
+    fun automaticPreviewKeepsExactMatchAndIsolatesSelectorFailureToAmbiguousRows() = runBlocking {
+        val source = RecordingReceiptSource(
+            pages = mapOf(
+                0 to """{"receipts":[
+                    {"receipt_key":"synthetic-unique-key","merchant":"Синтетический продавец 1","received_at":"2026-09-10T10:00:00Z","amount_minor":500,"currency":"RUB"},
+                    {"receipt_key":"synthetic-ambiguous-key-1","merchant":"Синтетический продавец 2","received_at":"2026-09-10T10:00:00Z","amount_minor":600,"currency":"RUB"},
+                    {"receipt_key":"synthetic-ambiguous-key-2","merchant":"Синтетический продавец 3","received_at":"2026-09-10T10:00:00Z","amount_minor":600,"currency":"RUB"}
+                ],"has_more":false}""",
+            ),
+            details = mapOf(
+                "synthetic-unique-key" to detail("2026-09-10T10:00:00Z", 500, "RUB", "Синтетический продавец 1"),
+                "synthetic-ambiguous-key-1" to detail("2026-09-10T10:00:00Z", 600, "RUB", "Синтетический продавец 2"),
+                "synthetic-ambiguous-key-2" to detail("2026-09-10T10:00:00Z", 600, "RUB", "Синтетический продавец 3"),
+            ),
+        )
+        var selectorCalls = 0
+        val result = ReceiptMatchingEngine(
+            mcpTools = source,
+            selector = ReceiptMatchSelector { _, _, _, _, _ ->
+                selectorCalls += 1
+                error("Synthetic selector timeout for the ambiguous operation.")
+            },
+        ).match(
+            transactions = listOf(
+                candidate("unique", "2026-09-10T10:00:00Z", -500, "RUB", "Неизвестная категория")
+                    .copy(categoryId = null),
+                candidate("ambiguous", "2026-09-10T10:00:00Z", -600, "RUB", "Кафе"),
+            ),
+            config = testConfig,
+            explicitInstruction = "",
+            autoLinkUniqueReceipt = true,
+        )
+
+        assertEquals(ReceiptAssociationStatus.MATCHED, result.transactions[0].receiptAssociation?.status)
+        assertEquals(ReceiptAssociationStatus.AMBIGUOUS, result.transactions[1].receiptAssociation?.status)
+        assertEquals(2, result.transactions[1].receiptAssociation?.review?.candidates?.size)
+        assertEquals(1, result.transactions[0].items.size)
+        assertTrue(result.transactions[1].items.isEmpty())
+        assertEquals(1, selectorCalls)
+    }
+
+    @Test
+    fun automaticUniqueReceiptDoesNotOverrideExplicitInstruction() = runBlocking {
+        val source = singleReceiptSource(detail("2026-09-10T10:00:00Z", 500, "RUB", "Синтетический продавец"))
+        var selectorCalls = 0
+        val result = ReceiptMatchingEngine(
+            mcpTools = source,
+            selector = ReceiptMatchSelector { _, _, _, instruction, _ ->
+                selectorCalls += 1
+                assertTrue(instruction.contains("Привяжи чек только к этой операции"))
+                ReceiptSelectionResponseView(null, 0.0, notTarget = true)
+            },
+        ).match(
+            transactions = listOf(
+                candidate("explicit-scope", "2026-09-10T10:00:00Z", -500, "RUB", "Неизвестная категория")
+                    .copy(categoryId = null),
+            ),
+            config = testConfig,
+            explicitInstruction = "Привяжи чек только к этой операции.",
+            autoLinkUniqueReceipt = true,
+        )
+
+        assertEquals(1, selectorCalls)
+        assertEquals(ReceiptAssociationStatus.UNMATCHED, result.transactions.single().receiptAssociation?.status)
+    }
+
+
+    @Test
+    fun automaticPreviewDoesNotFilterSharedReceiptIntoFalseUniqueMatch() = runBlocking {
+        val source = RecordingReceiptSource(
+            pages = mapOf(
+                0 to """{"receipts":[
+                    {"receipt_key":"synthetic-unique-key","merchant":"Синтетический продавец 1","received_at":"2026-09-10T23:00:00Z","amount_minor":500,"currency":"RUB"},
+                    {"receipt_key":"synthetic-shared-key","merchant":"Синтетический продавец 2","received_at":"2026-09-11T12:00:00Z","amount_minor":500,"currency":"RUB"}
+                ],"has_more":false}""",
+            ),
+            details = mapOf(
+                "synthetic-unique-key" to detail("2026-09-10T23:00:00Z", 500, "RUB", "Синтетический продавец 1"),
+                "synthetic-shared-key" to detail("2026-09-11T12:00:00Z", 500, "RUB", "Синтетический продавец 2"),
+            ),
+        )
+        var selectorCalls = 0
+        val result = ReceiptMatchingEngine(
+            mcpTools = source,
+            selector = ReceiptMatchSelector { _, _, choices, _, _ ->
+                selectorCalls += 1
+                assertEquals(2, choices.size)
+                error("Synthetic selector failure must leave the ambiguous row for review.")
+            },
+        ).match(
+            transactions = listOf(
+                candidate("first", "2026-09-10T23:00:00Z", -500, "RUB", "Продавец 1"),
+                candidate("second", "2026-09-12T00:00:00Z", -500, "RUB", "Продавец 2"),
+            ),
+            config = testConfig,
+            autoLinkUniqueReceipt = true,
+        )
+
+        assertEquals(1, selectorCalls)
+        assertEquals(ReceiptAssociationStatus.AMBIGUOUS, result.transactions[0].receiptAssociation?.status)
+        assertEquals(ReceiptReviewReason.MULTIPLE_CANDIDATES, result.transactions[0].receiptAssociation?.review?.reason)
+        assertEquals(ReceiptAssociationStatus.AMBIGUOUS, result.transactions[1].receiptAssociation?.status)
+        assertEquals(ReceiptReviewReason.SHARED_BY_OPERATIONS, result.transactions[1].receiptAssociation?.review?.reason)
+        assertTrue(result.transactions.all { it.items.isEmpty() })
+    }
+
+    @Test
     fun candidateSharedByConfirmedAndUnknownExpensesStaysReviewAndTransfersStayExcluded() = runBlocking {
         val source = singleReceiptSource(detail("2026-09-10T10:00:00Z", 500, "RUB", "Синтетический продавец"))
         val result = ReceiptMatchingEngine(

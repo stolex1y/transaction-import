@@ -167,7 +167,7 @@ class LlmReceiptMatchSelector(
                         валюта=${normalizeCurrencyCode(transaction.currency)},
                         продавец=${sanitizeReceiptMatchingText(transaction.merchant)},
                         описание=${sanitizeReceiptMatchingText(transaction.description)}
-                        Сообщение и контекст пользователя: ${sanitizeReceiptMatchingText(explicitInstruction)}
+                        Сообщение и контекст пользователя: ${sanitizeReceiptMatchingInstruction(explicitInstruction)}
                         Подтверждённые правила о чеках:
                         ${receiptRules.ifBlank { "(нет)" }}
                         Кандидаты:

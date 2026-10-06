@@ -108,6 +108,7 @@ class ReceiptMatchingEngine(
         strictSelector: Boolean = false,
         selectedCandidates: Map<String, ReceiptAssociationSummary> = emptyMap(),
         allowSelectorChoice: Boolean = true,
+        autoLinkUniqueReceipt: Boolean = false,
     ): ReceiptMatchingRun {
         if (transactions.isEmpty()) return ReceiptMatchingRun(emptyList(), 0, 0)
         val searchableTransactions = transactions.filter {
@@ -198,7 +199,7 @@ class ReceiptMatchingEngine(
         val safeReceiptRules = confirmedReceiptRules
             .map(::sanitizeMatchingText)
             .filter(String::isNotBlank)
-        val safeInstruction = sanitizeMatchingText(explicitInstruction)
+        val safeInstruction = sanitizeReceiptMatchingInstruction(explicitInstruction)
         data class MatchDecision(
             val transaction: ExternalTransactionCandidate,
             val status: ReceiptAssociationStatus,
@@ -238,6 +239,21 @@ class ReceiptMatchingEngine(
                                     .distinct()
                                     .take(MAX_REVIEW_CANDIDATES),
                             ),
+                        )
+                    }
+                    val uniqueReceipt = local.singleOrNull()
+                        ?.takeIf { ownershipCounts[it.summary.key] == 1 }
+                    if (
+                        autoLinkUniqueReceipt &&
+                        !strictSelector &&
+                        safeInstruction.isBlank() &&
+                        safeReceiptRules.isEmpty() &&
+                        uniqueReceipt != null
+                    ) {
+                        return@map MatchDecision(
+                            transaction,
+                            ReceiptAssociationStatus.MATCHED,
+                            uniqueReceipt,
                         )
                     }
                     val hasExplicitSelectionContext = strictSelector ||
@@ -287,7 +303,7 @@ class ReceiptMatchingEngine(
                         )
                     }
                     val globallyUnique = local.filter { ownershipCounts[it.summary.key] == 1 }
-                    val selectionCandidates = if (strictSelector || safeReceiptRules.isNotEmpty()) {
+                    val selectionCandidates = if (hasExplicitSelectionContext || local.size > 1) {
                         local
                     } else {
                         globallyUnique
@@ -366,6 +382,7 @@ class ReceiptMatchingEngine(
                             ?.takeIf { it.confidence >= MATCH_CONFIDENCE_THRESHOLD }
                             ?.receiptAlias
                             ?.let { alias -> selectionCandidates.singleOrNull { it.summary.alias == alias } }
+                            ?.takeIf { hasExplicitSelectionContext || ownershipCounts[it.summary.key] == 1 }
                     }
                     if (selected == null) {
                         MatchDecision(
@@ -727,11 +744,13 @@ class ReceiptMatchingEngine(
 }
 
 
-internal fun sanitizeReceiptMatchingText(value: String): String = SENSITIVE_RECEIPT_VALUE_PATTERN
+internal fun sanitizeReceiptMatchingInstruction(value: String): String = SENSITIVE_RECEIPT_VALUE_PATTERN
     .replace(RECEIPT_REFERENCE_PATTERN.replace(value, "[идентификатор чека скрыт]")) {
         "[чувствительные реквизиты скрыты]"
     }
-    .take(2_000)
+
+internal fun sanitizeReceiptMatchingText(value: String): String =
+    sanitizeReceiptMatchingInstruction(value).take(2_000)
 
 
 class ReceiptMatchingSourceException(message: String) : IllegalStateException(message)
