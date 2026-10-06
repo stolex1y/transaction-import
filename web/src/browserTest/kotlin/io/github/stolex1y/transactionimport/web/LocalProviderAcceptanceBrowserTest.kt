@@ -32,7 +32,10 @@ class LocalProviderAcceptanceBrowserTest {
                         "() => document.querySelectorAll('#operation-table tbody tr').length === 2",
                     )
                     assertEquals(2, page.locator("#operation-table tbody tr").count())
-                    assertTrue(page.locator("#operation-table").textContent().contains("ДЕМО МАРКЕТ"))
+                    assertEquals(
+                        "ДЕМО МАРКЕТ",
+                        page.locator("tr[data-transaction-id='1'] input[name='merchant']").inputValue(),
+                    )
                     assertTrue(page.locator("#message-list .assistant").count() > 0)
                     assertTrue(page.locator("#message-list .assistant").last().textContent().isNotBlank())
                     capture(page, "d27-local-provider-import.png")
@@ -75,8 +78,11 @@ class LocalProviderAcceptanceBrowserTest {
                     page.waitForFunction(
                         "() => document.querySelectorAll('#operation-table tbody tr').length === 1",
                     )
-                    val deepseekDraft = page.locator("#operation-table").textContent()
-                    assertTrue(deepseekDraft.contains("ТЕСТОВЫЙ DEEPSEEK"))
+                    val deepseekDraft = visibleDraftFingerprint(page)
+                    assertEquals(
+                        "ТЕСТОВЫЙ DEEPSEEK",
+                        page.locator("tr[data-transaction-id='1'] input[name='merchant']").inputValue(),
+                    )
                     assertTrue(page.locator("#message-list .assistant").count() > 0)
                     capture(page, "d27-provider-comparison-deepseek.png")
 
@@ -94,8 +100,11 @@ class LocalProviderAcceptanceBrowserTest {
                     page.waitForFunction(
                         "() => document.querySelectorAll('#operation-table tbody tr').length === 2",
                     )
-                    val ollamaDraft = page.locator("#operation-table").textContent()
-                    assertTrue(ollamaDraft.contains("ДЕМО МАРКЕТ"))
+                    val ollamaDraft = visibleDraftFingerprint(page)
+                    assertEquals(
+                        "ДЕМО МАРКЕТ",
+                        page.locator("tr[data-transaction-id='1'] input[name='merchant']").inputValue(),
+                    )
                     assertTrue(!ollamaDraft.contains("ТЕСТОВЫЙ DEEPSEEK"))
                     assertTrue(deepseekDraft != ollamaDraft)
                     capture(page, "d27-provider-comparison-ollama.png")
@@ -105,13 +114,19 @@ class LocalProviderAcceptanceBrowserTest {
                     waitForSessionReady(page)
                     assertEquals("deepseek", page.locator("#agent-provider").inputValue())
                     assertEquals("deepseek-flash", page.locator("#agent-model").inputValue())
-                    assertTrue(page.locator("#operation-table").textContent().contains("ТЕСТОВЫЙ DEEPSEEK"))
+                    assertEquals(
+                        "ТЕСТОВЫЙ DEEPSEEK",
+                        page.locator("tr[data-transaction-id='1'] input[name='merchant']").inputValue(),
+                    )
 
                     page.navigate("$baseUrl/agent/sessions/$ollamaSessionId")
                     waitForAgentInitialized(page)
                     waitForSessionReady(page)
                     assertLocalProviderSelected(page)
-                    assertTrue(page.locator("#operation-table").textContent().contains("ДЕМО МАРКЕТ"))
+                    assertEquals(
+                        "ДЕМО МАРКЕТ",
+                        page.locator("tr[data-transaction-id='1'] input[name='merchant']").inputValue(),
+                    )
                 }
             }
         }
@@ -135,7 +150,7 @@ class LocalProviderAcceptanceBrowserTest {
                     page.waitForFunction(
                         "() => document.querySelectorAll('#operation-table tbody tr').length === 2",
                     )
-                    val draftBeforeFailure = page.locator("#operation-table").textContent()
+                    val draftBeforeFailure = visibleDraftFingerprint(page)
 
                     val failedResponse = sendMessage(page, "SIMULATE_LOCAL_PROVIDER_FAILURE")
                     assertTrue(failedResponse.status() !in 200..299)
@@ -143,7 +158,7 @@ class LocalProviderAcceptanceBrowserTest {
                         "() => document.querySelector('#agent-status')?.classList.contains('error') === true",
                     )
                     assertTrue(page.locator("#agent-status").textContent().isNotBlank())
-                    assertEquals(draftBeforeFailure, page.locator("#operation-table").textContent())
+                    assertEquals(draftBeforeFailure, visibleDraftFingerprint(page))
                     assertLocalProviderSelected(page)
                     capture(page, "d27-local-provider-failure.png")
                 }
@@ -230,6 +245,13 @@ class LocalProviderAcceptanceBrowserTest {
         )
         assertTrue(page.locator("#agent-workspace").isVisible)
     }
+
+    private fun visibleDraftFingerprint(page: Page): String =
+        page.evaluate(
+            "() => JSON.stringify(Array.from(document.querySelectorAll(" +
+                "'#operation-table tbody input, #operation-table tbody select'), " +
+                "control => [control.getAttribute('name'), control.value, control.checked]))",
+        ).toString()
 
     private fun acceptanceBaseUrl(): String? {
         val baseUrl = System.getenv("LOCAL_PROVIDER_ACCEPTANCE_BASE_URL")
