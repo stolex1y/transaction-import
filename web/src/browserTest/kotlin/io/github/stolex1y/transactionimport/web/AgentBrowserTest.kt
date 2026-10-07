@@ -3606,26 +3606,26 @@ class AgentBrowserTest {
     }
 
     @Test
-    fun nativeMcpPreviewShowsCafeCategoriesAndIncompleteClassifierIssue() {
+    fun nativeMcpPreviewShowsUserRuleCategoryAndIncompleteClassifierIssue() {
         val database = Files.createTempFile("agent-browser-category-preview-", ".sqlite")
         val classifier = FakeAgentGateway(
             ArrayDeque(
                 listOf(
                     """{"items":[
-                        {"index":0,"merchant":"Стритфуд","description":"","category_id":"food.cafe"},
+                        {"index":0,"merchant":"Synthetic cafe purchase","description":"","category_id":"food.cafe"},
                         {"index":1,"merchant":"Перевод","description":"","category_id":null},
                         {"index":2,"merchant":"Synthetic income","description":"","category_id":null},
-                        {"index":4,"merchant":"КофеБон","description":"","category_id":"food.cafe"}
+                        {"index":4,"merchant":"Synthetic cafe special","description":"","category_id":"food.cafe"}
                     ]}""",
                 ),
             ),
         )
         val planner = BrowserEligibilityPlanGateway()
-        val source = BrowserEligibilityMcpSource(cafeMerchantExamples = true)
+        val source = BrowserEligibilityMcpSource(categoryRuleRows = true)
         val base = fakeAgentDependencies(database.toString(), classifier)
         runBlocking {
             base.agent.updatePreferences(
-                "Операции «Стритфуд» и «КофеБон» относить к категории «Кафе и рестораны».",
+                "Synthetic cafe purchase и Synthetic cafe special относить к активной категории «Кафе и рестораны».",
             )
         }
         val runtime = base.runtimeConfig.copy(
@@ -3672,15 +3672,15 @@ class AgentBrowserTest {
                         val preview = page.locator(".mcp-inline-preview").last()
                         preview.waitFor()
                         assertEquals(5, preview.locator("tbody tr").count())
-                        val streetFoodRow = preview.locator("tbody tr").nth(0)
-                        assertTrue(streetFoodRow.locator("td").nth(2).textContent().contains("Стритфуд"))
+                        val ruleRow = preview.locator("tbody tr").nth(0)
+                        assertTrue(ruleRow.locator("td").nth(2).textContent().contains("Synthetic cafe purchase"))
                         assertTrue(
-                            streetFoodRow.locator("td").nth(4).textContent().contains("Кафе и рестораны"),
+                            ruleRow.locator("td").nth(4).textContent().contains("Кафе и рестораны"),
                         )
-                        val coffeeRow = preview.locator("tbody tr").nth(4)
-                        assertTrue(coffeeRow.locator("td").nth(2).textContent().contains("КофеБон"))
+                        val secondRuleRow = preview.locator("tbody tr").nth(4)
+                        assertTrue(secondRuleRow.locator("td").nth(2).textContent().contains("Synthetic cafe special"))
                         assertTrue(
-                            coffeeRow.locator("td").nth(4).textContent().contains("Кафе и рестораны"),
+                            secondRuleRow.locator("td").nth(4).textContent().contains("Кафе и рестораны"),
                         )
                         val incompleteRow = preview.locator("tbody tr").nth(3)
                         val incompleteCategory = incompleteRow.locator("td").nth(4).textContent()
@@ -3697,7 +3697,7 @@ class AgentBrowserTest {
                             "() => window.location.pathname.split('/').pop()",
                         ).toString()
                         assertEquals(null, runBlocking { base.agent.getSession(sessionId).draft })
-                        captureDeliveryUi(page, "a13-cafe-categories-and-classifier-diagnostic.png")
+                        captureDeliveryUi(page, "a13-user-rule-category-and-classifier-diagnostic.png")
                     }
                 }
             }
@@ -4646,7 +4646,7 @@ private class BrowserEligibilityPlanGateway : ChatCompletionGateway {
 }
 
 private class BrowserEligibilityMcpSource(
-    private val cafeMerchantExamples: Boolean = false,
+    private val categoryRuleRows: Boolean = false,
 ) : McpToolProvider {
     var searchCalls = 0
     var detailCalls = 0
@@ -4696,12 +4696,12 @@ private class BrowserEligibilityMcpSource(
                    "merchant":"Synthetic unique unknown","description":"Synthetic unique unknown type"}
                 ]}
             """.trimIndent()
-            val cafeExamples = transactionText
-                .replace("Synthetic purchase", "Стритфуд")
-                .replace("Synthetic unique unknown", "КофеБон")
+            val categoryRuleText = transactionText
+                .replace("Synthetic purchase", "Synthetic cafe purchase")
+                .replace("Synthetic unique unknown", "Synthetic cafe special")
             TbankToolCallResponse(
                 tool = tool,
-                text = if (cafeMerchantExamples) cafeExamples else transactionText,
+                text = if (categoryRuleRows) categoryRuleText else transactionText,
             )
         }
         "receipts" to "search-receipts" -> {

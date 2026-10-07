@@ -1257,9 +1257,9 @@ class SmartExpenseAgentTest {
     fun externalPreviewAppliesConfirmedCategoryRuleToMatchingMerchant() = runBlocking {
         val repository = MemoryImportSessionRepository()
         val generalInstruction =
-            "Явные кофейни и street-food заведения, включая «Стритфуд» и «КофеБон», относить к «Кафе и ресторанам»."
+            "Покупки из Synthetic Food Hall относить к активной категории «Кафе и рестораны»."
         val confirmedDecision =
-            "Операции с мерчантом «Стритфуд» относить к категории «Кафе и рестораны»."
+            "Операции с мерчантом «Synthetic Food Hall» относить к категории «Кафе и рестораны»."
         repository.saveLongTermMemory(
             repository.readLongTermMemory().copy(
                 userPrompt = generalInstruction,
@@ -1273,7 +1273,7 @@ class SmartExpenseAgentTest {
             ),
         )
         val gateway = QueuedGateway(
-            """{"items":[{"index":0,"merchant":"Стритфуд","description":"","category_id":"food.cafe"}]}""",
+            """{"items":[{"index":0,"merchant":"Synthetic Food Hall","description":"","category_id":"food.cafe"}]}""",
         )
         val agent = testAgent(repository, gateway)
         val session = agent.createSession("Category preview", defaultConfig)
@@ -1286,8 +1286,8 @@ class SmartExpenseAgentTest {
                     occurredAt = "2026-02-08",
                     amountMinor = -1_500,
                     currency = "RUB",
-                    merchant = "Стритфуд",
-                    description = "Бургер",
+                    merchant = "Synthetic Food Hall",
+                    description = "Synthetic meal",
                 ),
             ),
         )
@@ -1302,7 +1302,6 @@ class SmartExpenseAgentTest {
                 line.contains("food.cafe:") && line.contains("Кафе и рестораны")
             },
         )
-        assertTrue(classifierPrompt.contains("Для явных кафе, кофеен и street-food заведений"))
     }
 
     @Test

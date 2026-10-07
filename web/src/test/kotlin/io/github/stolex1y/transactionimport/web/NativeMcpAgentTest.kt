@@ -1222,21 +1222,21 @@ class NativeMcpAgentTest {
     }
 
     @Test
-    fun nativeImportPreviewKeepsCafeCategoriesForStreetFoodAndCoffeeShop() = runBlocking {
+    fun nativeImportPreviewAppliesConfirmedCategoryRule() = runBlocking {
         val database = Files.createTempFile("native-category-preview-", ".sqlite")
         val classifier = FakeAgentGateway(
             ArrayDeque(
                 listOf(
                     """{"items":[
-                        {"index":0,"merchant":"Стритфуд","description":"","category_id":"food.cafe"},
-                        {"index":1,"merchant":"КофеБон","description":"","category_id":"food.cafe"}
+                        {"index":0,"merchant":"Synthetic Cafe A","description":"","category_id":"food.cafe"},
+                        {"index":1,"merchant":"Synthetic Cafe B","description":"","category_id":"food.cafe"}
                     ]}""",
                 ),
             ),
         )
         val dependencies = fakeAgentDependencies(database.toString(), classifier)
         dependencies.agent.updatePreferences(
-            "Операции «Стритфуд» и «КофеБон» относить к категории «Кафе и рестораны».",
+            "Synthetic Cafe A и Synthetic Cafe B относить к активной категории «Кафе и рестораны».",
         )
         val adapter = SyntheticTransactionAdapter(
             candidates = listOf(
@@ -1244,22 +1244,22 @@ class NativeMcpAgentTest {
                     occurredAt = "2026-09-10",
                     amountMinor = -1_000,
                     currency = "RUB",
-                    merchant = "Стритфуд",
-                    description = "Бургер",
+                    merchant = "Synthetic Cafe A",
+                    description = "Synthetic meal",
                 ),
                 ExternalTransactionCandidate(
                     occurredAt = "2026-09-10",
                     amountMinor = -640,
                     currency = "RUB",
-                    merchant = "КофеБон",
-                    description = "Кофе",
+                    merchant = "Synthetic Cafe B",
+                    description = "Synthetic coffee",
                 ),
             ),
             returnAllCandidatesInOneFetch = true,
         )
         val planner = SyntheticMixedPlanGateway(requestReceiptAssociation = false)
         val session = dependencies.agent.createSession(
-            "Synthetic category import",
+            "Synthetic rule-based category import",
             dependencies.runtimeConfig.defaultAgentConfig(),
         )
         try {
