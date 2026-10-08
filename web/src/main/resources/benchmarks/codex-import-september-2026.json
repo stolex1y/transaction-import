@@ -1,0 +1,1435 @@
+{
+  "model_selector": "openai-codex/gpt-6-luna:min",
+  "repetitions": 3,
+  "scenario": {
+    "user_turn": "Импортируй операции по совместному счета за сентябрь, включая чеки",
+    "account_alias": "Совместный счет"
+  },
+  "preferences": {
+    "confirmed_decisions": [
+      "Исключать переводы между собственными счетами.",
+      "Исключать переводы по телефонным суффиксам PHONE_SUFFIX_A и PHONE_SUFFIX_B.",
+      "Исключать переводы с description prefix «Перевод с договора …».",
+      "systemletbefit/letbefit → категория «Еда», каноническое имя BeFit.",
+      "ИП-ПРОДАВЕЦ-02 → «Хлебник» (food.cafe).",
+      "ИП-ПРОДАВЕЦ-01 → «Хлебник» (food.cafe).",
+      "Исключать переводы контрагентам [Контрагент-A] и [Контрагент-B].",
+      "Lamoda → категория «Одежда».",
+      "Стритфуд / ИП-ПРОДАВЕЦ-03: если в description нет места, добавить «ЦПКиО».",
+      "Подорожник: убрать из description «Организатор перевозок» как шум.",
+      "Два Дантиста → категория «Аптеки и здоровье».",
+      "Не дублировать merchant в description, если они совпадают."
+    ],
+    "merchant_canonical_rules": [
+      {
+        "canonical_name": "КофеБон",
+        "aliases": [
+          "Coffeebon"
+        ],
+        "suffix_policy": "numeric_terminal"
+      },
+      {
+        "canonical_name": "Додо Пицца",
+        "aliases": [
+          "DODOPIZZA"
+        ],
+        "suffix_policy": "none"
+      },
+      {
+        "canonical_name": "Стритфуд",
+        "aliases": [
+          "ИП-ПРОДАВЕЦ-03"
+        ],
+        "suffix_policy": "none"
+      },
+      {
+        "canonical_name": "Подорожник",
+        "aliases": [
+          "PODOROZHNIK.SPB.RU",
+          "PODOROZHNIK"
+        ],
+        "suffix_policy": "none"
+      },
+      {
+        "canonical_name": "Два Дантиста",
+        "aliases": [
+          "Your Smile"
+        ],
+        "suffix_policy": "none"
+      },
+      {
+        "canonical_name": "Золотое Яблоко",
+        "aliases": [
+          "GOLD APPLE"
+        ],
+        "suffix_policy": "none"
+      }
+    ]
+  },
+  "tool_replay": {
+    "transactions": {
+      "operations": [
+        {
+          "id": "TX01",
+          "occurred_at": "2026-09-30T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 40800,
+          "currency": "RUB",
+          "merchant": "ИП-ПРОДАВЕЦ-01",
+          "description": ""
+        },
+        {
+          "id": "TX02",
+          "occurred_at": "2026-09-30T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 800000,
+          "currency": "RUB",
+          "merchant": "Т-Банк",
+          "description": "Снятие в банкомате"
+        },
+        {
+          "id": "TX03",
+          "occurred_at": "2026-09-28T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 141300,
+          "currency": "RUB",
+          "merchant": "VITA apteka 4442",
+          "description": "Аптека Вита"
+        },
+        {
+          "id": "TX04",
+          "occurred_at": "2026-09-28T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 56400,
+          "currency": "RUB",
+          "merchant": "КофеБон",
+          "description": ""
+        },
+        {
+          "id": "TX05",
+          "occurred_at": "2026-09-28T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 111800,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Себе в другой банк"
+        },
+        {
+          "id": "TX06",
+          "occurred_at": "2026-09-28T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 25700,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Себе в другой банк"
+        },
+        {
+          "id": "TX07",
+          "occurred_at": "2026-09-28T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 163000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Себе в другой банк"
+        },
+        {
+          "id": "TX08",
+          "occurred_at": "2026-09-27T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 315000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "[Контрагент-B]"
+        },
+        {
+          "id": "TX09",
+          "occurred_at": "2026-09-25T00:00:00Z",
+          "direction": "income",
+          "amount_minor": 1500000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Между своими счетами"
+        },
+        {
+          "id": "TX10",
+          "occurred_at": "2026-09-25T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 85000,
+          "currency": "RUB",
+          "merchant": "Два Дантиста",
+          "description": ""
+        },
+        {
+          "id": "TX11",
+          "occurred_at": "2026-09-25T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 200000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Себе в другой банк"
+        },
+        {
+          "id": "TX12",
+          "occurred_at": "2026-09-23T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 42700,
+          "currency": "RUB",
+          "merchant": "B121",
+          "description": "Булочная Ф. Вольчека"
+        },
+        {
+          "id": "TX13",
+          "occurred_at": "2026-09-23T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 282700,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Себе в другой банк"
+        },
+        {
+          "id": "TX14",
+          "occurred_at": "2026-09-22T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 10000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "[Контрагент-B]"
+        },
+        {
+          "id": "TX15",
+          "occurred_at": "2026-09-22T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 50000,
+          "currency": "RUB",
+          "merchant": "Подорожник",
+          "description": "Организатор перевозок"
+        },
+        {
+          "id": "TX16",
+          "occurred_at": "2026-09-21T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 300000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Себе в другой банк"
+        },
+        {
+          "id": "TX17",
+          "occurred_at": "2026-09-21T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 261300,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Себе в другой банк"
+        },
+        {
+          "id": "TX18",
+          "occurred_at": "2026-09-20T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 50400,
+          "currency": "RUB",
+          "merchant": "B149",
+          "description": "Булочная Ф. Вольчека"
+        },
+        {
+          "id": "TX19",
+          "occurred_at": "2026-09-19T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 269930,
+          "currency": "RUB",
+          "merchant": "Супермаркеты в Городе",
+          "description": ""
+        },
+        {
+          "id": "TX20",
+          "occurred_at": "2026-09-19T00:00:00Z",
+          "direction": "income",
+          "amount_minor": 2000000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Между своими счетами"
+        },
+        {
+          "id": "TX21",
+          "occurred_at": "2026-09-19T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 20000,
+          "currency": "RUB",
+          "merchant": "Стритфуд",
+          "description": ""
+        },
+        {
+          "id": "TX22",
+          "occurred_at": "2026-09-19T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 40000,
+          "currency": "RUB",
+          "merchant": "Стритфуд",
+          "description": ""
+        },
+        {
+          "id": "TX23",
+          "occurred_at": "2026-09-19T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 30900,
+          "currency": "RUB",
+          "merchant": "КофеБон",
+          "description": ""
+        },
+        {
+          "id": "TX24",
+          "occurred_at": "2026-09-19T00:00:00Z",
+          "direction": "income",
+          "amount_minor": 227708,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Между своими счетами"
+        },
+        {
+          "id": "TX25",
+          "occurred_at": "2026-09-18T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 113500,
+          "currency": "RUB",
+          "merchant": "Додо Пицца",
+          "description": ""
+        },
+        {
+          "id": "TX26",
+          "occurred_at": "2026-09-18T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 1099000,
+          "currency": "RUB",
+          "merchant": "Lamoda",
+          "description": ""
+        },
+        {
+          "id": "TX27",
+          "occurred_at": "2026-09-18T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 1440000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "[Контрагент-B]"
+        },
+        {
+          "id": "TX28",
+          "occurred_at": "2026-09-18T00:00:00Z",
+          "direction": "income",
+          "amount_minor": 2300000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Между своими счетами"
+        },
+        {
+          "id": "TX29",
+          "occurred_at": "2026-09-18T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 60000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "[Контрагент-B]"
+        },
+        {
+          "id": "TX30",
+          "occurred_at": "2026-09-18T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 922500,
+          "currency": "RUB",
+          "merchant": "systemletbefit",
+          "description": "Befit"
+        },
+        {
+          "id": "TX31",
+          "occurred_at": "2026-09-18T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 770800,
+          "currency": "RUB",
+          "merchant": "systemletbefit",
+          "description": "Befit"
+        },
+        {
+          "id": "TX32",
+          "occurred_at": "2026-09-17T00:00:00Z",
+          "direction": "income",
+          "amount_minor": 1000000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Между своими счетами"
+        },
+        {
+          "id": "TX33",
+          "occurred_at": "2026-09-16T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 150000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "[Контрагент-C]"
+        },
+        {
+          "id": "TX34",
+          "occurred_at": "2026-09-16T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 435500,
+          "currency": "RUB",
+          "merchant": "Золотое Яблоко",
+          "description": ""
+        },
+        {
+          "id": "TX35",
+          "occurred_at": "2026-09-16T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 317600,
+          "currency": "RUB",
+          "merchant": "Золотое Яблоко",
+          "description": ""
+        },
+        {
+          "id": "TX36",
+          "occurred_at": "2026-09-14T00:00:00Z",
+          "direction": "income",
+          "amount_minor": 114200,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "[Контрагент-B]"
+        },
+        {
+          "id": "TX37",
+          "occurred_at": "2026-09-12T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 95000,
+          "currency": "RUB",
+          "merchant": "YM *vkusnoitochka",
+          "description": "Вкусно — и точка"
+        },
+        {
+          "id": "TX38",
+          "occurred_at": "2026-09-12T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 88646,
+          "currency": "RUB",
+          "merchant": "Kladmarmelada",
+          "description": ""
+        },
+        {
+          "id": "TX39",
+          "occurred_at": "2026-09-11T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 35500,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Себе в другой банк"
+        },
+        {
+          "id": "TX40",
+          "occurred_at": "2026-09-11T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 300000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Себе в другой банк"
+        },
+        {
+          "id": "TX41",
+          "occurred_at": "2026-09-11T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 170000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "[Контрагент-B]"
+        },
+        {
+          "id": "TX42",
+          "occurred_at": "2026-09-10T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 367200,
+          "currency": "RUB",
+          "merchant": "OOO Apetta-Servis",
+          "description": ""
+        },
+        {
+          "id": "TX43",
+          "occurred_at": "2026-09-10T00:00:00Z",
+          "direction": "income",
+          "amount_minor": 338600,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Возврат покупки через СБП. Lamodа"
+        },
+        {
+          "id": "TX44",
+          "occurred_at": "2026-09-10T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 25000,
+          "currency": "RUB",
+          "merchant": "Яндекс",
+          "description": "[Контрагент-B]"
+        },
+        {
+          "id": "TX45",
+          "occurred_at": "2026-09-10T00:00:00Z",
+          "direction": "income",
+          "amount_minor": 557195,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "[Контрагент-B]"
+        },
+        {
+          "id": "TX46",
+          "occurred_at": "2026-09-10T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 200000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Себе в другой банк"
+        },
+        {
+          "id": "TX47",
+          "occurred_at": "2026-09-09T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 100000,
+          "currency": "RUB",
+          "merchant": "Перевод",
+          "description": "Себе в другой банк"
+        },
+        {
+          "id": "TX48",
+          "occurred_at": "2026-09-09T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 922500,
+          "currency": "RUB",
+          "merchant": "systemletbefit",
+          "description": "Befit"
+        },
+        {
+          "id": "TX49",
+          "occurred_at": "2026-09-09T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 770800,
+          "currency": "RUB",
+          "merchant": "systemletbefit",
+          "description": "Befit"
+        },
+        {
+          "id": "TX50",
+          "occurred_at": "2026-09-08T00:00:00Z",
+          "direction": "expense",
+          "amount_minor": 20200,
+          "currency": "RUB",
+          "merchant": "Y.M*VKUSNOITOCHKA",
+          "description": "Вкусно — и точка"
+        }
+      ]
+    },
+    "receipts": {
+      "has_more": false,
+      "receipts": [
+        {
+          "id": "C001",
+          "received_at": "2026-09-30T20:56:51",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 111800,
+          "currency": "RUB"
+        },
+        {
+          "id": "C002",
+          "received_at": "2026-09-30T20:08:16",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 25700,
+          "currency": "RUB"
+        },
+        {
+          "id": "C003",
+          "received_at": "2026-09-30T11:19:33",
+          "merchant": "ООО\" КОФЕ С ДОСТАВКОЙ\"",
+          "amount_minor": 70400,
+          "currency": "RUB"
+        },
+        {
+          "id": "C004",
+          "received_at": "2026-09-29T18:04:25",
+          "merchant": "АО \"ФПК\"",
+          "amount_minor": 1510020,
+          "currency": "RUB"
+        },
+        {
+          "id": "C005",
+          "received_at": "2026-09-29T14:16:12",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 163000,
+          "currency": "RUB"
+        },
+        {
+          "id": "C006",
+          "received_at": "2026-09-28T20:08:44",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 58800,
+          "currency": "RUB"
+        },
+        {
+          "id": "C007",
+          "received_at": "2026-09-28T11:27:52",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 111800,
+          "currency": "RUB"
+        },
+        {
+          "id": "C008",
+          "received_at": "2026-09-28T11:17:46",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 25700,
+          "currency": "RUB"
+        },
+        {
+          "id": "C009",
+          "received_at": "2026-09-28T08:16:43",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 163000,
+          "currency": "RUB"
+        },
+        {
+          "id": "C010",
+          "received_at": "2026-09-27T00:24:02",
+          "merchant": "АО \"ФПК\"",
+          "amount_minor": 1380020,
+          "currency": "RUB"
+        },
+        {
+          "id": "C011",
+          "received_at": "2026-09-26T16:03:32",
+          "merchant": "СПБ ГКУ \"ОРГАНИЗАТОР ПЕРЕВОЗОК\"",
+          "amount_minor": 50000,
+          "currency": "RUB"
+        },
+        {
+          "id": "C012",
+          "received_at": "2026-09-26T01:18:41",
+          "merchant": "ООО \"ПРЕМЬЕР\"",
+          "amount_minor": 100,
+          "currency": "RUB"
+        },
+        {
+          "id": "C013",
+          "received_at": "2026-09-24T19:38:09",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 223900,
+          "currency": "RUB"
+        },
+        {
+          "id": "C014",
+          "received_at": "2026-09-23T20:03:39",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 71300,
+          "currency": "RUB"
+        },
+        {
+          "id": "C015",
+          "received_at": "2026-09-23T20:03:24",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 261300,
+          "currency": "RUB"
+        },
+        {
+          "id": "C016",
+          "received_at": "2026-09-23T11:50:34",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 282700,
+          "currency": "RUB"
+        },
+        {
+          "id": "C017",
+          "received_at": "2026-09-22T18:40:31",
+          "merchant": "СПБ ГКУ \"ОРГАНИЗАТОР ПЕРЕВОЗОК\"",
+          "amount_minor": 50000,
+          "currency": "RUB"
+        },
+        {
+          "id": "C018",
+          "received_at": "2026-09-21T14:51:27",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 261300,
+          "currency": "RUB"
+        },
+        {
+          "id": "C019",
+          "received_at": "2026-09-21T11:56:13",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 71300,
+          "currency": "RUB"
+        },
+        {
+          "id": "C020",
+          "received_at": "2026-09-20T20:26:28",
+          "merchant": "ООО \"КУПИШУЗ\"",
+          "amount_minor": 570000,
+          "currency": "RUB"
+        },
+        {
+          "id": "C021",
+          "received_at": "2026-09-18T22:34:22",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 35500,
+          "currency": "RUB"
+        },
+        {
+          "id": "C022",
+          "received_at": "2026-09-18T19:48:52",
+          "merchant": "ИП-ПРОДАВЕЦ-04",
+          "amount_minor": 113500,
+          "currency": "RUB"
+        },
+        {
+          "id": "C023",
+          "received_at": "2026-09-18T19:43:18",
+          "merchant": "ООО\" КОФЕ С ДОСТАВКОЙ\"",
+          "amount_minor": 76200,
+          "currency": "RUB"
+        },
+        {
+          "id": "C024",
+          "received_at": "2026-09-18T19:06:20",
+          "merchant": "ООО \"КУПИШУЗ\"",
+          "amount_minor": 1099000,
+          "currency": "RUB"
+        },
+        {
+          "id": "C025",
+          "received_at": "2026-09-17T11:21:47",
+          "merchant": "ООО \"ЕКАТЕРИНБУРГ ЯБЛОКО\"",
+          "amount_minor": 317600,
+          "currency": "RUB"
+        },
+        {
+          "id": "C026",
+          "received_at": "2026-09-16T19:03:02",
+          "merchant": "ООО \"ЕКАТЕРИНБУРГ ЯБЛОКО\"",
+          "amount_minor": 435500,
+          "currency": "RUB"
+        },
+        {
+          "id": "C027",
+          "received_at": "2026-09-16T12:34:46",
+          "merchant": "ООО \"ЕКАТЕРИНБУРГ ЯБЛОКО\"",
+          "amount_minor": 435500,
+          "currency": "RUB"
+        },
+        {
+          "id": "C028",
+          "received_at": "2026-09-16T12:32:50",
+          "merchant": "ООО \"ЕКАТЕРИНБУРГ ЯБЛОКО\"",
+          "amount_minor": 317600,
+          "currency": "RUB"
+        },
+        {
+          "id": "C029",
+          "received_at": "2026-09-15T20:03:10",
+          "merchant": "АО \"ДИКСИ ЮГ\"",
+          "amount_minor": 73968,
+          "currency": "RUB"
+        },
+        {
+          "id": "C030",
+          "received_at": "2026-09-15T19:21:10",
+          "merchant": "ООО \"КУПИШУЗ\"",
+          "amount_minor": 570000,
+          "currency": "RUB"
+        },
+        {
+          "id": "C031",
+          "received_at": "2026-09-15T19:20:16",
+          "merchant": "ООО \"КУПИШУЗ\"",
+          "amount_minor": 4835300,
+          "currency": "RUB"
+        },
+        {
+          "id": "C032",
+          "received_at": "2026-09-14T11:30:40",
+          "merchant": "ООО \"КУПИШУЗ\"",
+          "amount_minor": 570000,
+          "currency": "RUB"
+        },
+        {
+          "id": "C033",
+          "received_at": "2026-09-13T10:13:27",
+          "merchant": "ООО \"ЯНДЕКС.ЕДА\"",
+          "amount_minor": 56000,
+          "currency": "RUB"
+        },
+        {
+          "id": "C034",
+          "received_at": "2026-09-12T22:03:34",
+          "merchant": "ООО \"СИСТЕМА ПБО\"",
+          "amount_minor": 95000,
+          "currency": "RUB"
+        },
+        {
+          "id": "C035",
+          "received_at": "2026-09-11T16:33:41",
+          "merchant": "ООО \"ИНТЕРНЕТ РЕШЕНИЯ\"",
+          "amount_minor": 35500,
+          "currency": "RUB"
+        },
+        {
+          "id": "C036",
+          "received_at": "2026-09-11T16:13:09",
+          "merchant": "ООО\" КОФЕ С ДОСТАВКОЙ\"",
+          "amount_minor": 76200,
+          "currency": "RUB"
+        },
+        {
+          "id": "C037",
+          "received_at": "2026-09-10T19:44:06",
+          "merchant": "ООО \"КУПИШУЗ\"",
+          "amount_minor": 338600,
+          "currency": "RUB"
+        },
+        {
+          "id": "C038",
+          "received_at": "2026-09-10T13:20:46",
+          "merchant": "ООО \"ИКС 5 ДИДЖИТАЛ\"",
+          "amount_minor": 128841,
+          "currency": "RUB"
+        },
+        {
+          "id": "C039",
+          "received_at": "2026-09-08T20:22:34",
+          "merchant": "ООО \"СИСТЕМА ПБО\"",
+          "amount_minor": 20200,
+          "currency": "RUB"
+        },
+        {
+          "id": "C040",
+          "received_at": "2026-09-08T20:20:30",
+          "merchant": "ООО\" КОФЕ С ДОСТАВКОЙ\"",
+          "amount_minor": 70800,
+          "currency": "RUB"
+        },
+        {
+          "id": "C041",
+          "received_at": "2026-09-07T20:55:32",
+          "merchant": "АО \"ФПК\"",
+          "amount_minor": 1219750,
+          "currency": "RUB"
+        },
+        {
+          "id": "C042",
+          "received_at": "2026-09-07T19:49:25",
+          "merchant": "ОАО \"РЖД\"",
+          "amount_minor": 900400,
+          "currency": "RUB"
+        },
+        {
+          "id": "C043",
+          "received_at": "2026-09-07T19:38:29",
+          "merchant": "ОАО \"РЖД\"",
+          "amount_minor": 900400,
+          "currency": "RUB"
+        },
+        {
+          "id": "C044",
+          "received_at": "2026-09-07T19:31:14",
+          "merchant": "ОАО \"РЖД\"",
+          "amount_minor": 1091490,
+          "currency": "RUB"
+        },
+        {
+          "id": "C045",
+          "received_at": "2026-09-04T18:20:16",
+          "merchant": "АО \"ТАНДЕР\"",
+          "amount_minor": 167393,
+          "currency": "RUB"
+        },
+        {
+          "id": "C046",
+          "received_at": "2026-09-04T17:45:57",
+          "merchant": "АО \"ТАНДЕР\"",
+          "amount_minor": 167393,
+          "currency": "RUB"
+        },
+        {
+          "id": "C047",
+          "received_at": "2026-09-02T21:24:34",
+          "merchant": "ООО \"ИКС 5 ДИДЖИТАЛ\"",
+          "amount_minor": 255586,
+          "currency": "RUB"
+        },
+        {
+          "id": "C048",
+          "received_at": "2026-09-02T10:16:44",
+          "merchant": "ООО\" КОФЕ С ДОСТАВКОЙ\"",
+          "amount_minor": 70800,
+          "currency": "RUB"
+        },
+        {
+          "id": "C049",
+          "received_at": "2026-09-01T21:08:17",
+          "merchant": "ООО \"СИСТЕМА ПБО\"",
+          "amount_minor": 52700,
+          "currency": "RUB"
+        },
+        {
+          "id": "C050",
+          "received_at": "2026-09-01T20:45:13",
+          "merchant": "АО \"ДИКСИ ЮГ\"",
+          "amount_minor": 37478,
+          "currency": "RUB"
+        },
+        {
+          "id": "C051",
+          "received_at": "2026-09-01T15:02:28",
+          "merchant": "ИП-ПРОДАВЕЦ-04",
+          "amount_minor": 118600,
+          "currency": "RUB"
+        }
+      ]
+    },
+    "receipt_details": [
+      {
+        "id": "C017",
+        "merchant": "СПБ ГКУ \"ОРГАНИЗАТОР ПЕРЕВОЗОК\"",
+        "received_at": "2026-09-22T18:40:31",
+        "date_time": "2026-09-22T18:40:00",
+        "total_minor": 50000,
+        "currency": "RUB",
+        "settlement_place": "https://podorozhnik.spb.ru",
+        "items": [
+          {
+            "name": "Пополнение Единого билета (ЕБ) [номер скрыт]",
+            "quantity": 1,
+            "price_minor": 50000,
+            "sum_minor": 50000,
+            "vat_rate": "6",
+            "payment_type": "4",
+            "product_type": "4"
+          }
+        ]
+      },
+      {
+        "id": "C022",
+        "merchant": "ИП-ПРОДАВЕЦ-04",
+        "received_at": "2026-09-18T19:48:52",
+        "date_time": "2026-09-18T19:48:00",
+        "total_minor": 113500,
+        "currency": "RUB",
+        "settlement_place": "dodopizza.ru",
+        "items": [
+          {
+            "name": "Цыпленок ранч Средняя Традиционное",
+            "quantity": 1,
+            "price_minor": 91900,
+            "sum_minor": 91900,
+            "vat_rate": "6",
+            "payment_type": "4",
+            "product_type": "1"
+          },
+          {
+            "name": "Классический молочный коктейль 0,3 л",
+            "quantity": 1,
+            "price_minor": 21500,
+            "sum_minor": 21500,
+            "vat_rate": "6",
+            "payment_type": "4",
+            "product_type": "1"
+          },
+          {
+            "name": "Добрый Кола без сахара 0,5 л",
+            "quantity": 1,
+            "price_minor": 100,
+            "sum_minor": 100,
+            "vat_rate": "6",
+            "payment_type": "4",
+            "product_type": "1"
+          }
+        ]
+      },
+      {
+        "id": "C024",
+        "merchant": "ООО \"КУПИШУЗ\"",
+        "received_at": "2026-09-18T19:06:20",
+        "date_time": "2026-09-18T19:06:00",
+        "total_minor": 1099000,
+        "currency": "RUB",
+        "settlement_place": "ПВЗ",
+        "items": [
+          {
+            "name": "[M] Брюки Calista [артикул скрыт]",
+            "quantity": 1,
+            "price_minor": 1099000,
+            "sum_minor": 1099000,
+            "vat_rate": "11",
+            "payment_type": "4",
+            "product_type": "33"
+          }
+        ]
+      },
+      {
+        "id": "C025",
+        "merchant": "ООО \"ЕКАТЕРИНБУРГ ЯБЛОКО\"",
+        "received_at": "2026-09-17T11:21:47",
+        "date_time": "2026-09-17T13:21:00",
+        "total_minor": 317600,
+        "currency": "RUB",
+        "settlement_place": "https://goldapple.ru",
+        "items": [
+          {
+            "name": "[код скрыт] TIGI Bed head Спрей морская соль Salty Not Sorry 100мл",
+            "quantity": 1,
+            "price_minor": 113900,
+            "sum_minor": 113900,
+            "vat_rate": "11",
+            "payment_type": "4",
+            "product_type": "33"
+          },
+          {
+            "name": "[код скрыт] Romanovamakeup Румяна кремовые Sexy Cream Blush GOOD GIRL 8гр",
+            "quantity": 1,
+            "price_minor": 203700,
+            "sum_minor": 203700,
+            "vat_rate": "11",
+            "payment_type": "4",
+            "product_type": "1"
+          }
+        ]
+      },
+      {
+        "id": "C026",
+        "merchant": "ООО \"ЕКАТЕРИНБУРГ ЯБЛОКО\"",
+        "received_at": "2026-09-16T19:03:02",
+        "date_time": "2026-09-16T21:02:00",
+        "total_minor": 435500,
+        "currency": "RUB",
+        "settlement_place": "https://goldapple.ru",
+        "items": [
+          {
+            "name": "[код скрыт] KAIZER Ножницы маникюрные закругленные серебро ручная алмазная заточка",
+            "quantity": 1,
+            "price_minor": 33400,
+            "sum_minor": 33400,
+            "vat_rate": "11",
+            "payment_type": "4",
+            "product_type": "1"
+          },
+          {
+            "name": "[код скрыт] dAlba Патчи д/глаз White Truffle Intensive 90гр",
+            "quantity": 1,
+            "price_minor": 204900,
+            "sum_minor": 204900,
+            "vat_rate": "11",
+            "payment_type": "4",
+            "product_type": "1"
+          },
+          {
+            "name": "[код скрыт] BIELENDA Дерматологический анти акне сыворотка дневная/ночна",
+            "quantity": 1,
+            "price_minor": 41600,
+            "sum_minor": 41600,
+            "vat_rate": "11",
+            "payment_type": "4",
+            "product_type": "33"
+          },
+          {
+            "name": "[код скрыт] Bed head Разглаж крем для придания блеска волосам BH AFTER PARTY 100мл",
+            "quantity": 1,
+            "price_minor": 155600,
+            "sum_minor": 155600,
+            "vat_rate": "11",
+            "payment_type": "4",
+            "product_type": "33"
+          }
+        ]
+      },
+      {
+        "id": "C027",
+        "merchant": "ООО \"ЕКАТЕРИНБУРГ ЯБЛОКО\"",
+        "received_at": "2026-09-16T12:34:46",
+        "date_time": "2026-09-16T14:34:00",
+        "total_minor": 435500,
+        "currency": "RUB",
+        "settlement_place": "https://goldapple.ru",
+        "items": [
+          {
+            "name": "[код скрыт] KAIZER Ножницы маникюрные закругленные серебро ручная алмазная заточка",
+            "quantity": 1,
+            "price_minor": 33400,
+            "sum_minor": 33400,
+            "vat_rate": "12",
+            "payment_type": "1",
+            "product_type": "10"
+          },
+          {
+            "name": "[код скрыт] dAlba Патчи д/глаз White Truffle Intensive 90гр",
+            "quantity": 1,
+            "price_minor": 204900,
+            "sum_minor": 204900,
+            "vat_rate": "12",
+            "payment_type": "1",
+            "product_type": "10"
+          },
+          {
+            "name": "[код скрыт] BIELENDA Дерматологический анти акне сыворотка дневная/ночна",
+            "quantity": 1,
+            "price_minor": 41600,
+            "sum_minor": 41600,
+            "vat_rate": "12",
+            "payment_type": "1",
+            "product_type": "10"
+          },
+          {
+            "name": "[код скрыт] Bed head Разглаж крем для придания блеска волосам BH AFTER PARTY 100мл",
+            "quantity": 1,
+            "price_minor": 155600,
+            "sum_minor": 155600,
+            "vat_rate": "12",
+            "payment_type": "1",
+            "product_type": "10"
+          },
+          {
+            "name": "СДЭК - курьер",
+            "quantity": 1,
+            "price_minor": 0,
+            "sum_minor": 0,
+            "vat_rate": "12",
+            "payment_type": "1",
+            "product_type": "10"
+          }
+        ]
+      },
+      {
+        "id": "C028",
+        "merchant": "ООО \"ЕКАТЕРИНБУРГ ЯБЛОКО\"",
+        "received_at": "2026-09-16T12:32:50",
+        "date_time": "2026-09-16T14:32:00",
+        "total_minor": 317600,
+        "currency": "RUB",
+        "settlement_place": "https://goldapple.ru",
+        "items": [
+          {
+            "name": "[код скрыт] TIGI Bed head Спрей морская соль Salty Not Sorry 100мл",
+            "quantity": 1,
+            "price_minor": 113900,
+            "sum_minor": 113900,
+            "vat_rate": "12",
+            "payment_type": "1",
+            "product_type": "10"
+          },
+          {
+            "name": "[код скрыт] Romanovamakeup Румяна кремовые Sexy Cream Blush GOOD GIRL 8гр",
+            "quantity": 1,
+            "price_minor": 203700,
+            "sum_minor": 203700,
+            "vat_rate": "12",
+            "payment_type": "1",
+            "product_type": "10"
+          },
+          {
+            "name": "Золотое Яблоко СПб - курьер",
+            "quantity": 1,
+            "price_minor": 0,
+            "sum_minor": 0,
+            "vat_rate": "12",
+            "payment_type": "1",
+            "product_type": "10"
+          }
+        ]
+      },
+      {
+        "id": "C034",
+        "merchant": "ООО \"СИСТЕМА ПБО\"",
+        "received_at": "2026-09-12T22:03:34",
+        "date_time": "2026-09-12T22:03:00",
+        "total_minor": 95000,
+        "currency": "RUB",
+        "settlement_place": "www.vkusnoitochka.ru | MOP | [код скрыт]",
+        "items": [
+          {
+            "name": "Гранд де Люкс",
+            "quantity": 1,
+            "price_minor": 31900,
+            "sum_minor": 31900,
+            "vat_rate": "11",
+            "payment_type": "4",
+            "product_type": "1"
+          },
+          {
+            "name": "Картофель Фри Двойной",
+            "quantity": 1,
+            "price_minor": 21700,
+            "sum_minor": 21700,
+            "vat_rate": "11",
+            "payment_type": "4",
+            "product_type": "1"
+          },
+          {
+            "name": "Биг Чикен бургер Кунжутный",
+            "quantity": 1,
+            "price_minor": 39800,
+            "sum_minor": 39800,
+            "vat_rate": "11",
+            "payment_type": "4",
+            "product_type": "1"
+          },
+          {
+            "name": "Большой пакет с ручками",
+            "quantity": 1,
+            "price_minor": 1500,
+            "sum_minor": 1500,
+            "vat_rate": "11",
+            "payment_type": "4",
+            "product_type": "1"
+          },
+          {
+            "name": "Наггетсы (4 шт.) Акция",
+            "quantity": 1,
+            "price_minor": 100,
+            "sum_minor": 100,
+            "vat_rate": "2",
+            "payment_type": "4",
+            "product_type": "1"
+          }
+        ]
+      },
+      {
+        "id": "C039",
+        "merchant": "ООО \"СИСТЕМА ПБО\"",
+        "received_at": "2026-09-08T20:22:34",
+        "date_time": "2026-09-08T20:08:00",
+        "total_minor": 20200,
+        "currency": "RUB",
+        "settlement_place": "www.vkusnoitochka.ru | MOP | [код скрыт]",
+        "items": [
+          {
+            "name": "Картофель Фри Двойной",
+            "quantity": 1,
+            "price_minor": 20200,
+            "sum_minor": 20200,
+            "vat_rate": "11",
+            "payment_type": "4",
+            "product_type": "1"
+          }
+        ]
+      }
+    ]
+  },
+  "evaluation_only": {
+    "selection": [
+      {
+        "transaction_id": "TX01",
+        "included": true
+      },
+      {
+        "transaction_id": "TX02",
+        "included": true
+      },
+      {
+        "transaction_id": "TX03",
+        "included": true
+      },
+      {
+        "transaction_id": "TX04",
+        "included": true
+      },
+      {
+        "transaction_id": "TX05",
+        "included": false
+      },
+      {
+        "transaction_id": "TX06",
+        "included": false
+      },
+      {
+        "transaction_id": "TX07",
+        "included": false
+      },
+      {
+        "transaction_id": "TX08",
+        "included": false
+      },
+      {
+        "transaction_id": "TX09",
+        "included": false
+      },
+      {
+        "transaction_id": "TX10",
+        "included": true
+      },
+      {
+        "transaction_id": "TX11",
+        "included": false
+      },
+      {
+        "transaction_id": "TX12",
+        "included": true
+      },
+      {
+        "transaction_id": "TX13",
+        "included": false
+      },
+      {
+        "transaction_id": "TX14",
+        "included": false
+      },
+      {
+        "transaction_id": "TX15",
+        "included": true
+      },
+      {
+        "transaction_id": "TX16",
+        "included": false
+      },
+      {
+        "transaction_id": "TX17",
+        "included": false
+      },
+      {
+        "transaction_id": "TX18",
+        "included": true
+      },
+      {
+        "transaction_id": "TX19",
+        "included": true
+      },
+      {
+        "transaction_id": "TX20",
+        "included": false
+      },
+      {
+        "transaction_id": "TX21",
+        "included": true
+      },
+      {
+        "transaction_id": "TX22",
+        "included": true
+      },
+      {
+        "transaction_id": "TX23",
+        "included": true
+      },
+      {
+        "transaction_id": "TX24",
+        "included": false
+      },
+      {
+        "transaction_id": "TX25",
+        "included": true
+      },
+      {
+        "transaction_id": "TX26",
+        "included": true
+      },
+      {
+        "transaction_id": "TX27",
+        "included": false
+      },
+      {
+        "transaction_id": "TX28",
+        "included": false
+      },
+      {
+        "transaction_id": "TX29",
+        "included": false
+      },
+      {
+        "transaction_id": "TX30",
+        "included": true
+      },
+      {
+        "transaction_id": "TX31",
+        "included": true
+      },
+      {
+        "transaction_id": "TX32",
+        "included": false
+      },
+      {
+        "transaction_id": "TX33",
+        "included": true
+      },
+      {
+        "transaction_id": "TX34",
+        "included": true
+      },
+      {
+        "transaction_id": "TX35",
+        "included": true
+      },
+      {
+        "transaction_id": "TX36",
+        "included": false
+      },
+      {
+        "transaction_id": "TX37",
+        "included": true
+      },
+      {
+        "transaction_id": "TX38",
+        "included": true
+      },
+      {
+        "transaction_id": "TX39",
+        "included": false
+      },
+      {
+        "transaction_id": "TX40",
+        "included": false
+      },
+      {
+        "transaction_id": "TX41",
+        "included": false
+      },
+      {
+        "transaction_id": "TX42",
+        "included": true
+      },
+      {
+        "transaction_id": "TX43",
+        "included": true
+      },
+      {
+        "transaction_id": "TX44",
+        "included": false
+      },
+      {
+        "transaction_id": "TX45",
+        "included": false
+      },
+      {
+        "transaction_id": "TX46",
+        "included": false
+      },
+      {
+        "transaction_id": "TX47",
+        "included": false
+      },
+      {
+        "transaction_id": "TX48",
+        "included": true
+      },
+      {
+        "transaction_id": "TX49",
+        "included": true
+      },
+      {
+        "transaction_id": "TX50",
+        "included": true
+      }
+    ],
+    "categories": [
+      {
+        "transaction_id": "TX04",
+        "category": "Кафе и рестораны"
+      },
+      {
+        "transaction_id": "TX23",
+        "category": "Кафе и рестораны"
+      },
+      {
+        "transaction_id": "TX21",
+        "category": "Кафе и рестораны"
+      },
+      {
+        "transaction_id": "TX22",
+        "category": "Кафе и рестораны"
+      }
+    ]
+  }
+}
