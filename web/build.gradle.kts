@@ -93,6 +93,22 @@ tasks.register<JavaExec>("playwrightInstall") {
     args("install", "chromium")
 }
 
+val benchmarkSourceCommit = providers.exec {
+    commandLine("git", "-C", rootProject.projectDir.absolutePath, "rev-parse", "--short=12", "HEAD")
+}.standardOutput.asText.map { it.trim() }
+
+tasks.register<JavaExec>("benchmarkImport") {
+    group = "verification"
+    description = "Runs the opt-in isolated transaction-import benchmark."
+    dependsOn(tasks.named("classes"))
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("io.github.stolex1y.transactionimport.web.benchmark.ImportBenchmarkMainKt")
+    standardInput = System.`in`
+    doFirst {
+        systemProperty("import.benchmark.sourceCommit", benchmarkSourceCommit.get())
+    }
+}
+
 tasks.withType<JavaCompile>().configureEach {
     options.release.set(17)
 }
