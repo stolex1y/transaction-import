@@ -2136,6 +2136,19 @@ class AgentBrowserTest {
                         )
                         val detailBody = detailResponse.text()
                         assertTrue(detailResponse.status() in 200..299, detailBody)
+                        val detailJson = Json.parseToJsonElement(detailBody).jsonObject
+                        assertEquals("Кофейня у дома", detailJson["merchant"]!!.jsonPrimitive.content)
+                        assertEquals(
+                            "2026-09-10T10:00:00Z",
+                            detailJson["date_time"]!!.jsonPrimitive.content,
+                        )
+                        assertEquals(49900, detailJson["total_minor"]!!.jsonPrimitive.content.toLong())
+                        assertEquals("RUB", detailJson["currency"]!!.jsonPrimitive.content)
+                        assertEquals(
+                            "Синтетический домен example.test",
+                            detailJson["settlement_place"]!!.jsonPrimitive.content,
+                        )
+                        assertEquals(1, detailJson["items"]!!.jsonArray.size)
                         page.locator("#receipt-detail-panel").waitFor()
                         page.waitForFunction(
                             "() => document.querySelector('#receipt-detail')?.textContent.includes('Кофе')",
@@ -2143,6 +2156,10 @@ class AgentBrowserTest {
                         assertTrue(page.locator("#receipt-detail").textContent().contains("Кофе"))
                         assertTrue(page.locator("#receipt-detail").textContent().contains("499"))
                         assertFalse(page.locator("#receipts-panel").textContent().contains(BrowserReceiptsFixture.RAW_KEY))
+                        assertFalse(detailBody.contains("receipt_key"))
+                        assertFalse(detailBody.contains(BrowserReceiptsFixture.RAW_KEY))
+                        assertFalse(detailBody.contains("retailPlaceAddress"))
+                        assertFalse(detailBody.contains("synthetic-private-address"))
                         assertFalse(detailBody.contains("synthetic-private-fiscal-id"))
                         assertFalse(detailBody.contains("synthetic-private-qr"))
                         assertFalse(detailBody.contains("fiscal_document_number"))
@@ -4120,7 +4137,7 @@ class AgentBrowserTest {
                 detailCalls += 1
                 TbankToolCallResponse(
                     tool = tool,
-                    text = """{"receipt_key":"$RAW_KEY","date_time":"2026-09-10T10:00:00Z","fiscal_document_number":"synthetic-private-fiscal-id","fiscal_drive_number":"synthetic-private-drive-id","fiscal_sign":"synthetic-private-sign","kkt_reg_id":"synthetic-private-kkt","qr_code":"synthetic-private-qr","total_minor":49900,"currency":"RUB","items":[{"name":"Кофе","quantity":1,"price_minor":49900,"sum_minor":49900}]}""",
+                    text = """{"receipt_key":"$RAW_KEY","date_time":"2026-09-10T10:00:00Z","fiscal_document_number":"synthetic-private-fiscal-id","fiscal_drive_number":"synthetic-private-drive-id","fiscal_sign":"synthetic-private-sign","kkt_reg_id":"synthetic-private-kkt","qr_code":"synthetic-private-qr","settlement_place":"Синтетический домен example.test","retailPlaceAddress":"synthetic-private-address","total_minor":49900,"currency":"RUB","items":[{"name":"Кофе","quantity":1,"price_minor":49900,"sum_minor":49900}]}""",
                 )
             }
             else -> TbankToolCallResponse(tool = tool, isError = true, text = "unexpected receipt tool")

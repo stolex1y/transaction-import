@@ -91,6 +91,7 @@ data class ReceiptDetailResponse(
     @SerialName("date_time") val dateTime: String,
     @SerialName("total_minor") val totalMinor: Long,
     val currency: String,
+    @SerialName("settlement_place") val settlementPlace: String? = null,
     val items: List<ReceiptItemResponse>,
 )
 
@@ -176,6 +177,7 @@ class ReceiptsProxyService(
             dateTime = dateTime,
             totalMinor = total,
             currency = currency,
+            settlementPlace = root.safeString("settlement_place", MAX_LOCATION_LENGTH),
             items = items,
         )
     }
@@ -232,6 +234,7 @@ class ReceiptsProxyService(
         private const val MAX_DETAIL_ITEMS = 100
         private const val MAX_RESPONSE_CHARS = 1_000_000
         private const val MAX_RECEIPT_KEY_LENGTH = 512
+        private const val MAX_LOCATION_LENGTH = 512
         private const val MAX_SELLER_LENGTH = 120
         private const val MAX_ITEM_QUANTITY = 100_000.0
         private const val MAX_RETRY_DELAY_SECONDS = 3_600L

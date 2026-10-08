@@ -13,6 +13,7 @@ import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import io.github.stolex1y.transactionimport.core.SchedulerRunHistory
@@ -287,14 +288,39 @@ class AgentIntegrationTest {
                 val detailText = detailResponse.bodyAsText()
                 val detail = JSON.parseToJsonElement(detailText).jsonObject
                 assertEquals("Булочная", detail["merchant"]!!.jsonPrimitive.content)
+                assertEquals("2026-09-01T10:00:00+03:00", detail["date_time"]!!.jsonPrimitive.content)
+                assertEquals(4200, detail["total_minor"]!!.jsonPrimitive.content.toLong())
+                assertEquals("RUB", detail["currency"]!!.jsonPrimitive.content)
                 assertEquals(1, detail["items"]!!.jsonArray.size)
+                assertEquals(
+                    "Синтетическая торговая точка",
+                    detail["settlement_place"]!!.jsonPrimitive.content,
+                )
                 assertFalse(detailText.contains("receipt_key"))
                 assertFalse(detailText.contains(FakeReceiptsMcpProvider.RAW_KEY_PREFIX))
+                assertFalse(detailText.contains("fiscal_document_number"))
+                assertFalse(detailText.contains("retailPlaceAddress"))
                 assertEquals(1, receipts.detailCalls)
+
+                receipts.settlementPlace = null
+                receipts.retailPlaceAddress = "synthetic-private-address"
+                val detailWithoutLocationResponse = client.get("/api/agent/receipts/$alias")
+                assertEquals(HttpStatusCode.OK, detailWithoutLocationResponse.status)
+                val detailWithoutLocationText = detailWithoutLocationResponse.bodyAsText()
+                val detailWithoutLocation =
+                    JSON.parseToJsonElement(detailWithoutLocationText).jsonObject
+                assertTrue(
+                    detailWithoutLocation["settlement_place"] == null ||
+                        detailWithoutLocation["settlement_place"] == JsonNull,
+                )
+                assertFalse(detailWithoutLocationText.contains("retailPlaceAddress"))
+                assertFalse(detailWithoutLocationText.contains("synthetic-private-address"))
+                assertFalse(detailWithoutLocationText.contains(FakeReceiptsMcpProvider.RAW_KEY_PREFIX))
+                assertEquals(2, receipts.detailCalls)
 
                 val invalidAlias = client.get("/api/agent/receipts/not-a-server-alias")
                 assertEquals(HttpStatusCode.BadRequest, invalidAlias.status)
-                assertEquals(1, receipts.detailCalls)
+                assertEquals(2, receipts.detailCalls)
                 val after = client.get("/api/agent/sessions/$sessionId").jsonObject()
                 assertEquals(before["draft"], after["draft"])
                 assertEquals(before.revision(), after.revision())
@@ -820,6 +846,8 @@ class AgentIntegrationTest {
         var refreshes = 0
         var logouts = 0
         var detailCalls = 0
+        var settlementPlace: String? = "Синтетическая торговая точка"
+        var retailPlaceAddress: String? = null
         val searchArguments = mutableListOf<JsonObject>()
         private var status = ReceiptsAuthStatus(
             authenticated = false,
@@ -878,9 +906,13 @@ class AgentIntegrationTest {
                 }
                 "get-receipt" -> {
                     detailCalls += 1
+                    val settlementField =
+                        settlementPlace?.let { ",\"settlement_place\":\"$it\"" } ?: ""
+                    val addressField =
+                        retailPlaceAddress?.let { ",\"retailPlaceAddress\":\"$it\"" } ?: ""
                     TbankToolCallResponse(
                         tool = tool,
-                        text = """{"receipt_key":"${RAW_KEY_PREFIX}1","date_time":"2026-09-01T10:00:00+03:00","fiscal_document_number":"100","total_minor":4200,"currency":"RUB","items":[{"name":"Хлеб","quantity":1,"price_minor":4200,"sum_minor":4200,"vat_rate":"20%"}]}""",
+                        text = """{"receipt_key":"${RAW_KEY_PREFIX}1","date_time":"2026-09-01T10:00:00+03:00","fiscal_document_number":"100","total_minor":4200,"currency":"RUB"$settlementField$addressField,"items":[{"name":"Хлеб","quantity":1,"price_minor":4200,"sum_minor":4200,"vat_rate":"20%"}]}""",
                     )
                 }
                 else -> TbankToolCallResponse(tool = tool, isError = true, text = "unexpected tool")
