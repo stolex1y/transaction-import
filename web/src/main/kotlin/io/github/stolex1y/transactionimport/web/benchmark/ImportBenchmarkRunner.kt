@@ -64,6 +64,8 @@ internal class ImportBenchmarkRunner(
     private val fixture: ImportBenchmarkFixture,
     private val gatewayForRun: suspend (Int) -> ChatCompletionGateway,
     private val confirmPreview: suspend (Int, ImportBenchmarkPreviewSummary) -> Boolean,
+    private val previewTransactionSourceRefs: (NativeMcpAgent, String, Long, String) -> List<String?>? =
+        NativeMcpAgent::previewTransactionSourceRefs,
     private val workDirectoryFactory: () -> Path = { Files.createTempDirectory("import-benchmark-") },
     private val emit: (String) -> Unit = {},
 ) {
@@ -134,12 +136,19 @@ internal class ImportBenchmarkRunner(
             if (preview.receiptMatching?.status == ReceiptMatchingStageStatus.SOURCE_ERROR) {
                 throw ImportBenchmarkReceiptSourceException()
             }
-            require(preview.transactions.size == fixture.modelInput.transactions.size) {
-                "Benchmark preview did not contain the reviewed operation set."
-            }
-            check(handled.response.state.draft == null) {
-                "Native MCP preview changed the draft before explicit confirmation."
-            }
+            val expectedSourceRefs = fixture.modelInput.transactions.map { it.id }.toSet()
+            val previewSourceRefs = previewTransactionSourceRefs(
+                native,
+                session.session.id,
+                preview.sessionRevision,
+                preview.id,
+            )
+            requireValidBenchmarkPreview(
+                preview = preview,
+                draftIsPresent = handled.response.state.draft != null,
+                expectedSourceRefs = expectedSourceRefs,
+                previewSourceRefs = previewSourceRefs,
+            )
             val previewSummary = previewSummary(preview)
             emitPreview(repetition, previewSummary)
             if (!confirmPreview(repetition, previewSummary)) {
@@ -455,3 +464,25 @@ internal class ImportBenchmarkModelRequestException(
 internal class ImportBenchmarkReceiptSourceException : IllegalStateException(
     "Benchmark receipt source replay failed; this repetition cannot be scored.",
 )
+
+internal fun requireValidBenchmarkPreview(
+    preview: McpPreview,
+    draftIsPresent: Boolean,
+    expectedSourceRefs: Set<String>,
+    previewSourceRefs: List<String?>?,
+) {
+    require(preview.transactions.size == expectedSourceRefs.size) {
+        "Benchmark preview did not contain the reviewed operation set."
+    }
+    check(!draftIsPresent) {
+        "Native MCP preview changed the draft before explicit confirmation."
+    }
+    require(
+        previewSourceRefs != null &&
+            previewSourceRefs.size == expectedSourceRefs.size &&
+            previewSourceRefs.all { !it.isNullOrBlank() } &&
+            previewSourceRefs.filterNotNull().toSet() == expectedSourceRefs,
+    ) {
+        "Benchmark preview did not contain the reviewed operation identities."
+    }
+}

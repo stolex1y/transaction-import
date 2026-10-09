@@ -1,5 +1,7 @@
 package io.github.stolex1y.transactionimport.web.benchmark
 
+import io.github.stolex1y.transactionimport.web.McpPreview
+import io.github.stolex1y.transactionimport.web.McpPreviewTransaction
 import io.github.stolex1y.transactionimport.core.ChatCompletionGateway
 import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.ChatCompletionResponse
@@ -11,11 +13,12 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ImportBenchmarkRunnerTest {
     @Test
-    fun offlineRunUsesProductionImportPathAndScoresOnlyReviewedLabels() = runBlocking {
+    fun offlineRunScoresReviewedLabelsAndBindsPendingPreviewSourceRefs() = runBlocking {
         val fixture = ImportBenchmarkFixtureLoader.loadBundled()
         val previews = mutableListOf<ImportBenchmarkPreviewSummary>()
         val output = mutableListOf<String>()
@@ -31,6 +34,14 @@ class ImportBenchmarkRunnerTest {
                 assertEquals(repetition, previews.size + 1)
                 previews += summary
                 true
+            },
+            previewTransactionSourceRefs = { native, sessionId, revision, previewId ->
+                val refs = native.previewTransactionSourceRefs(sessionId, revision, previewId)
+                assertEquals(fixture.modelInput.transactions.map { it.id }.toSet(), refs?.filterNotNull()?.toSet())
+                assertNull(native.previewTransactionSourceRefs("other-session", revision, previewId))
+                assertNull(native.previewTransactionSourceRefs(sessionId, revision + 1, previewId))
+                assertNull(native.previewTransactionSourceRefs(sessionId, revision, "other-preview"))
+                refs
             },
             workDirectoryFactory = {
                 Files.createTempDirectory("import-benchmark-runner-test-").also(workDirectories::add)
@@ -158,6 +169,94 @@ class ImportBenchmarkRunnerTest {
         assertTrue(output.isEmpty())
         assertEquals(1, workDirectories.size)
         assertTrue(workDirectories.all { !Files.exists(it) })
+    }
+
+    @Test
+    fun invalidPreviewSourceIdentitySetsAbortBeforeConfirmationAndCleanTemporaryDatabase() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val expectedIds = fixture.modelInput.transactions.map { it.id }
+        val invalidIdentitySets: List<List<String?>> = listOf(
+            expectedIds.dropLast(1),
+            expectedIds.dropLast(1) + "TX_UNEXPECTED",
+            expectedIds.dropLast(1) + expectedIds.first(),
+            expectedIds.dropLast(1) + null,
+            expectedIds.dropLast(1) + "",
+        )
+
+        invalidIdentitySets.forEach { invalidIds ->
+            val workDirectories = mutableListOf<Path>()
+            var confirmations = 0
+            val runner = ImportBenchmarkRunner(
+                fixture = fixture,
+                gatewayForRun = { OfflineBenchmarkGateway(fixture) },
+                confirmPreview = { _, _ ->
+                    confirmations += 1
+                    true
+                },
+                previewTransactionSourceRefs = { _, _, _, _ -> invalidIds },
+                workDirectoryFactory = {
+                    Files.createTempDirectory("import-benchmark-invalid-identities-").also(workDirectories::add)
+                },
+            )
+
+            val failure = assertFailsWith<IllegalArgumentException> { runner.run(1) }
+
+            assertTrue(failure.message.orEmpty().contains("identities"))
+            assertEquals(0, confirmations)
+            assertEquals(1, workDirectories.size)
+            assertTrue(workDirectories.all { !Files.exists(it) })
+        }
+    }
+
+    @Test
+    fun previewValidatorRejectsWrongCountDraftMutationAndBadIdentitySet() {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val expectedIds = fixture.modelInput.transactions.map { it.id }
+        val expectedSourceRefs = expectedIds.toSet()
+        val preview = McpPreview(
+            id = "safe-preview",
+            sessionRevision = 1,
+            transactions = fixture.modelInput.transactions.map { transaction ->
+                McpPreviewTransaction(
+                    occurredAt = transaction.occurredAt,
+                    amountMinor = transaction.signedAmountMinor,
+                    currency = transaction.currency,
+                    merchant = transaction.merchant,
+                    description = transaction.description,
+                )
+            },
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            requireValidBenchmarkPreview(
+                preview = preview.copy(transactions = preview.transactions.dropLast(1)),
+                draftIsPresent = false,
+                expectedSourceRefs = expectedSourceRefs,
+                previewSourceRefs = expectedIds,
+            )
+        }
+        assertFailsWith<IllegalStateException> {
+            requireValidBenchmarkPreview(
+                preview = preview,
+                draftIsPresent = true,
+                expectedSourceRefs = expectedSourceRefs,
+                previewSourceRefs = expectedIds,
+            )
+        }
+        listOf(
+            expectedIds.dropLast(1),
+            expectedIds.dropLast(1) + "TX_UNEXPECTED",
+            expectedIds.dropLast(1) + expectedIds.first(),
+        ).forEach { invalidIds ->
+            assertFailsWith<IllegalArgumentException> {
+                requireValidBenchmarkPreview(
+                    preview = preview,
+                    draftIsPresent = false,
+                    expectedSourceRefs = expectedSourceRefs,
+                    previewSourceRefs = invalidIds,
+                )
+            }
+        }
     }
 
     @Test

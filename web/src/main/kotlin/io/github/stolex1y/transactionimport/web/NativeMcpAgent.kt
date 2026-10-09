@@ -1713,6 +1713,16 @@ private data class BankReceiptMatch(
         }
     }
 
+    internal fun previewTransactionSourceRefs(
+        sessionId: String,
+        expectedRevision: Long,
+        previewId: String,
+    ): List<String?>? {
+        val pending = pendingPreviews[previewId] ?: return null
+        if (pending.sessionId != sessionId || pending.revision != expectedRevision) return null
+        return pending.candidates.map { candidate -> candidate.sourceRef }
+    }
+
     private fun createPreviewIfNeeded(
         sessionId: String,
         revision: Long,

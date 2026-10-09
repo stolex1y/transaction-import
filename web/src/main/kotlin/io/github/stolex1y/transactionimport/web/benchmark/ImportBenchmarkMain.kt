@@ -33,7 +33,7 @@ fun main(args: Array<String>) {
         println(error.providerBody)
         println("Режим inspection завершён; ни модель, ни внешний API не вызывались.")
     } catch (_: ImportBenchmarkCancelledException) {
-        println("Benchmark отменён. Preview не был подтверждён; временная база удалена.")
+        println("Benchmark остановлен: запрос не прошёл gate либо preview не был подтверждён; временная база удалена.")
     } catch (error: CliArgumentException) {
         System.err.println(error.message)
         System.err.println(
@@ -158,7 +158,7 @@ private suspend fun runBenchmarkCli(args: Array<String>, input: BenchmarkConsole
         BenchmarkMode.INSPECT -> inspectFirstProviderRequest(fixture)
         BenchmarkMode.PREFLIGHT -> runOmpPreflight(fixture)
         BenchmarkMode.OFFLINE -> runOffline(fixture, options)
-        BenchmarkMode.CODEX -> runCodex(fixture, options, input)
+        BenchmarkMode.CODEX -> runCodex(fixture, options)
         BenchmarkMode.DIAGNOSTIC -> runCodexDiagnostic(fixture, options, input)
     }
 }
@@ -212,7 +212,6 @@ private suspend fun runOffline(
 private suspend fun runCodex(
     fixture: ImportBenchmarkFixture,
     options: BenchmarkOptions,
-    input: BenchmarkConsoleInput,
 ) {
     check(options.allowCodexEgress) { "Codex mode requires --allow-codex-egress." }
     check(options.chatEgressConsent) { "Codex mode requires separate chat egress consent." }
@@ -230,15 +229,8 @@ private suspend fun runCodex(
                 val session = OmpAuthGatewaySession.open(
                     modelSelector = fixture.modelSelector,
                     reasoningEffort = fixture.reasoningEffort,
-                    approveFirstRequest = CodexRequestApproval { body, fingerprint, routingSummary ->
-                        println("Повтор $repetition: маршрут OMP: $routingSummary")
-                        println("Повтор $repetition: точный provider-facing request перед отправкой")
-                        println("SHA-256: $fingerprint")
-                        println(body)
-                        println(
-                            "Введите SEND только после отдельного согласия в чате; любой другой ввод остановит benchmark.",
-                        )
-                        input.readLine() == "SEND"
+                    approveFirstRequest = CodexRequestApproval { _, fingerprint, routingSummary ->
+                        autoApproveCodexBenchmarkRequest(repetition, fingerprint, routingSummary)
                     },
                 )
                 activeSession = session
@@ -247,13 +239,14 @@ private suspend fun runCodex(
             },
             confirmPreview = { repetition, summary ->
                 println(
-                    "Повтор $repetition: операции ${summary.transactionCount}, категоризировано ${summary.categorizedCount}; " +
+                    "Повтор $repetition: preview проверен; подтверждаю его production confirm() только во временной БД.",
+                )
+                println(
+                    "Операции ${summary.transactionCount}, категоризировано ${summary.categorizedCount}; " +
                         "чеки: совпало ${summary.matchedReceiptCount}, неоднозначно ${summary.ambiguousReceiptCount}, " +
                         "не сопоставлено ${summary.unmatchedReceiptCount}.",
                 )
-                println("После подтверждения production confirm() создаст draft только во временной БД, затем база будет удалена.")
-                println("Введите CONFIRM, чтобы подтвердить этот preview и оценить inclusion; любой другой ввод отменит прогон.")
-                input.readLine() == "CONFIRM"
+                true
             },
             emit = ::println,
         )
@@ -273,14 +266,29 @@ private suspend fun runCodex(
     }
 }
 
-internal const val APPROVED_DIAGNOSTIC_BODY_SHA256 =
+internal const val APPROVED_BENCHMARK_BODY_SHA256 =
     "05b0b60cae7052872e48a425e501eff943f67f04b2e0691b04240e39ee2f38a3"
-internal const val APPROVED_DIAGNOSTIC_ROUTING_SUMMARY =
+internal const val APPROVED_BENCHMARK_ROUTING_SUMMARY =
     "OMP routing: profile=unset (OMP default profile); config=benchmark fallback-only overlay; " +
         "inherited PI_CONFIG_FILES is not set; other inherited environment is preserved. Account identity is not verified."
 
-internal fun isApprovedDiagnosticTarget(bodySha256: String, routingSummary: String): Boolean =
-    bodySha256 == APPROVED_DIAGNOSTIC_BODY_SHA256 && routingSummary == APPROVED_DIAGNOSTIC_ROUTING_SUMMARY
+internal fun isApprovedCodexRequestTarget(bodySha256: String, routingSummary: String): Boolean =
+    bodySha256 == APPROVED_BENCHMARK_BODY_SHA256 && routingSummary == APPROVED_BENCHMARK_ROUTING_SUMMARY
+
+internal fun autoApproveCodexBenchmarkRequest(
+    repetition: Int,
+    bodySha256: String,
+    routingSummary: String,
+): Boolean {
+    if (!isApprovedCodexRequestTarget(bodySha256, routingSummary)) {
+        println("Повтор $repetition: request SHA или OMP route отличается от утверждённого; egress запрещён.")
+        return false
+    }
+    println("Повтор $repetition: утверждённые SHA-256 и OMP route совпали; completion отправляется автоматически.")
+    println("SHA-256: $bodySha256")
+    println(routingSummary)
+    return true
+}
 
 private suspend fun runCodexDiagnostic(
     fixture: ImportBenchmarkFixture,
@@ -299,7 +307,7 @@ private suspend fun runCodexDiagnostic(
                     modelSelector = fixture.modelSelector,
                     reasoningEffort = fixture.reasoningEffort,
                     approveFirstRequest = CodexRequestApproval { body, fingerprint, routingSummary ->
-                        if (!isApprovedDiagnosticTarget(fingerprint, routingSummary)) {
+                        if (!isApprovedCodexRequestTarget(fingerprint, routingSummary)) {
                             println("Diagnostic request body or OMP route differs from the approved target; no request sent.")
                             false
                         } else {

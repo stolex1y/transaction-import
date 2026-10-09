@@ -899,7 +899,18 @@ fingerprints и metadata, без prompt, ответов модели, merchant v
 непустой нечисловой cursor остаётся ошибкой.
 
 Для утверждённой fixture пользователь разрешил benchmark egress и будущие запуски
-без повторного chat-разрешения. Используйте команду с двумя обязательными CLI flags:
+без повторного chat-разрешения. Полный Codex benchmark не ждёт ввода `SEND` или
+`CONFIRM`: первый provider request каждого повтора автоматически пропускается
+только при точном совпадении approved body SHA и OMP route. Последующие model
+rounds в той же сессии входят в согласованный benchmark и могут содержать
+результаты replay из approved fixture. Production `confirm()` вызывается
+автоматически только после проверок: source error отсутствует, preview содержит
+50 строк и точный набор внутренних source refs из fixture, draft не изменён.
+Confirm выполняется только в одноразовой SQLite DB, удаляемой после scoring.
+При несовпадении первого SHA/route или любом нарушении этих проверок прогон
+останавливается, отчёт не создаётся.
+
+Используйте команду с двумя обязательными CLI flags:
 
 Перед egress учитывайте: первый body содержит application prompt и tools;
 последующие model rounds могут включать scrubbed результаты replay — операции
@@ -943,13 +954,13 @@ completion и прекращается до обработки tool calls, previ
 ./gradlew :web:benchmarkImport --args='--mode=codex --allow-codex-egress --chat-egress-consent'
 ```
 
-Перед каждым повтором CLI печатает точный body и effective route policy и
-требует `SEND`; отмена прекращает локальный OMP process без model request.
-Остальные model rounds того же повтора отдельно не показываются, но выполняются
-в границах нового chat consent и соответствующего `SEND`. После каждого preview
-CLI показывает counts и требует `CONFIRM`; только потом production `confirm()`
-создаёт draft во временной DB, которая удаляется после оценки. Три повтора
-создают три отдельные DB/session и OMP gateway.
+Для каждого повтора CLI проверяет SHA первого provider request и effective route
+по exact approved values; при несовпадении request не отправляется. Остальные
+model rounds того же повтора выполняются автоматически в согласованных границах
+fixture. До confirm runner проверяет 50 строк, точный набор внутренних source refs
+против fixture, `draft == null` и отсутствие receipt-source error; только после
+автоматически вызывает production `confirm()` во временной DB. Три повтора
+создают три отдельные DB/session и OMP gateway; CLI не ждёт stdin.
 
 Fallback и usage-aware fallback отключаются временным config overlay и
 проверяются через `omp config get`; любая ошибка прекращает benchmark. Если

@@ -82,13 +82,16 @@ class ImportBenchmarkCliTest {
     }
 
     @Test
-    fun diagnosticTargetRequiresExactApprovedBodyAndRoute() {
-        assertTrue(isApprovedDiagnosticTarget(
-            APPROVED_DIAGNOSTIC_BODY_SHA256,
-            APPROVED_DIAGNOSTIC_ROUTING_SUMMARY,
-        ))
-        assertFalse(isApprovedDiagnosticTarget("different-body", APPROVED_DIAGNOSTIC_ROUTING_SUMMARY))
-        assertFalse(isApprovedDiagnosticTarget(APPROVED_DIAGNOSTIC_BODY_SHA256, "different route"))
+    fun codexAutomaticApprovalRequiresExactApprovedBodyAndRoute() {
+        assertTrue(
+            autoApproveCodexBenchmarkRequest(
+                1,
+                APPROVED_BENCHMARK_BODY_SHA256,
+                APPROVED_BENCHMARK_ROUTING_SUMMARY,
+            ),
+        )
+        assertFalse(autoApproveCodexBenchmarkRequest(1, "different-body", APPROVED_BENCHMARK_ROUTING_SUMMARY))
+        assertFalse(autoApproveCodexBenchmarkRequest(1, APPROVED_BENCHMARK_BODY_SHA256, "different route"))
     }
 
     @Test
