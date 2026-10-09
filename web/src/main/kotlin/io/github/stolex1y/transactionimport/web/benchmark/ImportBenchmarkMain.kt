@@ -3,6 +3,7 @@ package io.github.stolex1y.transactionimport.web.benchmark
 import io.github.stolex1y.transactionimport.core.ChatCompletionGateway
 import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.ChatCompletionResponse
+import io.github.stolex1y.transactionimport.web.PreCompletionRequestAuthorizer
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.encodeToString
@@ -37,7 +38,7 @@ fun main(args: Array<String>) {
         System.err.println(error.message)
         System.err.println(
             "Использование: --mode=inspect | --mode=preflight | --mode=offline | " +
-                "--mode=codex --allow-codex-egress --chat-egress-consent [--report=PATH]",
+                "--mode=diagnostic | --mode=codex --allow-codex-egress --chat-egress-consent [--report=PATH]",
         )
         exitProcess(2)
     } catch (error: OmpGatewayPreflightException) {
@@ -102,6 +103,7 @@ private suspend fun runBenchmarkCli(args: Array<String>, input: BenchmarkConsole
         BenchmarkMode.PREFLIGHT -> runOmpPreflight(fixture)
         BenchmarkMode.OFFLINE -> runOffline(fixture, options)
         BenchmarkMode.CODEX -> runCodex(fixture, options, input)
+        BenchmarkMode.DIAGNOSTIC -> runCodexDiagnostic(fixture, options, input)
     }
 }
 
@@ -215,6 +217,66 @@ private suspend fun runCodex(
     }
 }
 
+internal const val APPROVED_DIAGNOSTIC_BODY_SHA256 =
+    "05b0b60cae7052872e48a425e501eff943f67f04b2e0691b04240e39ee2f38a3"
+internal const val APPROVED_DIAGNOSTIC_ROUTING_SUMMARY =
+    "OMP routing: profile=unset (OMP default profile); config=benchmark fallback-only overlay; " +
+        "inherited PI_CONFIG_FILES is not set; other inherited environment is preserved. Account identity is not verified."
+
+internal fun isApprovedDiagnosticTarget(bodySha256: String, routingSummary: String): Boolean =
+    bodySha256 == APPROVED_DIAGNOSTIC_BODY_SHA256 && routingSummary == APPROVED_DIAGNOSTIC_ROUTING_SUMMARY
+
+private suspend fun runCodexDiagnostic(
+    fixture: ImportBenchmarkFixture,
+    options: BenchmarkOptions,
+    input: BenchmarkConsoleInput,
+) {
+    check(options.allowCodexEgress) { "Diagnostic mode requires --allow-codex-egress." }
+    check(options.chatEgressConsent) { "Diagnostic mode requires separate chat egress consent." }
+    var activeSession: OmpAuthGatewaySession? = null
+    try {
+        val runner = ImportBenchmarkRunner(
+            fixture = fixture,
+            gatewayForRun = { repetition ->
+                check(repetition == 1) { "One-completion diagnostic cannot start another repetition." }
+                val session = OmpAuthGatewaySession.open(
+                    modelSelector = fixture.modelSelector,
+                    reasoningEffort = fixture.reasoningEffort,
+                    approveFirstRequest = CodexRequestApproval { body, fingerprint, routingSummary ->
+                        if (!isApprovedDiagnosticTarget(fingerprint, routingSummary)) {
+                            println("Diagnostic request body or OMP route differs from the approved target; no request sent.")
+                            false
+                        } else {
+                            println("Одноразовая диагностика; маршрут OMP: $routingSummary")
+                            println("Точный provider-facing request перед отправкой; SHA-256: $fingerprint")
+                            println(body)
+                            println("Введите SEND, чтобы отправить ровно один completion; любой другой ввод отменит диагностику.")
+                            input.readLine() == "SEND"
+                        }
+                    },
+                )
+                activeSession = session
+                OneCompletionDiagnosticGateway(session.gateway(), session.gateway())
+            },
+            confirmPreview = { _, _ ->
+                throw IllegalStateException("One-completion diagnostic unexpectedly reached preview.")
+            },
+            emit = ::println,
+        )
+        try {
+            runner.run(1)
+            throw IllegalStateException("One-completion diagnostic unexpectedly completed scoring.")
+        } catch (error: ImportBenchmarkModelRequestException) {
+            println(
+                "Одноразовая диагностика остановлена до preview/scoring/report: " +
+                    (error.safeSummary ?: "provider details omitted"),
+            )
+        }
+    } finally {
+        activeSession?.let { session -> runCatching(session::close) }
+    }
+}
+
 private fun writeReport(
     mode: String,
     fixture: ImportBenchmarkFixture,
@@ -259,10 +321,34 @@ private class PayloadInspectionGateway(
         throw ImportBenchmarkPayloadPreviewException(pretty, fingerprint)
     }
 }
+internal class OneCompletionDiagnosticGateway(
+    private val delegate: ChatCompletionGateway,
+    private val requestAuthorizer: PreCompletionRequestAuthorizer,
+) : ChatCompletionGateway, PreCompletionRequestAuthorizer {
+    private val completionAttempted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    override val contextWindowTokens: Int?
+        get() = delegate.contextWindowTokens
+
+    override val maxOutputTokens: Int?
+        get() = delegate.maxOutputTokens
+
+    override suspend fun authorizeBeforeCompletion(request: ChatCompletionRequest) {
+        requestAuthorizer.authorizeBeforeCompletion(request)
+    }
+
+    override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+        check(completionAttempted.compareAndSet(false, true)) {
+            "One-completion diagnostic already used."
+        }
+        delegate.complete(request)
+        throw OmpGatewayDiagnosticCompletedException()
+    }
+}
 
 private class CliArgumentException(message: String) : IllegalArgumentException(message)
 
-internal enum class BenchmarkMode { INSPECT, PREFLIGHT, OFFLINE, CODEX }
+internal enum class BenchmarkMode { INSPECT, PREFLIGHT, OFFLINE, CODEX, DIAGNOSTIC }
 
 internal data class BenchmarkOptions(
     val mode: BenchmarkMode,
@@ -286,7 +372,10 @@ internal data class BenchmarkOptions(
                             "preflight" -> BenchmarkMode.PREFLIGHT
                             "offline" -> BenchmarkMode.OFFLINE
                             "codex" -> BenchmarkMode.CODEX
-                            else -> throw CliArgumentException("Допустимы режимы inspect, preflight, offline и codex.")
+                            "diagnostic" -> BenchmarkMode.DIAGNOSTIC
+                            else -> throw CliArgumentException(
+                                "Допустимы режимы inspect, preflight, offline, diagnostic и codex.",
+                            )
                         }
                     }
                     arg == "--allow-codex-egress" -> {
@@ -309,22 +398,23 @@ internal data class BenchmarkOptions(
                 }
             }
             val selectedMode = mode ?: throw CliArgumentException("Задайте --mode.")
-            if (selectedMode == BenchmarkMode.CODEX && !allowCodexEgress) {
-                throw CliArgumentException("Codex mode требует отдельный флаг --allow-codex-egress.")
+            val requiresCodexEgress = selectedMode in setOf(BenchmarkMode.CODEX, BenchmarkMode.DIAGNOSTIC)
+            if (requiresCodexEgress && !allowCodexEgress) {
+                throw CliArgumentException("Codex/diagnostic mode требует --allow-codex-egress.")
             }
-            if (selectedMode == BenchmarkMode.CODEX && !chatEgressConsent) {
-                throw CliArgumentException(
-                    "--chat-egress-consent допустим только после отдельного согласия на egress в чате.",
-                )
+            if (requiresCodexEgress && !chatEgressConsent) {
+                throw CliArgumentException("--chat-egress-consent требует отдельного согласия на egress в чате.")
             }
-            if (selectedMode != BenchmarkMode.CODEX && allowCodexEgress) {
-                throw CliArgumentException("--allow-codex-egress разрешён только с --mode=codex.")
+            if (!requiresCodexEgress && allowCodexEgress) {
+                throw CliArgumentException("--allow-codex-egress разрешён только в mode codex или diagnostic.")
             }
-            if (selectedMode != BenchmarkMode.CODEX && chatEgressConsent) {
-                throw CliArgumentException("--chat-egress-consent разрешён только с --mode=codex.")
+            if (!requiresCodexEgress && chatEgressConsent) {
+                throw CliArgumentException("--chat-egress-consent разрешён только в mode codex или diagnostic.")
             }
-            if (selectedMode in setOf(BenchmarkMode.INSPECT, BenchmarkMode.PREFLIGHT) && reportPath != null) {
-                throw CliArgumentException("Inspect/preflight не создают отчёты.")
+            if (selectedMode in setOf(BenchmarkMode.INSPECT, BenchmarkMode.PREFLIGHT, BenchmarkMode.DIAGNOSTIC) &&
+                reportPath != null
+            ) {
+                throw CliArgumentException("Inspect/preflight/diagnostic не создают отчёты.")
             }
             return BenchmarkOptions(selectedMode, allowCodexEgress, chatEgressConsent, reportPath)
         }

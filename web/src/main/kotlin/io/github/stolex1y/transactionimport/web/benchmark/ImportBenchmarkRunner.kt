@@ -379,6 +379,14 @@ private class BenchmarkProviderFailureGuard(
     }
 
     private fun safeFailureSummary(error: Throwable): String {
+        if (error is OmpGatewayDiagnosticCompletedException) {
+            return "One-completion diagnostic matched catalog model ID gpt-6-luna; scoring stopped by design"
+        }
+        if (error is OmpGatewayModelMismatchException) {
+            return error.safeReportedModelId?.let {
+                "OMP response model ID $it did not match expected catalog ID gpt-6-luna"
+            } ?: "OMP response model ID was not allowlisted; raw response omitted"
+        }
         if (error is OmpGatewayHttpStatusException) {
             return "OMP returned HTTP ${error.status}; raw provider response omitted"
         }

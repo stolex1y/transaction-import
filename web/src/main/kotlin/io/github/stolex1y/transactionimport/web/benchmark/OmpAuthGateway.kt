@@ -155,8 +155,8 @@ internal class OmpStdioChatCompletionGateway(
         val actualModel = responseBody["model"]?.jsonPrimitive?.contentOrNull
             ?.takeIf(String::isNotBlank)
             ?: throw IllegalStateException("OMP stdio gateway response omitted its model id.")
-        check(responseModelMatches(modelSelector, actualModel)) {
-            "OMP stdio gateway response named an unexpected model; benchmark stopped."
+        if (!responseModelMatches(modelSelector, actualModel)) {
+            throw OmpGatewayModelMismatchException(safeResponseModelId(actualModel))
         }
         responseModels += actualModel
         requestFingerprints += fingerprint
@@ -400,6 +400,13 @@ internal class OmpGatewayHttpStatusException(
 ) : IllegalStateException(
     "OMP stdio gateway returned HTTP $status; raw provider response omitted.",
 )
+internal class OmpGatewayModelMismatchException(
+    val safeReportedModelId: String?,
+) : IllegalStateException("OMP stdio gateway response named an unexpected model; benchmark stopped.")
+internal class OmpGatewayDiagnosticCompletedException : IllegalStateException(
+    "One-completion diagnostic received a catalog-matched response; scoring intentionally stopped.",
+)
+
 
 internal object OmpFallbackPolicy {
     fun overlay(modelSelector: String): String {
@@ -546,6 +553,13 @@ private fun responseModelMatches(selector: String, responseModel: String): Boole
 private const val APPROVED_MODEL_SELECTOR = "openai-codex/gpt-6-luna"
 private const val APPROVED_MODEL_ID = "gpt-6-luna"
 private const val APPROVED_REASONING_EFFORT = "medium"
+private val SAFE_MODEL_ID_PATTERN = Regex(
+    "(?:gpt-6-luna|openai-codex/gpt-6-luna)" +
+        "(?::(?:min|low|medium|high|xhigh|max)|-20[0-9]{2}-[0-9]{2}-[0-9]{2})?",
+)
+
+private fun safeResponseModelId(responseModel: String): String? =
+    responseModel.takeIf(SAFE_MODEL_ID_PATTERN::matches)
 
 private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
     .digest(value.toByteArray(StandardCharsets.UTF_8))

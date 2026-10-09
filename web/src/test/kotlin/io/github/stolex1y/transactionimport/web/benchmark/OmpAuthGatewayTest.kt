@@ -167,6 +167,46 @@ class OmpAuthGatewayTest {
     }
 
     @Test
+    fun modelMismatchExposesOnlyAllowlistedLunaIdentifiers() = runBlocking {
+        suspend fun mismatchFor(responseModel: String): OmpGatewayModelMismatchException {
+            val request = applicationRequest()
+            val gateway = OmpStdioChatCompletionGateway(
+                modelSelector = MODEL_SELECTOR,
+                reasoningEffort = REASONING_EFFORT,
+                connection = RecordingConnection(responseModel),
+                approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
+                routingSummary = "synthetic route",
+            )
+            gateway.initialize()
+            gateway.authorizeBeforeCompletion(request)
+            return assertFailsWith<OmpGatewayModelMismatchException> { gateway.complete(request) }
+        }
+
+        listOf(
+            "openai-codex/gpt-6-luna" to "openai-codex/gpt-6-luna",
+            "gpt-6-luna:medium" to "gpt-6-luna:medium",
+            "gpt-6-luna-2026-05-20" to "gpt-6-luna-2026-05-20",
+        ).forEach { (responseModel, expectedSafeId) ->
+            val failure = mismatchFor(responseModel)
+            assertEquals(expectedSafeId, failure.safeReportedModelId)
+            assertFalse(failure.message.orEmpty().contains(responseModel))
+        }
+
+        val rawMarker = "gpt-6-luna:medium RAW_PROVIDER_ERROR_MARKER"
+        val unsafeFailure = mismatchFor(rawMarker)
+        assertEquals(null, unsafeFailure.safeReportedModelId)
+        assertFalse(unsafeFailure.message.orEmpty().contains(rawMarker))
+
+        val unexpectedSuffix = "gpt-6-luna-secret-opaque"
+        val suffixedFailure = mismatchFor(unexpectedSuffix)
+        assertEquals(null, suffixedFailure.safeReportedModelId)
+        assertFalse(suffixedFailure.message.orEmpty().contains(unexpectedSuffix))
+
+        val unrelatedFailure = mismatchFor("other-provider/model")
+        assertEquals(null, unrelatedFailure.safeReportedModelId)
+    }
+
+    @Test
     fun followUpCompletionUsesRepeatApprovalWithoutAnotherPrompt() = runBlocking {
         val firstRequest = applicationRequest()
         val followUpRequest = firstRequest.copy(

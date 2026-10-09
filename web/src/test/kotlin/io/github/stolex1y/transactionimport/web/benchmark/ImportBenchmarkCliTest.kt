@@ -1,5 +1,11 @@
 package io.github.stolex1y.transactionimport.web.benchmark
 
+import io.github.stolex1y.transactionimport.core.ChatCompletionGateway
+import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
+import io.github.stolex1y.transactionimport.core.ChatCompletionResponse
+import io.github.stolex1y.transactionimport.core.RequestMessage
+import io.github.stolex1y.transactionimport.core.ThinkingOptions
+import io.github.stolex1y.transactionimport.web.PreCompletionRequestAuthorizer
 import java.io.BufferedReader
 import java.io.PipedReader
 import java.io.PipedWriter
@@ -45,6 +51,73 @@ class ImportBenchmarkCliTest {
         assertEquals(BenchmarkMode.CODEX, options.mode)
         assertTrue(options.allowCodexEgress)
         assertTrue(options.chatEgressConsent)
+    }
+
+    @Test
+    fun diagnosticModeRequiresSeparateEgressApprovalsAndCannotWriteReport() {
+        assertFailsWith<IllegalArgumentException> {
+            BenchmarkOptions.parse(arrayOf("--mode=diagnostic"))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BenchmarkOptions.parse(arrayOf("--mode=diagnostic", "--allow-codex-egress"))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BenchmarkOptions.parse(arrayOf("--mode=diagnostic", "--chat-egress-consent"))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BenchmarkOptions.parse(
+                arrayOf(
+                    "--mode=diagnostic",
+                    "--allow-codex-egress",
+                    "--chat-egress-consent",
+                    "--report=report.json",
+                ),
+            )
+        }
+
+        val options = BenchmarkOptions.parse(
+            arrayOf("--mode=diagnostic", "--allow-codex-egress", "--chat-egress-consent"),
+        )
+        assertEquals(BenchmarkMode.DIAGNOSTIC, options.mode)
+    }
+
+    @Test
+    fun diagnosticTargetRequiresExactApprovedBodyAndRoute() {
+        assertTrue(isApprovedDiagnosticTarget(
+            APPROVED_DIAGNOSTIC_BODY_SHA256,
+            APPROVED_DIAGNOSTIC_ROUTING_SUMMARY,
+        ))
+        assertFalse(isApprovedDiagnosticTarget("different-body", APPROVED_DIAGNOSTIC_ROUTING_SUMMARY))
+        assertFalse(isApprovedDiagnosticTarget(APPROVED_DIAGNOSTIC_BODY_SHA256, "different route"))
+    }
+
+    @Test
+    fun diagnosticGatewayStopsAfterOneCompletion() = runBlocking {
+        val request = ChatCompletionRequest(
+            model = "diagnostic-model",
+            messages = listOf(RequestMessage(role = "user", content = "diagnostic")),
+            thinking = ThinkingOptions(type = "disabled"),
+        )
+        var authorizationCalls = 0
+        var completionCalls = 0
+        val delegate = object : ChatCompletionGateway, PreCompletionRequestAuthorizer {
+            override suspend fun authorizeBeforeCompletion(request: ChatCompletionRequest) {
+                authorizationCalls += 1
+            }
+
+            override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+                completionCalls += 1
+                return ChatCompletionResponse()
+            }
+        }
+        val diagnostic = OneCompletionDiagnosticGateway(delegate, delegate)
+
+        diagnostic.authorizeBeforeCompletion(request)
+        assertFailsWith<OmpGatewayDiagnosticCompletedException> { diagnostic.complete(request) }
+        assertEquals(1, authorizationCalls)
+        assertEquals(1, completionCalls)
+        assertFailsWith<IllegalStateException> { diagnostic.complete(request) }
+        assertEquals(1, completionCalls)
     }
 
     @Test

@@ -201,6 +201,27 @@ class ImportBenchmarkRunnerTest {
     }
 
     @Test
+    fun modelMismatchSummaryUsesOnlyAllowlistedResponseId() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val failDuringPlanning: (ChatCompletionRequest) -> Boolean = { it.tools.orEmpty().isNotEmpty() }
+
+        assertProviderFailureStopsRun(
+            fixture = fixture,
+            providerError = OmpGatewayModelMismatchException("gpt-6-luna:medium"),
+            expectedSafeSummary = "OMP response model ID gpt-6-luna:medium did not match expected catalog ID gpt-6-luna",
+            expectedStage = "tool-planning",
+            failWhen = failDuringPlanning,
+        )
+        assertProviderFailureStopsRun(
+            fixture = fixture,
+            providerError = OmpGatewayModelMismatchException(null),
+            expectedSafeSummary = "OMP response model ID was not allowlisted; raw response omitted",
+            expectedStage = "tool-planning",
+            failWhen = failDuringPlanning,
+        )
+    }
+
+    @Test
     fun unknownOmpFailureMessageUsesGenericRedaction() = runBlocking {
         val fixture = ImportBenchmarkFixtureLoader.loadBundled()
         val rawMarker = "OMP stdio gateway unknown: RAW_PROVIDER_ERROR_MARKER"
