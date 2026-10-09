@@ -4,23 +4,29 @@ import io.github.stolex1y.transactionimport.core.ChatCompletionGateway
 import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.ChatCompletionResponse
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import java.io.BufferedReader
+import java.io.Closeable
 import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.Executors
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlin.system.exitProcess
 
 fun main(args: Array<String>) {
-    val input = BufferedReader(InputStreamReader(System.`in`, StandardCharsets.UTF_8))
+    val input = BenchmarkConsoleInput(BufferedReader(InputStreamReader(System.`in`, StandardCharsets.UTF_8)))
     try {
         runBlocking { runBenchmarkCli(args, input) }
     } catch (error: ImportBenchmarkPayloadPreviewException) {
+        println("Локальная OMP route policy до egress: ${safeRouteSummary()}")
         println("Точный первый provider-facing payload; он не отправлен:")
         println("SHA-256: ${error.fingerprint}")
         println(error.providerBody)
@@ -29,7 +35,10 @@ fun main(args: Array<String>) {
         println("Benchmark отменён. Preview не был подтверждён; временная база удалена.")
     } catch (error: CliArgumentException) {
         System.err.println(error.message)
-        System.err.println("Использование: --mode=inspect | --mode=preflight | --mode=offline | --mode=codex [--allow-codex-egress] [--report=PATH]")
+        System.err.println(
+            "Использование: --mode=inspect | --mode=preflight | --mode=offline | " +
+                "--mode=codex --allow-codex-egress --chat-egress-consent [--report=PATH]",
+        )
         exitProcess(2)
     } catch (error: OmpGatewayPreflightException) {
         System.err.println(
@@ -42,10 +51,44 @@ fun main(args: Array<String>) {
                 "содержимое запросов, ответов и fixture скрыто.",
         )
         exitProcess(1)
+    } finally {
+        input.close()
     }
 }
 
-private suspend fun runBenchmarkCli(args: Array<String>, input: BufferedReader) {
+internal class BenchmarkConsoleInput(
+    private val reader: BufferedReader,
+) : Closeable {
+    private val executor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "import-benchmark-console-input").apply { isDaemon = true }
+    }
+
+    suspend fun readLine(): String? = suspendCancellableCoroutine { continuation ->
+        val future = executor.submit<Unit> {
+            try {
+                val line = reader.readLine()
+                if (continuation.isActive) continuation.resume(line)
+            } catch (error: Exception) {
+                if (continuation.isActive) continuation.resumeWithException(error)
+            }
+            Unit
+        }
+        continuation.invokeOnCancellation { future.cancel(true) }
+    }
+
+    override fun close() {
+        executor.shutdownNow()
+        // System.in is borrowed; closing a reader blocked on terminal input can wait indefinitely.
+    }
+}
+
+private fun safeRouteSummary(): String = try {
+    OmpAuthGatewaySession.routingSummary(System.getenv())
+} catch (_: IllegalArgumentException) {
+    "OMP route policy cannot be safely displayed; preflight will fail."
+}
+
+private suspend fun runBenchmarkCli(args: Array<String>, input: BenchmarkConsoleInput) {
     val options = BenchmarkOptions.parse(args)
     val fixture = ImportBenchmarkFixtureLoader.loadBundled()
     when (options.mode) {
@@ -69,11 +112,12 @@ private suspend fun inspectFirstProviderRequest(fixture: ImportBenchmarkFixture)
 private suspend fun runOmpPreflight(fixture: ImportBenchmarkFixture) {
     val session = OmpAuthGatewaySession.open(
         modelSelector = fixture.modelSelector,
-        approveFirstRequest = CodexRequestApproval { _, _ -> false },
+        approveFirstRequest = CodexRequestApproval { _, _, _ -> false },
     )
     try {
         val metadata = session.metadata()
         println("OMP stdio gateway готов: ${metadata.gatewayVersion}.")
+        println(OmpAuthGatewaySession.routingSummary(System.getenv()))
         println("Fallback disabled; effective-настройки прошли локальную проверку до model request.")
         println("Временный overlay SHA-256: ${metadata.fallbackOverlaySha256}.")
         println("Model/API request не отправлялся; доступность selector без egress не подтверждалась.")
@@ -103,9 +147,10 @@ private suspend fun runOffline(
 private suspend fun runCodex(
     fixture: ImportBenchmarkFixture,
     options: BenchmarkOptions,
-    input: BufferedReader,
+    input: BenchmarkConsoleInput,
 ) {
     check(options.allowCodexEgress) { "Codex mode requires --allow-codex-egress." }
+    check(options.chatEgressConsent) { "Codex mode requires separate chat egress consent." }
     val gatewayMetadata = mutableListOf<OmpGatewayMetadata>()
     var activeSession: OmpAuthGatewaySession? = null
     try {
@@ -119,11 +164,14 @@ private suspend fun runCodex(
                 }
                 val session = OmpAuthGatewaySession.open(
                     modelSelector = fixture.modelSelector,
-                    approveFirstRequest = CodexRequestApproval { body, fingerprint ->
+                    approveFirstRequest = CodexRequestApproval { body, fingerprint, routingSummary ->
+                        println("Повтор $repetition: маршрут OMP: $routingSummary")
                         println("Повтор $repetition: точный provider-facing request перед отправкой")
                         println("SHA-256: $fingerprint")
                         println(body)
-                        println("Введите SEND для этой отправки; любой другой ввод остановит benchmark.")
+                        println(
+                            "Введите SEND только после отдельного согласия в чате; любой другой ввод остановит benchmark.",
+                        )
                         input.readLine() == "SEND"
                     },
                 )
@@ -210,12 +258,14 @@ internal enum class BenchmarkMode { INSPECT, PREFLIGHT, OFFLINE, CODEX }
 internal data class BenchmarkOptions(
     val mode: BenchmarkMode,
     val allowCodexEgress: Boolean,
+    val chatEgressConsent: Boolean,
     val reportPath: Path?,
 ) {
     companion object {
         fun parse(args: Array<String>): BenchmarkOptions {
             var mode: BenchmarkMode? = null
             var allowCodexEgress = false
+            var chatEgressConsent = false
             var reportPath: Path? = null
             val seen = mutableSetOf<String>()
             args.forEach { arg ->
@@ -234,6 +284,12 @@ internal data class BenchmarkOptions(
                         if (!seen.add("egress")) throw CliArgumentException("--allow-codex-egress задан повторно.")
                         allowCodexEgress = true
                     }
+                    arg == "--chat-egress-consent" -> {
+                        if (!seen.add("chat-egress-consent")) {
+                            throw CliArgumentException("--chat-egress-consent задан повторно.")
+                        }
+                        chatEgressConsent = true
+                    }
                     arg.startsWith("--report=") -> {
                         if (!seen.add("report")) throw CliArgumentException("--report задан повторно.")
                         val path = arg.removePrefix("--report=").takeIf(String::isNotBlank)
@@ -247,18 +303,26 @@ internal data class BenchmarkOptions(
             if (selectedMode == BenchmarkMode.CODEX && !allowCodexEgress) {
                 throw CliArgumentException("Codex mode требует отдельный флаг --allow-codex-egress.")
             }
+            if (selectedMode == BenchmarkMode.CODEX && !chatEgressConsent) {
+                throw CliArgumentException(
+                    "--chat-egress-consent допустим только после отдельного согласия на egress в чате.",
+                )
+            }
             if (selectedMode != BenchmarkMode.CODEX && allowCodexEgress) {
                 throw CliArgumentException("--allow-codex-egress разрешён только с --mode=codex.")
+            }
+            if (selectedMode != BenchmarkMode.CODEX && chatEgressConsent) {
+                throw CliArgumentException("--chat-egress-consent разрешён только с --mode=codex.")
             }
             if (selectedMode in setOf(BenchmarkMode.INSPECT, BenchmarkMode.PREFLIGHT) && reportPath != null) {
                 throw CliArgumentException("Inspect/preflight не создают отчёты.")
             }
-            return BenchmarkOptions(selectedMode, allowCodexEgress, reportPath)
+            return BenchmarkOptions(selectedMode, allowCodexEgress, chatEgressConsent, reportPath)
         }
     }
 }
 
-private class ImportBenchmarkPayloadPreviewException(
+internal class ImportBenchmarkPayloadPreviewException(
     val providerBody: String,
     val fingerprint: String,
 ) : IllegalStateException("Provider payload preview captured without sending a request.")

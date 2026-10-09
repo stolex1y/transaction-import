@@ -36,7 +36,7 @@ class ImportBenchmarkReportTest {
                 fallbackOverlaySha256 = "a".repeat(64),
                 requestCount = 1,
                 requestFingerprints = listOf("b".repeat(64)),
-                responseModels = listOf("gpt-6-luna"),
+                responseModels = listOf(fixture.modelSelector),
             ),
         )
 

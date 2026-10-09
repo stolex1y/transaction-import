@@ -227,6 +227,10 @@ sealed class NativeMcpHandlingResult {
 }
 
 
+internal interface PreCompletionRequestAuthorizer {
+    suspend fun authorizeBeforeCompletion(request: ChatCompletionRequest)
+}
+
 class NativeMcpAgent(
     private val agent: io.github.stolex1y.transactionimport.core.SmartExpenseAgent,
     private val gatewayResolver: AgentGatewayResolver,
@@ -522,15 +526,15 @@ suspend fun handle(
                     "операции не импортированы.",
             )
         }
+        val completionRequest = request(
+            config = state.session.config,
+            gateway = gateway,
+            messages = messages,
+            tools = functionDefinitions,
+        )
+        (gateway as? PreCompletionRequestAuthorizer)?.authorizeBeforeCompletion(completionRequest)
         response = withTimeout(loopConfig.callTimeoutMs) {
-            gateway.complete(
-                request(
-                    config = state.session.config,
-                    gateway = gateway,
-                    messages = messages,
-                    tools = functionDefinitions,
-                ),
-            )
+            gateway.complete(completionRequest)
         }
         iterations += 1
         val message = response.choices.firstOrNull()?.message

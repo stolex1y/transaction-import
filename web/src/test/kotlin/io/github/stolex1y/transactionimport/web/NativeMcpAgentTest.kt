@@ -19,6 +19,7 @@ import io.github.stolex1y.transactionimport.core.ReceiptStatus
 import io.github.stolex1y.transactionimport.core.ConfirmedDecisionScope
 import io.github.stolex1y.transactionimport.core.Usage
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -218,6 +219,74 @@ class NativeMcpAgentTest {
             database.deleteIfExists()
         }
     }
+    @Test
+    fun preCompletionAuthorizationDoesNotConsumeModelCallDeadline() = runBlocking {
+        val database = Files.createTempFile("native-precompletion-auth-", ".sqlite")
+        try {
+            var authorized = false
+            var completed = false
+            val gateway = object : ChatCompletionGateway, PreCompletionRequestAuthorizer {
+                override suspend fun authorizeBeforeCompletion(request: ChatCompletionRequest) {
+                    assertTrue(request.messages.isNotEmpty())
+                    delay(1_100)
+                    authorized = true
+                }
+
+                override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+                    assertTrue(authorized)
+                    completed = true
+                    val promptTokens = request.messages.sumOf { it.content.length }
+                    return ChatCompletionResponse(
+                        choices = listOf(
+                            ChatChoice(
+                                message = ResponseMessage(content = "plain response"),
+                                finishReason = "stop",
+                            ),
+                        ),
+                        usage = Usage(
+                            promptTokens = promptTokens,
+                            completionTokens = 1,
+                            totalTokens = promptTokens + 1,
+                        ),
+                    )
+                }
+            }
+            val dependencies = fakeAgentDependencies(database.toString(), gateway)
+            val runtime = dependencies.runtimeConfig.copy(
+                mcpToolLoop = McpToolLoopConfig(
+                    enabled = true,
+                    maxIterations = 2,
+                    maxToolCalls = 2,
+                    callTimeoutMs = 1_000,
+                ),
+            )
+            val native = NativeMcpAgent(
+                agent = dependencies.agent,
+                gatewayResolver = AgentGatewayResolver { gateway },
+                mcpTools = FakeNativeMcpProvider(),
+                runtimeConfig = runtime,
+                dateContextProvider = { NativeMcpDateContext("2026-09-30", "UTC") },
+            )
+            val session = dependencies.agent.createSession(
+                title = "Pre-completion authorization",
+                config = runtime.defaultAgentConfig(),
+                contextManagement = runtime.sessionContextManagement(),
+            )
+
+            val result = native.handle(
+                sessionId = session.session.id,
+                expectedRevision = session.session.revision,
+                text = "Привет",
+            )
+
+            assertIs<NativeMcpHandlingResult.NotHandled>(result)
+            assertTrue(authorized)
+            assertTrue(completed)
+        } finally {
+            database.deleteIfExists()
+        }
+    }
+
     @Test
     fun receiptQuestionDoesNotStartAssociationOrMutateDraft() = runBlocking {
         val database = Files.createTempFile("native-receipt-question-", ".sqlite")

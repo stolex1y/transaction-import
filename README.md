@@ -855,6 +855,96 @@ provider при ошибке runtime.
 ./gradlew :web:browserTest
 ```
 
+### Изолированный benchmark импорта на Codex
+
+Benchmark использует только одобренный scrubbed fixture за сентябрь 2026 года.
+Обычные `./gradlew test` и CI остаются offline. Режимы запускаются отдельной
+Gradle-командой:
+
+```bash
+# Показать первый provider-facing payload; запрос не отправляется
+./gradlew :web:benchmarkImport --args='--mode=inspect'
+
+# Проверить локальные OMP-настройки и готовность stdio gateway без model request
+./gradlew :web:benchmarkImport --args='--mode=preflight'
+
+# Проверить production pipeline на локальных fake-ответах
+./gradlew :web:benchmarkImport --args='--mode=offline'
+```
+
+`inspect` проходит локальный `NativeMcpAgent`/replay до первого model request и
+печатает точный provider-facing body, SHA-256 и предполагаемую OMP route policy;
+OMP process и сеть не запускаются. Profile и account identity этим не
+подтверждаются. Payload содержит scrubbed fixture data и application
+messages/tools; вывод предназначен только для локальной проверки и не должен
+копироваться в публичные логи.
+
+`preflight` через `omp config get` проверяет отключённый fallback, показывает
+эффективную OMP route policy и запускает stdio gateway только до readiness.
+Completion request не отправляется. Ожидание readiness ограничено 30 секундами;
+при timeout/cancellation локальный child завершается, временный overlay
+удаляется. Локальный model catalog содержит base id `openai-codex/gpt-6-luna`,
+но `:min` и доступность модели аккаунту preflight не доказывает; account
+identity остаётся неподтверждённой.
+
+`offline` выполняет три изолированных fake-повтора через production pipeline.
+Каждый preview автоматически подтверждается только в одноразовой SQLite DB,
+чтобы production `confirm()` вычислил inclusion; DB удаляется после scoring.
+Это проверяет путь, но не качество Codex. Отчёт содержит только метрики,
+fingerprints и metadata, без prompt, ответов модели, merchant values и IDs.
+По умолчанию отчёт создаётся в `web/build/reports/import-benchmark/`;
+`--report=PATH` не перезаписывает существующий файл.
+
+Codex egress остаётся заблокирован до отдельного явного согласия пользователя в
+чате после проверки точного payload и route policy. Только после такого
+согласия запускайте команду с двумя отдельными CLI flags:
+
+Перед egress учитывайте: первый body содержит application prompt и tools;
+последующие model rounds могут включать scrubbed результаты replay — операции
+и чеки из approved fixture. Локальный proxy не контролирует retention prompts
+и responses выбранным ChatGPT/OpenAI аккаунтом; OMP account identity остаётся
+неподтверждённой. Запускайте benchmark только если принимаете эту передачу и
+риск хранения данных на стороне провайдера.
+
+```bash
+./gradlew :web:benchmarkImport --args='--mode=codex --allow-codex-egress --chat-egress-consent'
+```
+
+`--chat-egress-consent` — дополнительное заявление оператора; CLI не читает и
+не проверяет переписку. Сам по себе этот flag не заменяет согласие в чате.
+
+Используется строго `openai-codex/gpt-6-luna:min` через `omp auth-gateway
+stdio`; OMP AgentSession, его prompt, tools и session не запускаются. Child
+process заменяет унаследованный `PI_CONFIG_FILES` единственным временным
+fallback-only overlay; OMP auth profile остаётся доступным, но настройки,
+существовавшие только в `PI_CONFIG_FILES` (включая возможный account routing),
+не применяются. Если выбор аккаунта зависит от таких настроек, egress не
+разрешайте, пока не согласован безопасный способ выбора.
+
+Перед первым provider request каждого повтора CLI печатает точный body и
+эффективную route policy и требует `SEND`; ввод не входит в model-call timeout,
+а отмена завершает локальный OMP process без отправки запроса. Пользователь
+видит scrubbed данные до отправки. Остальные model rounds того же повтора не
+показываются по одному, но выполняются в границах отдельного chat consent и
+первого `SEND`. После каждого preview CLI показывает counts и требует отдельный
+`CONFIRM`; только потом production `confirm()` создаёт draft во временной DB,
+которая удаляется после оценки. Три повтора создают три отдельные DB/session и
+OMP gateway.
+
+Fallback и usage-aware fallback отключаются временным config overlay и
+проверяются через `omp config get`; любая ошибка прекращает benchmark.
+Ответ provider должен строго совпадать с `openai-codex/gpt-6-luna:min`.
+Unsuffixed base ID отклоняется и не доказывает доступность выбранного варианта;
+локальный catalog показывает только base ID. Доступность `:min` проверяется
+лишь первым согласованным completion. Если selector или account authorization
+отклонены, первый payload всё равно мог быть передан наружу. У чеков нет
+accuracy: пользовательских receipt-link labels пока нет.
+
+Benchmark диагностический; он не является release gate и не добавляет
+merchant/category mappings или product rules. Категория оценивается только по
+четырём вручную размеченным операциям.
+
+
 `LocalProviderAcceptanceBrowserTest` содержит browser journeys для local-provider
 import/failure, сравнения DeepSeek и Ollama в отдельных сессиях через два
 loopback fake и отдельный opt-in smoke реальной модели. Fake acceptance задаёт

@@ -23,6 +23,8 @@ import io.github.stolex1y.transactionimport.web.NativeMcpDateContext
 import io.github.stolex1y.transactionimport.web.NativeMcpHandlingResult
 import io.github.stolex1y.transactionimport.web.McpPreview
 import io.github.stolex1y.transactionimport.web.ReceiptMatchingStageStatus
+import io.github.stolex1y.transactionimport.web.PreCompletionRequestAuthorizer
+
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicReference
@@ -305,7 +307,7 @@ internal class ImportBenchmarkCancelledException : IllegalStateException("Benchm
 
 private class BenchmarkProviderFailureGuard(
     private val delegate: ChatCompletionGateway,
-) : ChatCompletionGateway {
+) : ChatCompletionGateway, PreCompletionRequestAuthorizer {
     private val failedStage = AtomicReference<String?>(null)
     private val failed = AtomicBoolean(false)
 
@@ -315,26 +317,49 @@ private class BenchmarkProviderFailureGuard(
     override val maxOutputTokens: Int?
         get() = delegate.maxOutputTokens
 
+    override suspend fun authorizeBeforeCompletion(request: ChatCompletionRequest) {
+        if (failed.get()) throw ImportBenchmarkModelRequestException(failedStage.get())
+        val authorizer = delegate as? PreCompletionRequestAuthorizer ?: return
+        try {
+            authorizer.authorizeBeforeCompletion(request)
+        } catch (error: ImportBenchmarkPayloadPreviewException) {
+            throw error
+        } catch (error: ImportBenchmarkCancelledException) {
+            throw error
+        } catch (error: CancellationException) {
+            if (!currentCoroutineContext().isActive) throw error
+            throw recordFailure(request)
+        } catch (_: Exception) {
+            throw recordFailure(request)
+        }
+    }
+
     override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse =
         if (failed.get()) {
             throw ImportBenchmarkModelRequestException(failedStage.get())
         } else {
             try {
                 delegate.complete(request)
+            } catch (error: ImportBenchmarkPayloadPreviewException) {
+                throw error
+            } catch (error: ImportBenchmarkCancelledException) {
+                throw error
             } catch (error: CancellationException) {
                 if (!currentCoroutineContext().isActive) throw error
-                failedStage.compareAndSet(null, safeRequestStage(request))
-                failed.set(true)
-                throw ImportBenchmarkModelRequestException(failedStage.get())
+                throw recordFailure(request)
             } catch (_: Exception) {
-                failedStage.compareAndSet(null, safeRequestStage(request))
-                failed.set(true)
-                throw ImportBenchmarkModelRequestException(failedStage.get())
+                throw recordFailure(request)
             }
         }
 
     fun throwIfFailed() {
         if (failed.get()) throw ImportBenchmarkModelRequestException(failedStage.get())
+    }
+
+    private fun recordFailure(request: ChatCompletionRequest): ImportBenchmarkModelRequestException {
+        failedStage.compareAndSet(null, safeRequestStage(request))
+        failed.set(true)
+        return ImportBenchmarkModelRequestException(failedStage.get())
     }
 
     private fun safeRequestStage(request: ChatCompletionRequest): String {
