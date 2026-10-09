@@ -1,5 +1,9 @@
 package io.github.stolex1y.transactionimport.web.benchmark
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -37,7 +41,7 @@ class ImportBenchmarkReportTest {
                 fallbackOverlaySha256 = "a".repeat(64),
                 requestCount = 1,
                 requestFingerprints = listOf("b".repeat(64)),
-                responseModels = listOf("gpt-6-luna"),
+                responseModels = listOf("openai-codex/gpt-6-luna"),
             ),
         )
 
@@ -49,6 +53,10 @@ class ImportBenchmarkReportTest {
             generatedAt = "2026-10-14T12:00:00Z",
         )
 
+        val reportedResponseModel = Json.parseToJsonElement(report)
+            .jsonObject.getValue("runs").jsonArray.single().jsonObject
+            .getValue("gateway").jsonObject.getValue("responseModels").jsonArray.single().jsonPrimitive.content
+        assertEquals("openai-codex/gpt-6-luna", reportedResponseModel)
         assertTrue(report.contains(fixture.modelSelector))
         assertTrue(report.contains("reasoningEffort"))
         assertTrue(report.contains("medium"))

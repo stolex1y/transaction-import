@@ -256,7 +256,11 @@ private suspend fun runCodexDiagnostic(
                     },
                 )
                 activeSession = session
-                OneCompletionDiagnosticGateway(session.gateway(), session.gateway())
+                OneCompletionDiagnosticGateway(
+                    delegate = session.gateway(),
+                    requestAuthorizer = session.gateway(),
+                    responseModelAfterCompletion = { session.metadata().responseModels.lastOrNull() },
+                )
             },
             confirmPreview = { _, _ ->
                 throw IllegalStateException("One-completion diagnostic unexpectedly reached preview.")
@@ -324,6 +328,7 @@ private class PayloadInspectionGateway(
 internal class OneCompletionDiagnosticGateway(
     private val delegate: ChatCompletionGateway,
     private val requestAuthorizer: PreCompletionRequestAuthorizer,
+    private val responseModelAfterCompletion: () -> String?,
 ) : ChatCompletionGateway, PreCompletionRequestAuthorizer {
     private val completionAttempted = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -342,7 +347,7 @@ internal class OneCompletionDiagnosticGateway(
             "One-completion diagnostic already used."
         }
         delegate.complete(request)
-        throw OmpGatewayDiagnosticCompletedException()
+        throw OmpGatewayDiagnosticCompletedException(responseModelAfterCompletion())
     }
 }
 

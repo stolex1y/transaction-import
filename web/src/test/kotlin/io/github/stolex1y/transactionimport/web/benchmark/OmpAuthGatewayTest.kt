@@ -83,6 +83,25 @@ class OmpAuthGatewayTest {
     }
 
     @Test
+    fun exactSelectorResponseModelIsAcceptedAndPreserved() = runBlocking {
+        val request = applicationRequest()
+        val gateway = OmpStdioChatCompletionGateway(
+            modelSelector = MODEL_SELECTOR,
+            reasoningEffort = REASONING_EFFORT,
+            connection = RecordingConnection(MODEL_SELECTOR),
+            approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
+            routingSummary = "synthetic route",
+        )
+        gateway.initialize()
+        gateway.authorizeBeforeCompletion(request)
+
+        val response = gateway.complete(request)
+
+        assertEquals("synthetic response", response.choices.single().message.content)
+        assertEquals(listOf(MODEL_SELECTOR), gateway.metadata("overlay-hash").responseModels)
+    }
+
+    @Test
     fun nonSuccessResponseExposesStatusWithoutProviderBody() = runBlocking {
         val connection = RecordingConnection(
             responseStatus = 401,
@@ -141,12 +160,12 @@ class OmpAuthGatewayTest {
     }
 
     @Test
-    fun responseModelMustMatchCatalogModelId() = runBlocking {
+    fun responseModelMustMatchApprovedIdentity() = runBlocking {
         listOf(
             null,
             "openai-codex/other-model",
             "other-provider/gpt-6-luna",
-            "openai-codex/gpt-6-luna",
+            "openai-codex/gpt-6-luna:medium",
             "gpt-6-luna:medium",
             "gpt-6-luna-high",
         ).forEach { responseModel ->
@@ -183,7 +202,7 @@ class OmpAuthGatewayTest {
         }
 
         listOf(
-            "openai-codex/gpt-6-luna" to "openai-codex/gpt-6-luna",
+            "openai-codex/gpt-6-luna:medium" to "openai-codex/gpt-6-luna:medium",
             "gpt-6-luna:medium" to "gpt-6-luna:medium",
             "gpt-6-luna-2026-05-20" to "gpt-6-luna-2026-05-20",
         ).forEach { (responseModel, expectedSafeId) ->

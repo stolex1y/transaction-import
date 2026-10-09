@@ -201,7 +201,7 @@ class ImportBenchmarkRunnerTest {
     }
 
     @Test
-    fun modelMismatchSummaryUsesOnlyAllowlistedResponseId() = runBlocking {
+    fun modelIdentitySummaryUsesOnlyAllowlistedResponseIds() = runBlocking {
         val fixture = ImportBenchmarkFixtureLoader.loadBundled()
         val failDuringPlanning: (ChatCompletionRequest) -> Boolean = { it.tools.orEmpty().isNotEmpty() }
 
@@ -217,6 +217,24 @@ class ImportBenchmarkRunnerTest {
             providerError = OmpGatewayModelMismatchException(null),
             expectedSafeSummary = "OMP response model ID was not allowlisted; raw response omitted",
             expectedStage = "tool-planning",
+            failWhen = failDuringPlanning,
+        )
+        assertProviderFailureStopsRun(
+            fixture = fixture,
+            providerError = OmpGatewayDiagnosticCompletedException("openai-codex/gpt-6-luna"),
+            expectedSafeSummary =
+                "One-completion diagnostic accepted exact response alias openai-codex/gpt-6-luna; scoring stopped by design",
+            expectedStage = "tool-planning",
+            failWhen = failDuringPlanning,
+        )
+        val rawMarker = "gpt-6-luna-SECRET_MARKER"
+        assertProviderFailureStopsRun(
+            fixture = fixture,
+            providerError = OmpGatewayDiagnosticCompletedException(rawMarker),
+            expectedSafeSummary =
+                "One-completion diagnostic completed; response model ID omitted; scoring stopped by design",
+            expectedStage = "tool-planning",
+            rawMarker = rawMarker,
             failWhen = failDuringPlanning,
         )
     }

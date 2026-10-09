@@ -110,10 +110,11 @@ class ImportBenchmarkCliTest {
                 return ChatCompletionResponse()
             }
         }
-        val diagnostic = OneCompletionDiagnosticGateway(delegate, delegate)
+        val diagnostic = OneCompletionDiagnosticGateway(delegate, delegate) { "openai-codex/gpt-6-luna" }
 
         diagnostic.authorizeBeforeCompletion(request)
-        assertFailsWith<OmpGatewayDiagnosticCompletedException> { diagnostic.complete(request) }
+        val completion = assertFailsWith<OmpGatewayDiagnosticCompletedException> { diagnostic.complete(request) }
+        assertEquals("openai-codex/gpt-6-luna", completion.safeReportedModelId)
         assertEquals(1, authorizationCalls)
         assertEquals(1, completionCalls)
         assertFailsWith<IllegalStateException> { diagnostic.complete(request) }

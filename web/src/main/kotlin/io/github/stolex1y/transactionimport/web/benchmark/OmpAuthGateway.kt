@@ -403,8 +403,11 @@ internal class OmpGatewayHttpStatusException(
 internal class OmpGatewayModelMismatchException(
     val safeReportedModelId: String?,
 ) : IllegalStateException("OMP stdio gateway response named an unexpected model; benchmark stopped.")
-internal class OmpGatewayDiagnosticCompletedException : IllegalStateException(
-    "One-completion diagnostic received a catalog-matched response; scoring intentionally stopped.",
+
+internal class OmpGatewayDiagnosticCompletedException(
+    val safeReportedModelId: String?,
+) : IllegalStateException(
+    "One-completion diagnostic received an accepted response model ID; scoring intentionally stopped.",
 )
 
 
@@ -548,7 +551,8 @@ internal class ProcessOmpJsonLineConnection(
 }
 
 private fun responseModelMatches(selector: String, responseModel: String): Boolean =
-    selector == APPROVED_MODEL_SELECTOR && responseModel == APPROVED_MODEL_ID
+    selector == APPROVED_MODEL_SELECTOR &&
+        (responseModel == APPROVED_MODEL_ID || responseModel == APPROVED_MODEL_SELECTOR)
 
 private const val APPROVED_MODEL_SELECTOR = "openai-codex/gpt-6-luna"
 private const val APPROVED_MODEL_ID = "gpt-6-luna"

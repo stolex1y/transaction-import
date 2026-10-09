@@ -380,7 +380,13 @@ private class BenchmarkProviderFailureGuard(
 
     private fun safeFailureSummary(error: Throwable): String {
         if (error is OmpGatewayDiagnosticCompletedException) {
-            return "One-completion diagnostic matched catalog model ID gpt-6-luna; scoring stopped by design"
+            return when (error.safeReportedModelId) {
+                "gpt-6-luna" ->
+                    "One-completion diagnostic matched catalog model ID gpt-6-luna; scoring stopped by design"
+                "openai-codex/gpt-6-luna" ->
+                    "One-completion diagnostic accepted exact response alias openai-codex/gpt-6-luna; scoring stopped by design"
+                else -> "One-completion diagnostic completed; response model ID omitted; scoring stopped by design"
+            }
         }
         if (error is OmpGatewayModelMismatchException) {
             return error.safeReportedModelId?.let {
