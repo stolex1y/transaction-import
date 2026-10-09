@@ -153,6 +153,32 @@ class ImportBenchmarkCliTest {
         error.stackTrace = arrayOf(StackTraceElement("untrusted.Provider", "call", "Provider.kt", 1))
         assertEquals("IllegalArgumentException", safeBenchmarkFailureLabel(error))
     }
+
+    @Test
+    fun safeFailureLabelMapsKnownReplayMessagesAndDropsUnknownMessage() {
+        val frame = StackTraceElement(
+            "io.github.stolex1y.transactionimport.web.benchmark.ImportBenchmarkReplay",
+            "listTransactions",
+            "ImportBenchmarkReplay.kt",
+            99,
+        )
+        val known = IllegalArgumentException("Benchmark replay rejected an unknown account reference.").apply {
+            stackTrace = arrayOf(frame)
+        }
+        val unknown = IllegalArgumentException("raw account-alias value is private").apply {
+            stackTrace = arrayOf(frame)
+        }
+
+        assertEquals(
+            "IllegalArgumentException at ImportBenchmarkReplay.listTransactions (replay rejected account reference)",
+            safeBenchmarkFailureLabel(known),
+        )
+        assertEquals(
+            "IllegalArgumentException at ImportBenchmarkReplay.listTransactions",
+            safeBenchmarkFailureLabel(unknown),
+        )
+        assertFalse(safeBenchmarkFailureLabel(unknown).contains("private"))
+    }
     @Test
     fun nonNetworkModesCannotWriteOrEnableCodexEgress() {
         listOf("inspect", "preflight").forEach { mode ->

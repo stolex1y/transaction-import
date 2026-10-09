@@ -69,8 +69,20 @@ internal fun safeBenchmarkFailureLabel(error: Throwable): String {
     }
     if (safeFrameLabel == null) return error::class.simpleName ?: "ошибка"
     val type = error::class.simpleName ?: "ошибка"
-    return "$type at $safeFrameLabel"
+    val safeDetail = SAFE_FAILURE_DETAIL_LABELS[error.message]
+        ?.let { " ($it)" }
+        .orEmpty()
+    return "$type at $safeFrameLabel$safeDetail"
 }
+
+private val SAFE_FAILURE_DETAIL_LABELS = mapOf(
+    "Benchmark replay rejected an unknown account reference." to "replay rejected account reference",
+    "Benchmark replay permits only the reviewed transaction period." to "replay rejected transaction period",
+    "Benchmark replay rejected an invalid page limit." to "replay rejected page limit",
+    "Benchmark replay rejected a missing tool argument." to "replay rejected missing tool argument",
+    "Benchmark replay rejected an invalid date." to "replay rejected invalid date",
+    "Benchmark replay rejected an invalid transaction cursor." to "replay rejected transaction cursor",
+)
 
 private val SAFE_FAILURE_FRAME_LABELS = mapOf(
     ("io.github.stolex1y.transactionimport.web.NativeMcpAgent" to "handle") to "NativeMcpAgent.handle",
