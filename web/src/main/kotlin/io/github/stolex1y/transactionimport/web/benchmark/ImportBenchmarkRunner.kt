@@ -32,7 +32,6 @@ import java.util.Comparator
 import java.util.concurrent.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 internal data class ImportBenchmarkPreviewSummary(
@@ -308,8 +307,12 @@ internal class ImportBenchmarkCancelledException : IllegalStateException("Benchm
 private class BenchmarkProviderFailureGuard(
     private val delegate: ChatCompletionGateway,
 ) : ChatCompletionGateway, PreCompletionRequestAuthorizer {
-    private val failedStage = AtomicReference<String?>(null)
-    private val failed = AtomicBoolean(false)
+    private data class ProviderFailure(
+        val stage: String,
+        val safeSummary: String,
+    )
+
+    private val failure = AtomicReference<ProviderFailure?>(null)
 
     override val contextWindowTokens: Int?
         get() = delegate.contextWindowTokens
@@ -318,7 +321,7 @@ private class BenchmarkProviderFailureGuard(
         get() = delegate.maxOutputTokens
 
     override suspend fun authorizeBeforeCompletion(request: ChatCompletionRequest) {
-        if (failed.get()) throw ImportBenchmarkModelRequestException(failedStage.get())
+        if (failure.get() != null) throw failureException()
         val authorizer = delegate as? PreCompletionRequestAuthorizer ?: return
         try {
             authorizer.authorizeBeforeCompletion(request)
@@ -328,15 +331,15 @@ private class BenchmarkProviderFailureGuard(
             throw error
         } catch (error: CancellationException) {
             if (!currentCoroutineContext().isActive) throw error
-            throw recordFailure(request)
-        } catch (_: Exception) {
-            throw recordFailure(request)
+            throw recordFailure(request, error)
+        } catch (error: Exception) {
+            throw recordFailure(request, error)
         }
     }
 
     override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse =
-        if (failed.get()) {
-            throw ImportBenchmarkModelRequestException(failedStage.get())
+        if (failure.get() != null) {
+            throw failureException()
         } else {
             try {
                 delegate.complete(request)
@@ -346,20 +349,73 @@ private class BenchmarkProviderFailureGuard(
                 throw error
             } catch (error: CancellationException) {
                 if (!currentCoroutineContext().isActive) throw error
-                throw recordFailure(request)
-            } catch (_: Exception) {
-                throw recordFailure(request)
+                throw recordFailure(request, error)
+            } catch (error: Exception) {
+                throw recordFailure(request, error)
             }
         }
 
     fun throwIfFailed() {
-        if (failed.get()) throw ImportBenchmarkModelRequestException(failedStage.get())
+        if (failure.get() != null) throw failureException()
     }
 
-    private fun recordFailure(request: ChatCompletionRequest): ImportBenchmarkModelRequestException {
-        failedStage.compareAndSet(null, safeRequestStage(request))
-        failed.set(true)
-        return ImportBenchmarkModelRequestException(failedStage.get())
+    private fun recordFailure(
+        request: ChatCompletionRequest,
+        error: Throwable,
+    ): ImportBenchmarkModelRequestException {
+        failure.compareAndSet(
+            null,
+            ProviderFailure(
+                stage = safeRequestStage(request),
+                safeSummary = safeFailureSummary(error),
+            ),
+        )
+        return failureException()
+    }
+
+    private fun failureException(): ImportBenchmarkModelRequestException {
+        val recorded = checkNotNull(failure.get())
+        return ImportBenchmarkModelRequestException(recorded.stage, recorded.safeSummary)
+    }
+
+    private fun safeFailureSummary(error: Throwable): String {
+        if (error is OmpGatewayHttpStatusException) {
+            return "OMP returned HTTP ${error.status}; raw provider response omitted"
+        }
+        val message = error.message
+        if ((error is IllegalStateException || error is IllegalArgumentException) &&
+            message != null &&
+            message in SAFE_OMP_FAILURE_MESSAGES
+        ) {
+            return message
+        }
+        return "provider request failed; raw details omitted"
+    }
+
+    private companion object {
+        // Exact fixed diagnostics only; never forward arbitrary OMP/provider exception text.
+        val SAFE_OMP_FAILURE_MESSAGES = setOf(
+            "OMP stdio gateway was not initialized.",
+            "OMP gateway already has an authorized request.",
+            "OMP completion request changed after its authorization preview.",
+            "OMP completion request was not authorized before the model-call deadline.",
+            "OMP stdio gateway timed out or closed; raw request and response omitted.",
+            "OMP stdio gateway returned a mismatched response id.",
+            "OMP stdio gateway omitted its response status.",
+            "OMP stdio gateway returned a non-JSON completion body.",
+            "OMP stdio gateway response omitted its model id.",
+            "OMP stdio gateway response named an unexpected model; benchmark stopped.",
+            "OMP stdio gateway returned an invalid completion shape; raw response omitted.",
+            "OMP stdio request exceeds the safe line limit.",
+            "OMP stdio gateway exited before a request.",
+            "OMP stdio gateway is closed.",
+            "OMP stdio request timed out; raw request and response omitted.",
+            "OMP stdio operation was cancelled.",
+            "OMP stdio request failed; raw request and response omitted.",
+            "OMP stdio response line exceeds the safe limit.",
+            "OMP stdio completion response was not valid JSON.",
+            "OMP stdio completion response was not a JSON object.",
+        )
     }
 
     private fun safeRequestStage(request: ChatCompletionRequest): String {
@@ -376,10 +432,11 @@ private class BenchmarkProviderFailureGuard(
 
 internal class ImportBenchmarkModelRequestException(
     val stage: String? = null,
+    val safeSummary: String? = null,
 ) : IllegalStateException(
-    "Benchmark model request failed${stage?.let { " during $it" }.orEmpty()}; this repetition cannot be scored.",
+    "Benchmark model request failed${stage?.let { " during $it" }.orEmpty()}" +
+        "${safeSummary?.let { ": $it" }.orEmpty()}; this repetition cannot be scored.",
 )
-
 
 internal class ImportBenchmarkReceiptSourceException : IllegalStateException(
     "Benchmark receipt source replay failed; this repetition cannot be scored.",

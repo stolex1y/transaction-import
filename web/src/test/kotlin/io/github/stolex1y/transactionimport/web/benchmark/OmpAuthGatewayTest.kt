@@ -82,6 +82,30 @@ class OmpAuthGatewayTest {
     }
 
     @Test
+    fun nonSuccessResponseExposesStatusWithoutProviderBody() = runBlocking {
+        val connection = RecordingConnection(
+            responseStatus = 401,
+            providerErrorBody = "RAW_PROVIDER_ERROR_MARKER",
+        )
+        val gateway = OmpStdioChatCompletionGateway(
+            modelSelector = MODEL_SELECTOR,
+            connection = connection,
+            approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
+            routingSummary = "synthetic route",
+        )
+        gateway.initialize()
+        val request = applicationRequest()
+        gateway.authorizeBeforeCompletion(request)
+
+        val failure = assertFailsWith<OmpGatewayHttpStatusException> {
+            gateway.complete(request)
+        }
+
+        assertEquals(401, failure.status)
+        assertFalse(failure.message.orEmpty().contains("RAW_PROVIDER_ERROR_MARKER"))
+    }
+
+    @Test
     fun decliningExactRequestPreviewSendsNoGatewayRequest() = runBlocking {
         val connection = RecordingConnection()
         val gateway = OmpStdioChatCompletionGateway(
@@ -444,6 +468,8 @@ class OmpAuthGatewayTest {
     private class RecordingConnection(
         private val responseModel: String? = MODEL_SELECTOR,
         private val readyVersion: String = "synthetic-omp",
+        private val responseStatus: Int = 200,
+        private val providerErrorBody: String? = null,
     ) : OmpJsonLineConnection {
         val requests = mutableListOf<String>()
 
@@ -454,23 +480,27 @@ class OmpAuthGatewayTest {
         override suspend fun exchange(requestLine: String): String {
             requests += requestLine
             val id = Json.parseToJsonElement(requestLine).jsonObject.getValue("id")
-            val body = buildJsonObject {
-                responseModel?.let { put("model", it) }
-                putJsonArray("choices") {
-                    add(
-                        buildJsonObject {
-                            putJsonObject("message") {
-                                put("role", "assistant")
-                                put("content", "synthetic response")
-                            }
-                            put("finish_reason", "stop")
-                        },
-                    )
+            val body = if (providerErrorBody != null) {
+                buildJsonObject { put("error", providerErrorBody) }
+            } else {
+                buildJsonObject {
+                    responseModel?.let { put("model", it) }
+                    putJsonArray("choices") {
+                        add(
+                            buildJsonObject {
+                                putJsonObject("message") {
+                                    put("role", "assistant")
+                                    put("content", "synthetic response")
+                                }
+                                put("finish_reason", "stop")
+                            },
+                        )
+                    }
                 }
             }
             return buildJsonObject {
                 put("id", id)
-                put("status", 200)
+                put("status", responseStatus)
                 put("body", body)
             }.toString()
         }

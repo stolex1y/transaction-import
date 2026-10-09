@@ -940,6 +940,10 @@ Unsuffixed base ID отклоняется и не доказывает дост�
 отклонены, первый payload всё равно мог быть передан наружу. У чеков нет
 accuracy: пользовательских receipt-link labels пока нет.
 
+При model request failure CLI показывает безопасную стадию и allowlisted
+OMP response category/status. Неизвестные ошибки остаются generic; raw
+provider response, prompts и значения fixture не выводятся.
+
 Benchmark диагностический; он не является release gate и не добавляет
 merchant/category mappings или product rules. Категория оценивается только по
 четырём вручную размеченным операциям.

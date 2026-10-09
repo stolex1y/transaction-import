@@ -45,6 +45,12 @@ fun main(args: Array<String>) {
             "Локальный OMP preflight не прошёл на этапе '${error.stage}'; completion request не отправлялся.",
         )
         exitProcess(1)
+    } catch (error: ImportBenchmarkModelRequestException) {
+        System.err.println(
+            "Benchmark остановлен без сохранения результата (${error.message}); " +
+                "содержимое запросов, ответов и fixture скрыто.",
+        )
+        exitProcess(1)
     } catch (error: Throwable) {
         System.err.println(
             "Benchmark остановлен без сохранения результата (${error::class.simpleName ?: "ошибка"}); " +

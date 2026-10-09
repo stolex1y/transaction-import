@@ -147,9 +147,7 @@ internal class OmpStdioChatCompletionGateway(
         require(responseId == requestId.toString()) { "OMP stdio gateway returned a mismatched response id." }
         val status = envelope["status"]?.jsonPrimitive?.intOrNull
             ?: throw IllegalStateException("OMP stdio gateway omitted its response status.")
-        require(status in 200..299) {
-            "OMP stdio gateway returned HTTP $status; raw provider response omitted."
-        }
+        if (status !in 200..299) throw OmpGatewayHttpStatusException(status)
         val responseBody = envelope["body"] as? JsonObject
             ?: throw IllegalStateException("OMP stdio gateway returned a non-JSON completion body.")
         val actualModel = responseBody["model"]?.jsonPrimitive?.contentOrNull
@@ -389,6 +387,12 @@ internal class OmpAuthGatewaySession private constructor(
 internal class OmpGatewayPreflightException(
     val stage: String,
 ) : IllegalStateException("Local OMP benchmark preflight failed.")
+
+internal class OmpGatewayHttpStatusException(
+    val status: Int,
+) : IllegalStateException(
+    "OMP stdio gateway returned HTTP $status; raw provider response omitted.",
+)
 
 internal object OmpFallbackPolicy {
     fun overlay(modelSelector: String): String {

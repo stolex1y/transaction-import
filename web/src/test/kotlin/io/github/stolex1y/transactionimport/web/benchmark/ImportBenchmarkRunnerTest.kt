@@ -172,8 +172,55 @@ class ImportBenchmarkRunnerTest {
         }
     }
 
+    @Test
+    fun providerHttpStatusIsReportedWithoutRawBody() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+
+        assertProviderFailureStopsRun(
+            fixture = fixture,
+            providerError = OmpGatewayHttpStatusException(401),
+            expectedSafeSummary = "OMP returned HTTP 401",
+            expectedStage = "tool-planning",
+            failWhen = { it.tools.orEmpty().isNotEmpty() },
+        )
+    }
+
+    @Test
+    fun knownOmpFailureCategoryIsReportedWithoutRawResponse() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+
+        assertProviderFailureStopsRun(
+            fixture = fixture,
+            providerError = IllegalStateException(
+                "OMP stdio gateway response named an unexpected model; benchmark stopped.",
+            ),
+            expectedSafeSummary = "OMP stdio gateway response named an unexpected model",
+            expectedStage = "tool-planning",
+            failWhen = { it.tools.orEmpty().isNotEmpty() },
+        )
+    }
+
+    @Test
+    fun unknownOmpFailureMessageUsesGenericRedaction() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val rawMarker = "OMP stdio gateway unknown: RAW_PROVIDER_ERROR_MARKER"
+
+        assertProviderFailureStopsRun(
+            fixture = fixture,
+            providerError = IllegalStateException(rawMarker),
+            expectedSafeSummary = "provider request failed; raw details omitted",
+            expectedStage = "tool-planning",
+            rawMarker = rawMarker,
+            failWhen = { it.tools.orEmpty().isNotEmpty() },
+        )
+    }
+
     private suspend fun assertProviderFailureStopsRun(
         fixture: ImportBenchmarkFixture,
+        providerError: Exception = IllegalStateException("synthetic provider failure"),
+        expectedSafeSummary: String? = null,
+        expectedStage: String? = null,
+        rawMarker: String? = null,
         failWhen: (ChatCompletionRequest) -> Boolean,
     ) {
         val workDirectories = mutableListOf<Path>()
@@ -192,11 +239,11 @@ class ImportBenchmarkRunnerTest {
                     override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
                         if (failureTriggered) {
                             callsAfterFailure += 1
-                            throw IllegalStateException("synthetic provider failure")
+                            throw providerError
                         }
                         if (failWhen(request)) {
                             failureTriggered = true
-                            throw IllegalStateException("synthetic provider failure")
+                            throw providerError
                         }
                         return offline.complete(request)
                     }
@@ -217,7 +264,10 @@ class ImportBenchmarkRunnerTest {
         }
 
         assertTrue(failureTriggered)
+        expectedSafeSummary?.let { assertTrue(failure.message.orEmpty().contains(it)) }
+        expectedStage?.let { assertEquals(it, failure.stage) }
         assertFalse(failure.message.orEmpty().contains("synthetic provider failure"))
+        rawMarker?.let { assertFalse(failure.message.orEmpty().contains(it)) }
         assertEquals(1, gatewayCreations)
         assertEquals(0, callsAfterFailure)
         assertEquals(0, confirmations)
