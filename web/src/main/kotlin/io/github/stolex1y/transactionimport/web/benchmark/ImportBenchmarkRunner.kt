@@ -60,6 +60,37 @@ internal data class ImportBenchmarkMetrics(
     val receiptLabelCount: Int,
 )
 
+internal enum class ImportBenchmarkFailureCode(val reportValue: String) {
+    NO_IMPORT_PREVIEW("no_import_preview"),
+    PROVIDER_REQUEST_FAILED("provider_request_failed"),
+    REPEAT_TIMEOUT("repeat_timeout"),
+    RECEIPT_SOURCE_FAILED("receipt_source_failed"),
+    INVALID_PREVIEW("invalid_preview"),
+    CONFIRMATION_FAILED("confirmation_failed"),
+    SCORING_FAILED("scoring_failed"),
+    UNEXPECTED_REPEAT_FAILURE("unexpected_repeat_failure"),
+}
+
+internal sealed interface ImportBenchmarkOutcome {
+    data class Scored(val metrics: ImportBenchmarkMetrics) : ImportBenchmarkOutcome
+    data class Failed(val failureCode: ImportBenchmarkFailureCode) : ImportBenchmarkOutcome
+}
+
+internal class ImportBenchmarkRepeatFailure(
+    val failureCode: ImportBenchmarkFailureCode,
+    message: String,
+) : IllegalStateException(message)
+
+private fun deleteBenchmarkTree(path: Path) {
+    Files.walk(path).use { paths ->
+        paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+    }
+}
+
+internal class BenchmarkCleanupException : IllegalStateException(
+    "Temporary benchmark resource cleanup failed; the run stopped.",
+)
+
 internal class ImportBenchmarkRunner(
     private val fixture: ImportBenchmarkFixture,
     private val gatewayForRun: suspend (Int) -> ChatCompletionGateway,
@@ -67,15 +98,49 @@ internal class ImportBenchmarkRunner(
     private val previewTransactionSourceRefs: (NativeMcpAgent, String, Long, String) -> List<String?>? =
         NativeMcpAgent::previewTransactionSourceRefs,
     private val workDirectoryFactory: () -> Path = { Files.createTempDirectory("import-benchmark-") },
+    private val deleteWorkDirectory: (Path) -> Unit = ::deleteBenchmarkTree,
     private val emit: (String) -> Unit = {},
 ) {
     suspend fun run(repetitions: Int): List<ImportBenchmarkMetrics> {
         require(repetitions in 1..fixture.repetitions) { "Benchmark repetition count is not approved." }
-        return (1..repetitions).map { repetition -> runOne(repetition) }
+        return (1..repetitions).map { repetition -> runOne(repetition, classifyRepeatFailures = false) }
     }
 
-    private suspend fun runOne(repetition: Int): ImportBenchmarkMetrics {
+    internal suspend fun runOutcomes(repetitions: Int): List<ImportBenchmarkOutcome> {
+        require(repetitions in 1..fixture.repetitions) { "Benchmark repetition count is not approved." }
+        val outcomes = ArrayList<ImportBenchmarkOutcome>(repetitions)
+        for (repetition in 1..repetitions) {
+            try {
+                outcomes += ImportBenchmarkOutcome.Scored(runOne(repetition, classifyRepeatFailures = true))
+            } catch (error: ImportBenchmarkCancelledException) {
+                throw error
+            } catch (error: OmpGatewayPreflightException) {
+                throw error
+            } catch (error: ImportBenchmarkModelRequestException) {
+                if (error.fatal) throw error
+                outcomes += ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.PROVIDER_REQUEST_FAILED)
+            } catch (error: CancellationException) {
+                if (!currentCoroutineContext().isActive) throw error
+                outcomes += ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.REPEAT_TIMEOUT)
+            } catch (error: BenchmarkCleanupException) {
+                throw error
+            } catch (error: ImportBenchmarkReceiptSourceException) {
+                outcomes += ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.RECEIPT_SOURCE_FAILED)
+            } catch (error: ImportBenchmarkRepeatFailure) {
+                outcomes += ImportBenchmarkOutcome.Failed(error.failureCode)
+            } catch (error: Exception) {
+                outcomes += ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.UNEXPECTED_REPEAT_FAILURE)
+            }
+        }
+        return outcomes
+    }
+
+    private suspend fun runOne(
+        repetition: Int,
+        classifyRepeatFailures: Boolean,
+    ): ImportBenchmarkMetrics {
         val workDirectory = workDirectoryFactory()
+        var primaryFailure: Throwable? = null
         try {
             val database = workDirectory.resolve("benchmark.sqlite")
             val repository = SqliteImportSessionRepository(database.toString())
@@ -130,9 +195,23 @@ internal class ImportBenchmarkRunner(
             )
             gateway.throwIfFailed()
             val handled = handlingResult as? NativeMcpHandlingResult.Handled
-                ?: throw IllegalStateException("Benchmark model did not produce an import preview.")
+                ?: if (classifyRepeatFailures) {
+                    throw ImportBenchmarkRepeatFailure(
+                        ImportBenchmarkFailureCode.NO_IMPORT_PREVIEW,
+                        "Benchmark model did not produce an import preview.",
+                    )
+                } else {
+                    throw IllegalStateException("Benchmark model did not produce an import preview.")
+                }
             val preview = handled.response.mcpPreview
-                ?: throw IllegalStateException("Benchmark import preview is missing.")
+                ?: if (classifyRepeatFailures) {
+                    throw ImportBenchmarkRepeatFailure(
+                        ImportBenchmarkFailureCode.INVALID_PREVIEW,
+                        "Benchmark import preview is missing.",
+                    )
+                } else {
+                    throw IllegalStateException("Benchmark import preview is missing.")
+                }
             if (preview.receiptMatching?.status == ReceiptMatchingStageStatus.SOURCE_ERROR) {
                 throw ImportBenchmarkReceiptSourceException()
             }
@@ -143,36 +222,150 @@ internal class ImportBenchmarkRunner(
                 preview.sessionRevision,
                 preview.id,
             )
-            requireValidBenchmarkPreview(
-                preview = preview,
-                draftIsPresent = handled.response.state.draft != null,
-                expectedSourceRefs = expectedSourceRefs,
-                previewSourceRefs = previewSourceRefs,
-            )
+            if (classifyRepeatFailures) {
+                try {
+                    requireValidBenchmarkPreview(
+                        preview = preview,
+                        draftIsPresent = handled.response.state.draft != null,
+                        expectedSourceRefs = expectedSourceRefs,
+                        previewSourceRefs = previewSourceRefs,
+                    )
+                } catch (error: IllegalArgumentException) {
+                    throw ImportBenchmarkRepeatFailure(
+                        ImportBenchmarkFailureCode.INVALID_PREVIEW,
+                        "Benchmark preview did not contain the reviewed operation set.",
+                    )
+                } catch (error: IllegalStateException) {
+                    throw ImportBenchmarkRepeatFailure(
+                        ImportBenchmarkFailureCode.INVALID_PREVIEW,
+                        "Benchmark preview did not contain the reviewed operation set.",
+                    )
+                }
+            } else {
+                requireValidBenchmarkPreview(
+                    preview = preview,
+                    draftIsPresent = handled.response.state.draft != null,
+                    expectedSourceRefs = expectedSourceRefs,
+                    previewSourceRefs = previewSourceRefs,
+                )
+            }
             val previewSummary = previewSummary(preview)
             emitPreview(repetition, previewSummary)
             if (!confirmPreview(repetition, previewSummary)) {
                 throw ImportBenchmarkCancelledException()
             }
 
-            val confirmed = native.confirm(
-                sessionId = session.session.id,
-                expectedRevision = preview.sessionRevision,
-                previewId = preview.id,
-            )
-            require(confirmed.lastError == null) {
-                "Post-confirm inclusion review failed; this repetition cannot be scored."
+            val confirmed = if (!classifyRepeatFailures) {
+                native.confirm(
+                    sessionId = session.session.id,
+                    expectedRevision = preview.sessionRevision,
+                    previewId = preview.id,
+                )
+            } else {
+                try {
+                    native.confirm(
+                        sessionId = session.session.id,
+                        expectedRevision = preview.sessionRevision,
+                        previewId = preview.id,
+                    )
+                } catch (error: ImportBenchmarkCancelledException) {
+                    throw error
+                } catch (error: OmpGatewayPreflightException) {
+                    throw error
+                } catch (error: ImportBenchmarkModelRequestException) {
+                    throw error
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    throw ImportBenchmarkRepeatFailure(
+                        ImportBenchmarkFailureCode.CONFIRMATION_FAILED,
+                        "Benchmark confirmation failed.",
+                    )
+                }
             }
-            val draft = confirmed.draft
-                ?: throw IllegalStateException("Confirmed benchmark preview did not create a draft.")
-            require(draft.transactions.size == fixture.modelInput.transactions.size) {
-                "Confirmed benchmark draft did not contain the reviewed operation set."
+            gateway.throwIfFailed()
+            if (confirmed.lastError != null) {
+                if (classifyRepeatFailures) {
+                    throw ImportBenchmarkRepeatFailure(
+                        ImportBenchmarkFailureCode.CONFIRMATION_FAILED,
+                        "Post-confirm inclusion review failed; this repetition cannot be scored.",
+                    )
+                }
+                require(confirmed.lastError == null) {
+                    "Post-confirm inclusion review failed; this repetition cannot be scored."
+                }
+            }
+            val draft = confirmed.draft ?: if (classifyRepeatFailures) {
+                throw ImportBenchmarkRepeatFailure(
+                    ImportBenchmarkFailureCode.CONFIRMATION_FAILED,
+                    "Confirmed benchmark preview did not create a draft.",
+                )
+            } else {
+                throw IllegalStateException("Confirmed benchmark preview did not create a draft.")
+            }
+            if (draft.transactions.size != fixture.modelInput.transactions.size) {
+                if (classifyRepeatFailures) {
+                    throw ImportBenchmarkRepeatFailure(
+                        ImportBenchmarkFailureCode.CONFIRMATION_FAILED,
+                        "Confirmed benchmark draft did not contain the reviewed operation set.",
+                    )
+                }
+                require(draft.transactions.size == fixture.modelInput.transactions.size) {
+                    "Confirmed benchmark draft did not contain the reviewed operation set."
+                }
+            }
+            if (classifyRepeatFailures) {
+                try {
+                    requireAmbiguousReviewsPreserved(preview, draft.transactions)
+                } catch (error: IllegalArgumentException) {
+                    throw ImportBenchmarkRepeatFailure(
+                        ImportBenchmarkFailureCode.CONFIRMATION_FAILED,
+                        "Post-confirm inclusion review failed; this repetition cannot be scored.",
+                    )
+                } catch (error: IllegalStateException) {
+                    throw ImportBenchmarkRepeatFailure(
+                        ImportBenchmarkFailureCode.CONFIRMATION_FAILED,
+                        "Post-confirm inclusion review failed; this repetition cannot be scored.",
+                    )
+                }
+                return try {
+                    score(draft.transactions, repository.listCategories())
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    throw ImportBenchmarkRepeatFailure(
+                        ImportBenchmarkFailureCode.SCORING_FAILED,
+                        "Benchmark scoring failed.",
+                    )
+                }
             }
             requireAmbiguousReviewsPreserved(preview, draft.transactions)
             return score(draft.transactions, repository.listCategories())
+        } catch (error: Throwable) {
+            primaryFailure = error
+            throw error
         } finally {
-            deleteTree(workDirectory)
-        }
+            try {
+                deleteWorkDirectory(workDirectory)
+            } catch (cleanupError: Exception) {
+                val originalFailure = primaryFailure
+                val originalIsFatal = when (originalFailure) {
+                    is ImportBenchmarkCancelledException, is OmpGatewayPreflightException, is Error -> true
+                    is ImportBenchmarkModelRequestException -> originalFailure.fatal
+                    is CancellationException -> !currentCoroutineContext().isActive
+                    else -> false
+                }
+                if (originalFailure != null && originalIsFatal) {
+                    originalFailure.addSuppressed(cleanupError)
+                } else {
+                    throw BenchmarkCleanupException().also { cleanupFailure ->
+                        originalFailure?.let(cleanupFailure::addSuppressed)
+                        cleanupFailure.addSuppressed(cleanupError)
+                    }
+                }
+            }
+    }
+
     }
 
     private fun score(
@@ -297,11 +490,6 @@ internal class ImportBenchmarkRunner(
         ),
     ).validated()
 
-    private fun deleteTree(path: Path) {
-        Files.walk(path).use { paths ->
-            paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
-        }
-    }
 
 
     private companion object {
@@ -319,6 +507,7 @@ private class BenchmarkProviderFailureGuard(
     private data class ProviderFailure(
         val stage: String,
         val safeSummary: String,
+        val fatal: Boolean,
     )
 
     private val failure = AtomicReference<ProviderFailure?>(null)
@@ -377,6 +566,7 @@ private class BenchmarkProviderFailureGuard(
             ProviderFailure(
                 stage = safeRequestStage(request),
                 safeSummary = safeFailureSummary(error),
+                fatal = error is OmpGatewayModelMismatchException,
             ),
         )
         return failureException()
@@ -384,7 +574,7 @@ private class BenchmarkProviderFailureGuard(
 
     private fun failureException(): ImportBenchmarkModelRequestException {
         val recorded = checkNotNull(failure.get())
-        return ImportBenchmarkModelRequestException(recorded.stage, recorded.safeSummary)
+        return ImportBenchmarkModelRequestException(recorded.stage, recorded.safeSummary, recorded.fatal)
     }
 
     private fun safeFailureSummary(error: Throwable): String {
@@ -456,6 +646,7 @@ private class BenchmarkProviderFailureGuard(
 internal class ImportBenchmarkModelRequestException(
     val stage: String? = null,
     val safeSummary: String? = null,
+    val fatal: Boolean = false,
 ) : IllegalStateException(
     "Benchmark model request failed${stage?.let { " during $it" }.orEmpty()}" +
         "${safeSummary?.let { ": $it" }.orEmpty()}; this repetition cannot be scored.",

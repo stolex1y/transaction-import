@@ -3,6 +3,7 @@ package io.github.stolex1y.transactionimport.web.benchmark
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.Path
@@ -17,22 +18,24 @@ class ImportBenchmarkReportTest {
     fun reportContainsOnlyMetricsAndRequestFingerprints() {
         val fixture = ImportBenchmarkFixtureLoader.loadBundled()
         val run = ImportBenchmarkRun(
-            metrics = ImportBenchmarkMetrics(
-                selectionPrecision = 0.75,
-                selectionRecall = 0.6,
-                selectionTruePositive = 3,
-                selectionFalsePositive = 1,
-                selectionFalseNegative = 2,
-                categoryAccuracy = 0.5,
-                categoryCoverage = 0.75,
-                categoryAccuracyWhenAssigned = 2.0 / 3.0,
-                categoryCorrect = 2,
-                categoryAssigned = 3,
-                categoryLabelCount = 4,
-                matchedReceiptCount = 2,
-                ambiguousReceiptCount = 1,
-                unmatchedReceiptCount = 47,
-                receiptLabelCount = 0,
+            outcome = ImportBenchmarkOutcome.Scored(
+                ImportBenchmarkMetrics(
+                    selectionPrecision = 0.75,
+                    selectionRecall = 0.6,
+                    selectionTruePositive = 3,
+                    selectionFalsePositive = 1,
+                    selectionFalseNegative = 2,
+                    categoryAccuracy = 0.5,
+                    categoryCoverage = 0.75,
+                    categoryAccuracyWhenAssigned = 2.0 / 3.0,
+                    categoryCorrect = 2,
+                    categoryAssigned = 3,
+                    categoryLabelCount = 4,
+                    matchedReceiptCount = 2,
+                    ambiguousReceiptCount = 1,
+                    unmatchedReceiptCount = 47,
+                    receiptLabelCount = 0,
+                ),
             ),
             gateway = OmpGatewayMetadata(
                 modelSelector = fixture.modelSelector,
@@ -67,6 +70,70 @@ class ImportBenchmarkReportTest {
         assertFalse(fixture.modelInput.transactions.any { report.contains(it.id) })
         assertFalse(fixture.modelInput.transactions.any { it.merchant.isNotBlank() && report.contains(it.merchant) })
         assertFalse(report.contains("rawUsage"))
+    }
+
+    @Test
+    fun rendersScoredAndFailedRepeatOutcomesWithoutRawFailureDetails() {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val metrics = ImportBenchmarkMetrics(
+            selectionPrecision = 0.75,
+            selectionRecall = 0.6,
+            selectionTruePositive = 3,
+            selectionFalsePositive = 1,
+            selectionFalseNegative = 2,
+            categoryAccuracy = 0.5,
+            categoryCoverage = 0.75,
+            categoryAccuracyWhenAssigned = 2.0 / 3.0,
+            categoryCorrect = 2,
+            categoryAssigned = 3,
+            categoryLabelCount = 4,
+            matchedReceiptCount = 2,
+            ambiguousReceiptCount = 1,
+            unmatchedReceiptCount = 47,
+            receiptLabelCount = 0,
+        )
+        val runs = listOf(
+            ImportBenchmarkRun(ImportBenchmarkOutcome.Scored(metrics)),
+            ImportBenchmarkRun(
+                ImportBenchmarkOutcome.Scored(metrics.copy(selectionPrecision = 0.5)),
+            ),
+            ImportBenchmarkRun(
+                ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.NO_IMPORT_PREVIEW),
+            ),
+        )
+
+        val report = ImportBenchmarkReportWriter.render(
+            mode = "codex",
+            fixture = fixture,
+            runs = runs,
+            sourceCommit = "0123456789ab",
+            generatedAt = "2026-10-14T12:00:00Z",
+        )
+        val root = Json.parseToJsonElement(report).jsonObject
+        val reportedRuns = root.getValue("runs").jsonArray.map { it.jsonObject }
+        val variation = root.getValue("variation").jsonObject
+            .getValue("selectionPrecision").jsonObject
+
+        assertEquals(2, root.getValue("successfulRunCount").jsonPrimitive.int)
+        assertEquals(1, root.getValue("failedRunCount").jsonPrimitive.int)
+        assertEquals(
+            1,
+            root.getValue("failureCounts").jsonObject
+                .getValue("no_import_preview").jsonPrimitive.int,
+        )
+        assertEquals(listOf("scored", "scored", "failed"), reportedRuns.map {
+            it.getValue("status").jsonPrimitive.content
+        })
+        assertEquals("no_import_preview", reportedRuns.last().getValue("failureCode").jsonPrimitive.content)
+        assertFalse(reportedRuns.last().containsKey("metrics"))
+        assertEquals(2, variation.getValue("observedRuns").jsonPrimitive.int)
+        assertEquals(0.5, variation.getValue("minimum").jsonPrimitive.content.toDouble())
+        assertEquals(0.75, variation.getValue("maximum").jsonPrimitive.content.toDouble())
+        assertEquals(0.25, variation.getValue("range").jsonPrimitive.content.toDouble())
+        assertFalse(report.contains("raw failure detail"))
+        assertFalse(report.contains(fixture.modelInput.userTurn))
+        assertFalse(fixture.modelInput.transactions.any { report.contains(it.id) })
+        assertEquals(2, root.getValue("schemaVersion").jsonPrimitive.int)
     }
 
     @Test

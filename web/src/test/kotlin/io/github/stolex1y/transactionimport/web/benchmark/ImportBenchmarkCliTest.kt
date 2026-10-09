@@ -82,6 +82,42 @@ class ImportBenchmarkCliTest {
     }
 
     @Test
+    fun diagnosticCleanupFailureIsSurfacedWithoutRawDetails() {
+        val rawMarker = "private-overlay-path"
+        val cleanupError = AssertionError(rawMarker)
+        val emitted = mutableListOf<String>()
+
+        val failure = assertFailsWith<BenchmarkCleanupException> {
+            closeDiagnosticSession(
+                closeSession = { throw cleanupError },
+                primaryFailure = null,
+                emit = emitted::add,
+            )
+        }
+
+        assertTrue(failure.suppressed.single() === cleanupError)
+        assertTrue(emitted.single().contains("cleanup failed"))
+        assertFalse(emitted.toString().contains(rawMarker))
+    }
+
+    @Test
+    fun diagnosticCleanupFailureIsSuppressedOntoPrimaryFailure() {
+        val primaryFailure = IllegalStateException("original")
+        val cleanupError = IllegalStateException("private-overlay-path")
+        val emitted = mutableListOf<String>()
+
+        closeDiagnosticSession(
+            closeSession = { throw cleanupError },
+            primaryFailure = primaryFailure,
+            emit = emitted::add,
+        )
+
+        assertTrue(primaryFailure.suppressed.single() === cleanupError)
+        assertEquals(1, emitted.size)
+        assertFalse(emitted.toString().contains("private-overlay-path"))
+    }
+
+    @Test
     fun codexAutomaticApprovalRequiresExactApprovedBodyAndRoute() {
         assertTrue(
             autoApproveCodexBenchmarkRequest(

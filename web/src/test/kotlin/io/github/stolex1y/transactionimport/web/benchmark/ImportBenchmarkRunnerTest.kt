@@ -7,7 +7,13 @@ import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
 import io.github.stolex1y.transactionimport.core.ChatCompletionResponse
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Comparator
 import java.util.concurrent.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -75,6 +81,267 @@ class ImportBenchmarkRunnerTest {
             assertTrue(line.contains("Повтор ${index + 1}: preview"))
             assertFalse(line.contains("89990000000"))
         }
+    }
+
+    @Test
+    fun runOutcomesContinuesAfterRepeatLocalFailureAndReportsAllAttempts() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val workDirectories = mutableListOf<Path>()
+        var confirmations = 0
+        var previewLookups = 0
+        val runner = ImportBenchmarkRunner(
+            fixture = fixture,
+            gatewayForRun = { repetition ->
+                assertEquals(repetition, workDirectories.size)
+                assertTrue(Files.exists(workDirectories[repetition - 1].resolve("benchmark.sqlite")))
+                OfflineBenchmarkGateway(fixture)
+            },
+            confirmPreview = { _, _ ->
+                confirmations += 1
+                true
+            },
+            previewTransactionSourceRefs = { native, sessionId, revision, previewId ->
+                previewLookups += 1
+                if (previewLookups == 1) {
+                    emptyList()
+                } else {
+                    native.previewTransactionSourceRefs(sessionId, revision, previewId)
+                }
+            },
+            workDirectoryFactory = {
+                Files.createTempDirectory("import-benchmark-outcomes-test-").also(workDirectories::add)
+            },
+        )
+
+        val outcomes = runner.runOutcomes(fixture.repetitions)
+
+        assertEquals(3, outcomes.size)
+        assertEquals(
+            ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.INVALID_PREVIEW),
+            outcomes.first(),
+        )
+        assertTrue(outcomes.drop(1).all { it is ImportBenchmarkOutcome.Scored })
+        assertEquals(2, confirmations)
+        assertEquals(3, workDirectories.size)
+        assertTrue(workDirectories.all { !Files.exists(it) })
+    }
+
+    @Test
+    fun fatalModelMismatchStopsOutcomeCollection() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val workDirectories = mutableListOf<Path>()
+        var gatewayCreations = 0
+        var mismatchedRequests = 0
+        val runner = ImportBenchmarkRunner(
+            fixture = fixture,
+            gatewayForRun = {
+                gatewayCreations += 1
+                val offline = OfflineBenchmarkGateway(fixture)
+                object : ChatCompletionGateway {
+                    override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+                        if (request.tools.orEmpty().isNotEmpty()) {
+                            mismatchedRequests += 1
+                            throw OmpGatewayModelMismatchException("gpt-6-luna:medium")
+                        }
+                        return offline.complete(request)
+                    }
+                }
+            },
+            confirmPreview = { _, _ -> true },
+            workDirectoryFactory = {
+                Files.createTempDirectory("import-benchmark-fatal-outcome-test-").also(workDirectories::add)
+            },
+        )
+
+        val failure = assertFailsWith<ImportBenchmarkModelRequestException> {
+            runner.runOutcomes(fixture.repetitions)
+        }
+
+        assertTrue(failure.fatal)
+        assertEquals(1, gatewayCreations)
+        assertEquals(1, mismatchedRequests)
+        assertEquals(1, workDirectories.size)
+        assertTrue(workDirectories.all { !Files.exists(it) })
+    }
+
+    @Test
+    fun runOutcomesContinuesAfterProviderRequestFailure() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val workDirectories = mutableListOf<Path>()
+        val rawFailureMarker = "SENSITIVE_PROVIDER_FAILURE_MARKER"
+        val runner = ImportBenchmarkRunner(
+            fixture = fixture,
+            gatewayForRun = { repetition ->
+                if (repetition == 1) {
+                    object : ChatCompletionGateway {
+                        override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+                            throw IllegalStateException(rawFailureMarker)
+                        }
+                    }
+                } else {
+                    OfflineBenchmarkGateway(fixture)
+                }
+            },
+            confirmPreview = { _, _ -> true },
+            workDirectoryFactory = {
+                Files.createTempDirectory("import-benchmark-provider-outcome-test-").also(workDirectories::add)
+            },
+        )
+
+        val outcomes = runner.runOutcomes(fixture.repetitions)
+
+        assertEquals(3, outcomes.size)
+        assertEquals(
+            ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.PROVIDER_REQUEST_FAILED),
+            outcomes.first(),
+        )
+        assertTrue(outcomes.drop(1).all { it is ImportBenchmarkOutcome.Scored })
+        assertFalse(outcomes.toString().contains(rawFailureMarker))
+        assertEquals(3, workDirectories.size)
+        assertTrue(workDirectories.all { !Files.exists(it) })
+    }
+
+    @Test
+    fun externalCancellationStopsOutcomeCollectionAndCleansTemporaryDatabase() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val workDirectories = mutableListOf<Path>()
+        val firstCompletionStarted = CompletableDeferred<Unit>()
+        var gatewayCreations = 0
+        val runner = ImportBenchmarkRunner(
+            fixture = fixture,
+            gatewayForRun = {
+                gatewayCreations += 1
+                object : ChatCompletionGateway {
+                    override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+                        firstCompletionStarted.complete(Unit)
+                        awaitCancellation()
+                    }
+                }
+            },
+            confirmPreview = { _, _ -> true },
+            workDirectoryFactory = {
+                Files.createTempDirectory("import-benchmark-external-cancel-test-").also(workDirectories::add)
+            },
+        )
+
+        val job = launch { runner.runOutcomes(fixture.repetitions) }
+        withTimeout(5_000) { firstCompletionStarted.await() }
+        job.cancelAndJoin()
+
+        assertEquals(1, gatewayCreations)
+        assertEquals(1, workDirectories.size)
+        assertTrue(workDirectories.all { !Files.exists(it) })
+    }
+
+
+    @Test
+    fun fatalModelMismatchDuringInclusionReviewStopsOutcomeCollection() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val workDirectories = mutableListOf<Path>()
+        var gatewayCreations = 0
+        var mismatchedRequests = 0
+        var confirmations = 0
+        val runner = ImportBenchmarkRunner(
+            fixture = fixture,
+            gatewayForRun = {
+                gatewayCreations += 1
+                val offline = OfflineBenchmarkGateway(fixture)
+                object : ChatCompletionGateway {
+                    override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
+                        val inclusionReview = request.messages.any {
+                            it.role == "user" && it.content.startsWith("Новые операции после принятия MCP preview:")
+                        }
+                        if (inclusionReview) {
+                            mismatchedRequests += 1
+                            throw OmpGatewayModelMismatchException("gpt-6-luna:medium")
+                        }
+                        return offline.complete(request)
+                    }
+                }
+            },
+            confirmPreview = { _, _ ->
+                confirmations += 1
+                true
+            },
+            workDirectoryFactory = {
+                Files.createTempDirectory("import-benchmark-fatal-inclusion-test-").also(workDirectories::add)
+            },
+            deleteWorkDirectory = { path ->
+                deleteTestTree(path)
+                throw IllegalStateException("synthetic cleanup failure")
+            },
+        )
+
+        val failure = assertFailsWith<ImportBenchmarkModelRequestException> {
+            runner.runOutcomes(fixture.repetitions)
+        }
+
+        assertTrue(failure.fatal)
+        assertEquals(1, failure.suppressed.size)
+        assertEquals(1, gatewayCreations)
+        assertEquals(1, mismatchedRequests)
+        assertEquals(1, confirmations)
+        assertEquals(1, workDirectories.size)
+        assertTrue(workDirectories.all { !Files.exists(it) })
+    }
+
+    @Test
+    fun preflightFailureStopsOutcomeCollection() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val workDirectories = mutableListOf<Path>()
+        var gatewayCreations = 0
+        val runner = ImportBenchmarkRunner(
+            fixture = fixture,
+            gatewayForRun = {
+                gatewayCreations += 1
+                throw OmpGatewayPreflightException("creating temporary fallback config")
+            },
+            confirmPreview = { _, _ -> true },
+            workDirectoryFactory = {
+                Files.createTempDirectory("import-benchmark-preflight-outcome-test-").also(workDirectories::add)
+            },
+        )
+
+        val failure = assertFailsWith<OmpGatewayPreflightException> {
+            runner.runOutcomes(fixture.repetitions)
+        }
+
+        assertEquals("creating temporary fallback config", failure.stage)
+        assertEquals(1, gatewayCreations)
+        assertEquals(1, workDirectories.size)
+        assertTrue(workDirectories.all { !Files.exists(it) })
+    }
+
+    @Test
+    fun temporaryDatabaseCleanupFailureStopsFurtherRepeats() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val workDirectories = mutableListOf<Path>()
+        var gatewayCreations = 0
+        val rawCleanupMarker = "RAW_CLEANUP_FAILURE_MARKER"
+        val runner = ImportBenchmarkRunner(
+            fixture = fixture,
+            gatewayForRun = {
+                gatewayCreations += 1
+                OfflineBenchmarkGateway(fixture)
+            },
+            confirmPreview = { _, _ -> true },
+            workDirectoryFactory = {
+                Files.createTempDirectory("import-benchmark-cleanup-outcome-test-").also(workDirectories::add)
+            },
+            deleteWorkDirectory = { path ->
+                deleteTestTree(path)
+                throw IllegalStateException(rawCleanupMarker)
+            },
+        )
+
+        val failure = assertFailsWith<BenchmarkCleanupException> {
+            runner.runOutcomes(fixture.repetitions)
+        }
+
+        assertEquals(1, gatewayCreations)
+        assertEquals(1, workDirectories.size)
+        assertTrue(workDirectories.all { !Files.exists(it) })
+        assertFalse(failure.message.orEmpty().contains(rawCleanupMarker))
     }
 
     @Test
@@ -476,6 +743,12 @@ class ImportBenchmarkRunnerTest {
         assertEquals(0, confirmations)
         assertEquals(1, workDirectories.size)
         assertTrue(workDirectories.all { !Files.exists(it) })
+    }
+
+    private fun deleteTestTree(path: Path) {
+        Files.walk(path).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+        }
     }
 
 }

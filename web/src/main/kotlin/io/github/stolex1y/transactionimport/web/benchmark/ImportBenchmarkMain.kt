@@ -205,7 +205,12 @@ private suspend fun runOffline(
         emit = ::println,
     )
     val metrics = runner.run(fixture.repetitions)
-    writeReport("offline", fixture, metrics.map(::ImportBenchmarkRun), options.reportPath)
+    writeReport(
+        "offline",
+        fixture,
+        metrics.map { result -> ImportBenchmarkRun(ImportBenchmarkOutcome.Scored(result)) },
+        options.reportPath,
+    )
     metrics.forEachIndexed { index, result -> printMetrics(index + 1, result) }
 }
 
@@ -215,16 +220,20 @@ private suspend fun runCodex(
 ) {
     check(options.allowCodexEgress) { "Codex mode requires --allow-codex-egress." }
     check(options.chatEgressConsent) { "Codex mode requires separate chat egress consent." }
-    val gatewayMetadata = mutableListOf<OmpGatewayMetadata>()
+    val gatewayMetadata = mutableMapOf<Int, OmpGatewayMetadata>()
     var activeSession: OmpAuthGatewaySession? = null
+    var activeSessionRepetition: Int? = null
+    var primaryFailure: Throwable? = null
     try {
         val runner = ImportBenchmarkRunner(
             fixture = fixture,
             gatewayForRun = { repetition ->
                 activeSession?.let { previous ->
-                    gatewayMetadata += previous.metadata()
+                    val previousRepetition = checkNotNull(activeSessionRepetition)
+                    gatewayMetadata[previousRepetition] = previous.metadata()
                     previous.close()
                     activeSession = null
+                    activeSessionRepetition = null
                 }
                 val session = OmpAuthGatewaySession.open(
                     modelSelector = fixture.modelSelector,
@@ -234,6 +243,7 @@ private suspend fun runCodex(
                     },
                 )
                 activeSession = session
+                activeSessionRepetition = repetition
                 println("Повтор $repetition: локальный OMP gateway ${session.metadata().gatewayVersion} готов; fallback проверен.")
                 session.gateway()
             },
@@ -250,20 +260,47 @@ private suspend fun runCodex(
             },
             emit = ::println,
         )
-        val metrics = runner.run(fixture.repetitions)
-        activeSession?.let { last -> gatewayMetadata += last.metadata() }
-        val reportRuns = metrics.mapIndexed { index, result ->
+        val outcomes = runner.runOutcomes(fixture.repetitions)
+        activeSession?.let { last ->
+            val lastRepetition = checkNotNull(activeSessionRepetition)
+            gatewayMetadata[lastRepetition] = last.metadata()
+            last.close()
+            activeSession = null
+            activeSessionRepetition = null
+        }
+        val reportRuns = outcomes.mapIndexed { index, outcome ->
             ImportBenchmarkRun(
-                result,
-                gatewayMetadata.getOrNull(index)
-                    ?: throw IllegalStateException("Missing gateway metadata for a completed repetition."),
+                outcome = outcome,
+                gateway = gatewayMetadata[index + 1],
             )
         }
         writeReport("codex", fixture, reportRuns, options.reportPath)
-        metrics.forEachIndexed { index, result -> printMetrics(index + 1, result) }
+        outcomes.forEachIndexed { index, outcome ->
+            when (outcome) {
+                is ImportBenchmarkOutcome.Scored -> printMetrics(index + 1, outcome.metrics)
+                is ImportBenchmarkOutcome.Failed ->
+                    println("Повтор ${index + 1}: завершён без оценки (${outcome.failureCode.reportValue}).")
+            }
+        }
+    } catch (error: Throwable) {
+        primaryFailure = error
+        throw error
     } finally {
-        activeSession?.let { session -> runCatching(session::close) }
-    }
+        activeSession?.let { session ->
+            try {
+                session.close()
+            } catch (cleanupError: Throwable) {
+                val originalFailure = primaryFailure
+                if (originalFailure != null) {
+                    if (originalFailure !== cleanupError) originalFailure.addSuppressed(cleanupError)
+                } else if (cleanupError is Error) {
+                    throw cleanupError
+                } else {
+                    throw BenchmarkCleanupException().also { it.addSuppressed(cleanupError) }
+                }
+            }
+        }
+}
 }
 
 internal const val APPROVED_BENCHMARK_BODY_SHA256 =
@@ -298,6 +335,7 @@ private suspend fun runCodexDiagnostic(
     check(options.allowCodexEgress) { "Diagnostic mode requires --allow-codex-egress." }
     check(options.chatEgressConsent) { "Diagnostic mode requires separate chat egress consent." }
     var activeSession: OmpAuthGatewaySession? = null
+    var primaryFailure: Throwable? = null
     try {
         val runner = ImportBenchmarkRunner(
             fixture = fixture,
@@ -340,8 +378,35 @@ private suspend fun runCodexDiagnostic(
                     (error.safeSummary ?: "provider details omitted"),
             )
         }
+    } catch (error: Throwable) {
+        primaryFailure = error
+        throw error
     } finally {
-        activeSession?.let { session -> runCatching(session::close) }
+        activeSession?.let { session ->
+            closeDiagnosticSession(
+                closeSession = session::close,
+                primaryFailure = primaryFailure,
+                emit = ::println,
+            )
+        }
+    }
+}
+
+internal fun closeDiagnosticSession(
+    closeSession: () -> Unit,
+    primaryFailure: Throwable?,
+    emit: (String) -> Unit,
+) {
+    try {
+        closeSession()
+    } catch (cleanupError: Throwable) {
+        emit("Diagnostic OMP cleanup failed; diagnostic does not report success.")
+        val originalFailure = primaryFailure
+        if (originalFailure != null) {
+            if (originalFailure !== cleanupError) originalFailure.addSuppressed(cleanupError)
+        } else {
+            throw BenchmarkCleanupException().also { it.addSuppressed(cleanupError) }
+        }
     }
 }
 

@@ -906,9 +906,12 @@ rounds в той же сессии входят в согласованный be
 результаты replay из approved fixture. Production `confirm()` вызывается
 автоматически только после проверок: source error отсутствует, preview содержит
 50 строк и точный набор внутренних source refs из fixture, draft не изменён.
-Confirm выполняется только в одноразовой SQLite DB, удаляемой после scoring.
-При несовпадении первого SHA/route или любом нарушении этих проверок прогон
-останавливается, отчёт не создаётся.
+Confirm работает только в одноразовой SQLite DB. Repeat-local failure записывается
+фиксированным safe code, база удаляется и следующие повторы продолжаются. После
+трёх исходов создаётся redacted report v2 с metrics успешных repeats и failure
+counts с разбивкой по фиксированным кодам. Отсутствующий/некорректный model ID,
+несовпадение SHA/route, preflight/readiness failure или ошибка удаления временной
+DB/OMP overlay останавливают прогон без report и следующих completions.
 
 Используйте команду с двумя обязательными CLI flags:
 
@@ -954,13 +957,13 @@ completion и прекращается до обработки tool calls, previ
 ./gradlew :web:benchmarkImport --args='--mode=codex --allow-codex-egress --chat-egress-consent'
 ```
 
-Для каждого повтора CLI проверяет SHA первого provider request и effective route
-по exact approved values; при несовпадении request не отправляется. Остальные
-model rounds того же повтора выполняются автоматически в согласованных границах
-fixture. До confirm runner проверяет 50 строк, точный набор внутренних source refs
-против fixture, `draft == null` и отсутствие receipt-source error; только после
-автоматически вызывает production `confirm()` во временной DB. Три повтора
-создают три отдельные DB/session и OMP gateway; CLI не ждёт stdin.
+Каждый repeat автоматически проверяет SHA первого provider request и effective
+route по exact approved values; при несовпадении request не отправляется.
+Последующие rounds того же повтора ограничены согласованной fixture. До confirm
+runner проверяет 50 строк, точный набор внутренних source refs против fixture,
+`draft == null` и отсутствие receipt-source error. Три isolated DB/session/OMP
+gateway дают по одному outcome: scored metrics либо fixed safe failure code;
+variation вычисляется только по успешным повторам. CLI не ждёт stdin.
 
 Fallback и usage-aware fallback отключаются временным config overlay и
 проверяются через `omp config get`; любая ошибка прекращает benchmark. Если

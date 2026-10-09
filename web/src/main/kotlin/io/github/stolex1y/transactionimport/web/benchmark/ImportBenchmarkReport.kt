@@ -17,7 +17,7 @@ import java.nio.file.StandardOpenOption.WRITE
 import java.time.Instant
 
 internal data class ImportBenchmarkRun(
-    val metrics: ImportBenchmarkMetrics,
+    val outcome: ImportBenchmarkOutcome,
     val gateway: OmpGatewayMetadata? = null,
 )
 
@@ -33,10 +33,15 @@ internal object ImportBenchmarkReportWriter {
     ): String {
         require(mode in setOf("offline", "codex"))
         require(runs.isNotEmpty())
+        val successfulMetrics = runs.mapNotNull { run ->
+            (run.outcome as? ImportBenchmarkOutcome.Scored)?.metrics
+        }
+        val successfulRunCount = successfulMetrics.size
+        val failedRunCount = runs.size - successfulRunCount
         return json.encodeToString(
             JsonObject.serializer(),
             buildJsonObject {
-                put("schemaVersion", 1)
+                put("schemaVersion", 2)
                 put("generatedAt", generatedAt)
                 put("sourceCommit", sourceCommit)
                 put("mode", mode)
@@ -44,12 +49,24 @@ internal object ImportBenchmarkReportWriter {
                 put("reasoningEffort", fixture.reasoningEffort)
                 put("fixtureSha256", fixture.sha256)
                 put("repeatCount", runs.size)
+                put("successfulRunCount", successfulRunCount)
+                put("failedRunCount", failedRunCount)
+                putJsonObject("failureCounts") {
+                    ImportBenchmarkFailureCode.entries.forEach { failureCode ->
+                        put(
+                            failureCode.reportValue,
+                            runs.count { run ->
+                                (run.outcome as? ImportBenchmarkOutcome.Failed)?.failureCode == failureCode
+                            },
+                        )
+                    }
+                }
                 putJsonArray("runs") {
                     runs.forEachIndexed { index, run ->
                         add(runJson(index + 1, run))
                     }
                 }
-                put("variation", variationJson(runs.map(ImportBenchmarkRun::metrics)))
+                put("variation", variationJson(successfulMetrics))
             },
         )
     }
@@ -68,7 +85,16 @@ internal object ImportBenchmarkReportWriter {
 
     private fun runJson(repetition: Int, run: ImportBenchmarkRun): JsonObject = buildJsonObject {
         put("repetition", repetition)
-        put("metrics", metricsJson(run.metrics))
+        when (val outcome = run.outcome) {
+            is ImportBenchmarkOutcome.Scored -> {
+                put("status", "scored")
+                put("metrics", metricsJson(outcome.metrics))
+            }
+            is ImportBenchmarkOutcome.Failed -> {
+                put("status", "failed")
+                put("failureCode", outcome.failureCode.reportValue)
+            }
+        }
         run.gateway?.let { gateway ->
             putJsonObject("gateway") {
                 put("modelSelector", gateway.modelSelector)

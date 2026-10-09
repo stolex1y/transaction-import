@@ -9,6 +9,9 @@ import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
@@ -69,6 +72,7 @@ internal class OmpStdioChatCompletionGateway(
     private val connection: OmpJsonLineConnection,
     private val approveFirstRequest: CodexRequestApproval,
     private val routingSummary: String,
+    private val startupTimeoutMs: Long = STARTUP_TIMEOUT_MS,
 ) : ChatCompletionGateway, PreCompletionRequestAuthorizer, Closeable {
     private val json = Json {
         encodeDefaults = true
@@ -90,8 +94,14 @@ internal class OmpStdioChatCompletionGateway(
     )
 
     suspend fun initialize(): String {
-        val line = withTimeout(STARTUP_TIMEOUT_MS) {
-            connection.readReadyLine() ?: throw IllegalStateException("OMP stdio gateway closed during startup.")
+        val line = try {
+            withTimeout(startupTimeoutMs) {
+                connection.readReadyLine()
+                    ?: throw IllegalStateException("OMP stdio gateway closed during startup.")
+            }
+        } catch (error: TimeoutCancellationException) {
+            if (!currentCoroutineContext().isActive) throw error
+            throw OmpGatewayPreflightException("waiting for OMP gateway readiness")
         }
         val ready = parseObject(line, "OMP stdio readiness response")
         require(ready["ready"]?.jsonPrimitive?.booleanOrNull == true) {
@@ -152,9 +162,12 @@ internal class OmpStdioChatCompletionGateway(
         if (status !in 200..299) throw OmpGatewayHttpStatusException(status)
         val responseBody = envelope["body"] as? JsonObject
             ?: throw IllegalStateException("OMP stdio gateway returned a non-JSON completion body.")
-        val actualModel = responseBody["model"]?.jsonPrimitive?.contentOrNull
+        val modelPrimitive = responseBody["model"] as? JsonPrimitive
+        val actualModel = modelPrimitive
+            ?.takeIf(JsonPrimitive::isString)
+            ?.contentOrNull
             ?.takeIf(String::isNotBlank)
-            ?: throw IllegalStateException("OMP stdio gateway response omitted its model id.")
+            ?: throw OmpGatewayModelMismatchException(null)
         if (!responseModelMatches(modelSelector, actualModel)) {
             throw OmpGatewayModelMismatchException(safeResponseModelId(actualModel))
         }
@@ -216,20 +229,36 @@ internal object OmpCodexRequestProjection {
     }
 }
 
-internal class OmpAuthGatewaySession private constructor(
+internal class OmpAuthGatewaySession internal constructor(
     private val overlayPath: Path,
     private val gateway: OmpStdioChatCompletionGateway,
     private val overlaySha256: String,
+    private val deleteOverlay: (Path) -> Unit = { path -> Files.deleteIfExists(path) },
 ) : Closeable {
     fun gateway(): OmpStdioChatCompletionGateway = gateway
 
     fun metadata(): OmpGatewayMetadata = gateway.metadata(overlaySha256)
 
     override fun close() {
+        var cleanupFailure: Throwable? = null
         try {
             gateway.close()
-        } finally {
-            Files.deleteIfExists(overlayPath)
+        } catch (error: Throwable) {
+            cleanupFailure = error
+        }
+        try {
+            deleteOverlay(overlayPath)
+        } catch (error: Throwable) {
+            val previousFailure = cleanupFailure
+            if (previousFailure == null) {
+                cleanupFailure = error
+            } else {
+                previousFailure.addSuppressed(error)
+            }
+        }
+        cleanupFailure?.let { error ->
+            if (error is Error) throw error
+            throw BenchmarkCleanupException().also { it.addSuppressed(error) }
         }
     }
 
@@ -244,16 +273,19 @@ internal class OmpAuthGatewaySession private constructor(
             require(
                 modelSelector == APPROVED_MODEL_SELECTOR && reasoningEffort == APPROVED_REASONING_EFFORT,
             ) { "Benchmark model configuration changed after approval." }
-            val overlayPath = Files.createTempFile(workingDirectory, ".import-benchmark-omp-", ".yml")
-            var stage = "writing temporary fallback config"
+            var overlayPath: Path? = null
+            var stage = "creating temporary fallback config"
             try {
-                restrictPermissions(overlayPath)
+                val createdOverlay = Files.createTempFile(workingDirectory, ".import-benchmark-omp-", ".yml")
+                overlayPath = createdOverlay
+                stage = "writing temporary fallback config"
+                restrictPermissions(createdOverlay)
                 val overlayText = OmpFallbackPolicy.overlay(modelSelector)
-                Files.writeString(overlayPath, overlayText, StandardCharsets.UTF_8)
+                Files.writeString(createdOverlay, overlayText, StandardCharsets.UTF_8)
                 val overlaySha = sha256(overlayText)
                 val inheritedEnvironment = System.getenv()
                 val routeSummary = routingSummary(inheritedEnvironment)
-                val childEnvironment = processEnvironment(inheritedEnvironment, overlayPath)
+                val childEnvironment = processEnvironment(inheritedEnvironment, createdOverlay)
                 stage = "reading retry.modelFallback"
                 val modelFallback = queryConfig(ompCommand, workingDirectory, childEnvironment, "retry.modelFallback")
                 stage = "reading retry.usageAwareFallback"
@@ -298,9 +330,9 @@ internal class OmpAuthGatewaySession private constructor(
                     gateway.close()
                     throw error
                 }
-                return OmpAuthGatewaySession(overlayPath, gateway, overlaySha)
+                return OmpAuthGatewaySession(createdOverlay, gateway, overlaySha)
             } catch (error: Throwable) {
-                Files.deleteIfExists(overlayPath)
+                overlayPath?.let { path -> runCatching { Files.deleteIfExists(path) } }
                 if (error is kotlinx.coroutines.CancellationException) throw error
                 if (error is OmpGatewayPreflightException) throw error
                 throw OmpGatewayPreflightException(stage)

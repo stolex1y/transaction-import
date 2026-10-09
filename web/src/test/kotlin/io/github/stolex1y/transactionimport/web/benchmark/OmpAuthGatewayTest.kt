@@ -18,6 +18,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.Job
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -182,6 +183,66 @@ class OmpAuthGatewayTest {
 
             assertFailsWith<IllegalStateException> { gateway.complete(request) }
             assertEquals(0, gateway.metadata("overlay-hash").requestCount)
+        }
+    }
+
+    @Test
+    fun missingOrMalformedResponseModelIdentityIsFatalMismatch() = runBlocking {
+        listOf<JsonElement?>(
+            null,
+            JsonPrimitive(""),
+            JsonPrimitive("   "),
+            JsonPrimitive(true),
+        ).forEach { responseModelElement ->
+            val request = applicationRequest()
+            val gateway = OmpStdioChatCompletionGateway(
+                modelSelector = MODEL_SELECTOR,
+                reasoningEffort = REASONING_EFFORT,
+                connection = RecordingConnection(responseModelElement = responseModelElement),
+                approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
+                routingSummary = "synthetic route",
+            )
+            gateway.initialize()
+            gateway.authorizeBeforeCompletion(request)
+
+            val failure = assertFailsWith<OmpGatewayModelMismatchException> {
+                gateway.complete(request)
+            }
+            assertEquals(null, failure.safeReportedModelId)
+            assertEquals(0, gateway.metadata("overlay-hash").requestCount)
+        }
+    }
+
+
+    @Test
+    fun gatewayReadinessTimeoutIsFatalPreflightFailure() = runBlocking {
+        val gateway = OmpStdioChatCompletionGateway(
+            modelSelector = MODEL_SELECTOR,
+            reasoningEffort = REASONING_EFFORT,
+            connection = delayedReadyConnection(),
+            approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
+            routingSummary = "synthetic route",
+            startupTimeoutMs = 10,
+        )
+
+        val failure = assertFailsWith<OmpGatewayPreflightException> { gateway.initialize() }
+
+        assertEquals("waiting for OMP gateway readiness", failure.stage)
+    }
+
+    @Test
+    fun externalStartupCancellationRemainsCancellation() = runBlocking {
+        val gateway = OmpStdioChatCompletionGateway(
+            modelSelector = MODEL_SELECTOR,
+            reasoningEffort = REASONING_EFFORT,
+            connection = delayedReadyConnection(),
+            approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
+            routingSummary = "synthetic route",
+            startupTimeoutMs = 10_000,
+        )
+
+        assertFailsWith<TimeoutCancellationException> {
+            withTimeout(10) { gateway.initialize() }
         }
     }
 
@@ -460,6 +521,55 @@ class OmpAuthGatewayTest {
             }
         }
     }
+
+    @Test
+    fun overlayCreationFailureIsAClosedPreflightFailure() = runBlocking {
+        val parent = Files.createTempDirectory("benchmark-omp-overlay-parent-test-")
+        val notDirectory = parent.resolve("not-a-directory")
+        Files.writeString(notDirectory, "synthetic")
+        try {
+            val failure = assertFailsWith<OmpGatewayPreflightException> {
+                OmpAuthGatewaySession.open(
+                    modelSelector = MODEL_SELECTOR,
+                    reasoningEffort = REASONING_EFFORT,
+                    approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
+                    workingDirectory = notDirectory,
+                )
+            }
+
+            assertEquals("creating temporary fallback config", failure.stage)
+            assertTrue(Files.list(parent).use { paths -> paths.count() == 1L })
+        } finally {
+            Files.deleteIfExists(notDirectory)
+            Files.deleteIfExists(parent)
+        }
+    }
+
+    @Test
+    fun overlayDeletionFailureIsFatalCleanupError() = runBlocking {
+        val overlay = Files.createTempFile("benchmark-omp-cleanup-test-", ".yml")
+        val gateway = OmpStdioChatCompletionGateway(
+            modelSelector = MODEL_SELECTOR,
+            reasoningEffort = REASONING_EFFORT,
+            connection = RecordingConnection(),
+            approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
+            routingSummary = "synthetic route",
+        )
+        gateway.initialize()
+        val session = OmpAuthGatewaySession(overlay, gateway, "overlay-hash") {
+            throw IllegalStateException("RAW_OVERLAY_DELETE_FAILURE")
+        }
+        try {
+            val failure = assertFailsWith<BenchmarkCleanupException> { session.close() }
+
+            assertFalse(failure.message.orEmpty().contains("RAW_OVERLAY_DELETE_FAILURE"))
+            assertEquals(1, failure.suppressed.size)
+            assertTrue(Files.exists(overlay))
+        } finally {
+            Files.deleteIfExists(overlay)
+        }
+    }
+
     @Test
     fun cancellingConfigPreflightTerminatesChildAndDeletesOverlay() = runBlocking {
         val workDirectory = Files.createTempDirectory("benchmark-omp-config-cancel-test-")
@@ -513,6 +623,16 @@ class OmpAuthGatewayTest {
     }
 
 
+    private fun delayedReadyConnection() = object : OmpJsonLineConnection {
+        override suspend fun readReadyLine(): String? {
+            delay(1_000)
+            return null
+        }
+
+        override suspend fun exchange(requestLine: String): String? = null
+        override fun close() = Unit
+    }
+
     private fun applicationRequest() = ChatCompletionRequest(
         model = "benchmark-local-model",
         messages = listOf(
@@ -534,7 +654,8 @@ class OmpAuthGatewayTest {
     )
 
     private class RecordingConnection(
-        private val responseModel: String? = EXPECTED_MODEL_ID,
+        responseModel: String? = EXPECTED_MODEL_ID,
+        private val responseModelElement: JsonElement? = responseModel?.let(::JsonPrimitive),
         private val readyVersion: String = "synthetic-omp",
         private val responseStatus: Int = 200,
         private val providerErrorBody: String? = null,
@@ -552,7 +673,7 @@ class OmpAuthGatewayTest {
                 buildJsonObject { put("error", providerErrorBody) }
             } else {
                 buildJsonObject {
-                    responseModel?.let { put("model", it) }
+                    responseModelElement?.let { put("model", it) }
                     putJsonArray("choices") {
                         add(
                             buildJsonObject {
