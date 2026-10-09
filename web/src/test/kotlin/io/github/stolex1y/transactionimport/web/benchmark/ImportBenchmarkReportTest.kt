@@ -32,11 +32,12 @@ class ImportBenchmarkReportTest {
             ),
             gateway = OmpGatewayMetadata(
                 modelSelector = fixture.modelSelector,
+                reasoningEffort = fixture.reasoningEffort,
                 gatewayVersion = "synthetic-omp-version",
                 fallbackOverlaySha256 = "a".repeat(64),
                 requestCount = 1,
                 requestFingerprints = listOf("b".repeat(64)),
-                responseModels = listOf(fixture.modelSelector),
+                responseModels = listOf("gpt-6-luna"),
             ),
         )
 
@@ -49,6 +50,8 @@ class ImportBenchmarkReportTest {
         )
 
         assertTrue(report.contains(fixture.modelSelector))
+        assertTrue(report.contains("reasoningEffort"))
+        assertTrue(report.contains("medium"))
         assertTrue(report.contains("requestFingerprints"))
         assertTrue(report.contains("selectionPrecision"))
         assertTrue(report.contains("\"range\": 0.0"))

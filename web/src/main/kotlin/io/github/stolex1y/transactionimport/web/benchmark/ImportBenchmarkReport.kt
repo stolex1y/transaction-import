@@ -41,6 +41,7 @@ internal object ImportBenchmarkReportWriter {
                 put("sourceCommit", sourceCommit)
                 put("mode", mode)
                 put("modelSelector", fixture.modelSelector)
+                put("reasoningEffort", fixture.reasoningEffort)
                 put("fixtureSha256", fixture.sha256)
                 put("repeatCount", runs.size)
                 putJsonArray("runs") {
@@ -71,6 +72,7 @@ internal object ImportBenchmarkReportWriter {
         run.gateway?.let { gateway ->
             putJsonObject("gateway") {
                 put("modelSelector", gateway.modelSelector)
+                put("reasoningEffort", gateway.reasoningEffort)
                 put("gatewayVersion", gateway.gatewayVersion)
                 put("fallbackOverlaySha256", gateway.fallbackOverlaySha256)
                 put("requestCount", gateway.requestCount)

@@ -1,5 +1,6 @@
 {
-  "model_selector": "openai-codex/gpt-6-luna:min",
+  "model_selector": "openai-codex/gpt-6-luna",
+  "reasoning_effort": "medium",
   "repetitions": 3,
   "scenario": {
     "user_turn": "Импортируй операции по совместному счета за сентябрь, включая чеки",

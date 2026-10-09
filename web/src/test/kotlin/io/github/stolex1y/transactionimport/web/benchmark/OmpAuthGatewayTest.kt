@@ -43,6 +43,7 @@ class OmpAuthGatewayTest {
         var previewCount = 0
         val gateway = OmpStdioChatCompletionGateway(
             modelSelector = MODEL_SELECTOR,
+            reasoningEffort = REASONING_EFFORT,
             connection = connection,
             approveFirstRequest = CodexRequestApproval { preview, fingerprint, routing ->
                 previewCount += 1
@@ -75,10 +76,10 @@ class OmpAuthGatewayTest {
         assertEquals(appEncoded.getValue("tools"), body.getValue("tools"))
         assertEquals(2, body.getValue("messages").jsonArray.size)
         assertFalse("thinking" in body)
-        assertFalse("reasoning_effort" in body)
+        assertEquals(REASONING_EFFORT, body.getValue("reasoning_effort").jsonPrimitive.content)
         assertFalse(body.toString().contains("OMP_AGENT_PROMPT"))
         assertEquals(1, gateway.metadata("overlay-hash").requestCount)
-        assertEquals(listOf(MODEL_SELECTOR), gateway.metadata("overlay-hash").responseModels)
+        assertEquals(listOf(EXPECTED_MODEL_ID), gateway.metadata("overlay-hash").responseModels)
     }
 
     @Test
@@ -89,6 +90,7 @@ class OmpAuthGatewayTest {
         )
         val gateway = OmpStdioChatCompletionGateway(
             modelSelector = MODEL_SELECTOR,
+            reasoningEffort = REASONING_EFFORT,
             connection = connection,
             approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
             routingSummary = "synthetic route",
@@ -110,6 +112,7 @@ class OmpAuthGatewayTest {
         val connection = RecordingConnection()
         val gateway = OmpStdioChatCompletionGateway(
             modelSelector = MODEL_SELECTOR,
+            reasoningEffort = REASONING_EFFORT,
             connection = connection,
             approveFirstRequest = CodexRequestApproval { _, _, _ -> false },
             routingSummary = "synthetic route",
@@ -126,6 +129,7 @@ class OmpAuthGatewayTest {
         val connection = RecordingConnection()
         val gateway = OmpStdioChatCompletionGateway(
             modelSelector = MODEL_SELECTOR,
+            reasoningEffort = REASONING_EFFORT,
             connection = connection,
             approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
             routingSummary = "synthetic route",
@@ -137,17 +141,19 @@ class OmpAuthGatewayTest {
     }
 
     @Test
-    fun responseModelMustMatchCodexProviderAndExactVariant() = runBlocking {
+    fun responseModelMustMatchCatalogModelId() = runBlocking {
         listOf(
             null,
             "openai-codex/other-model",
-            "other-provider/gpt-6-luna:min",
+            "other-provider/gpt-6-luna",
             "openai-codex/gpt-6-luna",
-            "openai-codex/gpt-6-luna:max",
+            "gpt-6-luna:medium",
+            "gpt-6-luna-high",
         ).forEach { responseModel ->
             val request = applicationRequest()
             val gateway = OmpStdioChatCompletionGateway(
                 modelSelector = MODEL_SELECTOR,
+                reasoningEffort = REASONING_EFFORT,
                 connection = RecordingConnection(responseModel),
                 approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
                 routingSummary = "synthetic route",
@@ -173,6 +179,7 @@ class OmpAuthGatewayTest {
         var approvalCount = 0
         val gateway = OmpStdioChatCompletionGateway(
             modelSelector = MODEL_SELECTOR,
+            reasoningEffort = REASONING_EFFORT,
             connection = connection,
             approveFirstRequest = CodexRequestApproval { _, _, _ ->
                 approvalCount += 1
@@ -196,7 +203,6 @@ class OmpAuthGatewayTest {
     fun fallbackPreflightRejectsEnabledOrNonEmptyFallbacks() {
         val emptyChains = buildJsonObject {
             putJsonArray(MODEL_SELECTOR) {}
-            putJsonArray("openai-codex/gpt-6-luna") {}
             putJsonArray("openai-codex/*") {}
         }
         OmpFallbackPolicy.verifyEffectiveSettings(
@@ -230,7 +236,7 @@ class OmpAuthGatewayTest {
                 JsonPrimitive(false),
                 JsonPrimitive(false),
                 Json.parseToJsonElement(
-                    """{"$MODEL_SELECTOR":[],"openai-codex/gpt-6-luna":[],"openai-codex/*":["other/provider"]}""",
+                    """{"$MODEL_SELECTOR":[],"openai-codex/*":["other/provider"]}""",
                 ),
             )
         }
@@ -259,6 +265,7 @@ class OmpAuthGatewayTest {
         listOf("version\ninjected", "v".repeat(65)).forEach { version ->
             val gateway = OmpStdioChatCompletionGateway(
                 modelSelector = MODEL_SELECTOR,
+                reasoningEffort = REASONING_EFFORT,
                 connection = RecordingConnection(readyVersion = version),
                 approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
                 routingSummary = "synthetic route",
@@ -375,6 +382,7 @@ class OmpAuthGatewayTest {
             val failure = assertFailsWith<OmpGatewayPreflightException> {
                 OmpAuthGatewaySession.open(
                     modelSelector = MODEL_SELECTOR,
+                    reasoningEffort = REASONING_EFFORT,
                     approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
                     ompCommand = listOf(command.toString()),
                     workingDirectory = workDirectory,
@@ -415,6 +423,7 @@ class OmpAuthGatewayTest {
             val preflight = async(Dispatchers.IO) {
                 OmpAuthGatewaySession.open(
                     modelSelector = MODEL_SELECTOR,
+                    reasoningEffort = REASONING_EFFORT,
                     approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
                     ompCommand = listOf(command.toString()),
                     workingDirectory = workDirectory,
@@ -466,7 +475,7 @@ class OmpAuthGatewayTest {
     )
 
     private class RecordingConnection(
-        private val responseModel: String? = MODEL_SELECTOR,
+        private val responseModel: String? = EXPECTED_MODEL_ID,
         private val readyVersion: String = "synthetic-omp",
         private val responseStatus: Int = 200,
         private val providerErrorBody: String? = null,
@@ -509,6 +518,8 @@ class OmpAuthGatewayTest {
     }
 
     private companion object {
-        const val MODEL_SELECTOR = "openai-codex/gpt-6-luna:min"
+        const val MODEL_SELECTOR = "openai-codex/gpt-6-luna"
+        const val EXPECTED_MODEL_ID = "gpt-6-luna"
+        const val REASONING_EFFORT = "medium"
     }
 }

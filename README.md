@@ -913,13 +913,15 @@ Codex egress остаётся заблокирован до отдельного
 `--chat-egress-consent` — дополнительное заявление оператора; CLI не читает и
 не проверяет переписку. Сам по себе этот flag не заменяет согласие в чате.
 
-Используется строго `openai-codex/gpt-6-luna:min` через `omp auth-gateway
-stdio`; OMP AgentSession, его prompt, tools и session не запускаются. Child
-process заменяет унаследованный `PI_CONFIG_FILES` единственным временным
-fallback-only overlay; OMP auth profile остаётся доступным, но настройки,
-существовавшие только в `PI_CONFIG_FILES` (включая возможный account routing),
-не применяются. Если выбор аккаунта зависит от таких настроек, egress не
-разрешайте, пока не согласован безопасный способ выбора.
+Используется catalog-supported selector `openai-codex/gpt-6-luna` через `omp
+auth-gateway stdio` с `reasoning_effort=medium`; response обязан сообщать catalog
+model ID `gpt-6-luna`. Локальный OMP catalog отдельно подтверждает модель и
+доступные thinking levels. OMP AgentSession, его prompt, tools и session не
+запускаются. Child process заменяет унаследованный `PI_CONFIG_FILES` единственным
+временным fallback-only overlay; OMP auth profile остаётся доступным, но
+настройки, существовавшие только в `PI_CONFIG_FILES` (включая возможный account
+routing), не применяются. Если выбор аккаунта зависит от таких настроек, egress
+не разрешайте, пока не согласован безопасный способ выбора.
 
 Перед первым provider request каждого повтора CLI печатает точный body и
 эффективную route policy и требует `SEND`; ввод не входит в model-call timeout,
@@ -933,10 +935,9 @@ OMP gateway.
 
 Fallback и usage-aware fallback отключаются временным config overlay и
 проверяются через `omp config get`; любая ошибка прекращает benchmark.
-Ответ provider должен строго совпадать с `openai-codex/gpt-6-luna:min`.
-Unsuffixed base ID отклоняется и не доказывает доступность выбранного варианта;
-локальный catalog показывает только base ID. Доступность `:min` проверяется
-лишь первым согласованным completion. Если selector или account authorization
+Неверный response model ID отклоняется. Новый provider body/route нужно показать
+пользователю заново и получить отдельное chat consent; прежнее согласие
+относилось к selector `:min`. Если selector или account authorization
 отклонены, первый payload всё равно мог быть передан наружу. У чеков нет
 accuracy: пользовательских receipt-link labels пока нет.
 

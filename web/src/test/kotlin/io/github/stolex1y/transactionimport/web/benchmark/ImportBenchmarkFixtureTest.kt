@@ -12,8 +12,9 @@ class ImportBenchmarkFixtureTest {
     fun bundledFixtureKeepsModelInputAndEvaluationLabelsSeparate() {
         val fixture = ImportBenchmarkFixtureLoader.loadBundled()
 
-        assertEquals("openai-codex/gpt-6-luna:min", fixture.modelSelector)
-        assertEquals("8e9e549a09315da7f9348847ff52b17012e44f12cf927237047ff6973c9f231b", fixture.sha256)
+        assertEquals("openai-codex/gpt-6-luna", fixture.modelSelector)
+        assertEquals("medium", fixture.reasoningEffort)
+        assertEquals("f3a43eb8f3d2eea95334fe0d9174fed9ce8b736f3abd0e8f7f07b08b7c6faeb4", fixture.sha256)
         assertEquals(3, fixture.repetitions)
         assertTrue(fixture.modelInput.userTurn.isNotBlank())
         assertEquals(50, fixture.modelInput.transactions.size)

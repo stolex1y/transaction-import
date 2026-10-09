@@ -23,6 +23,7 @@ import java.time.format.DateTimeParseException
 
 internal data class ImportBenchmarkFixture(
     val modelSelector: String,
+    val reasoningEffort: String,
     val repetitions: Int,
     val modelInput: ImportBenchmarkModelInput,
     val evaluationOnly: ImportBenchmarkEvaluation,
@@ -72,8 +73,9 @@ internal object ImportBenchmarkFixtureLoader {
     const val RESOURCE = "/benchmarks/codex-import-september-2026.json"
     private const val MAX_FIXTURE_BYTES = 256 * 1024
     private const val APPROVED_REPETITIONS = 3
-    private const val APPROVED_FIXTURE_SHA256 = "8e9e549a09315da7f9348847ff52b17012e44f12cf927237047ff6973c9f231b"
-    private const val MODEL_SELECTOR = "openai-codex/gpt-6-luna:min"
+    private const val APPROVED_FIXTURE_SHA256 = "f3a43eb8f3d2eea95334fe0d9174fed9ce8b736f3abd0e8f7f07b08b7c6faeb4"
+    private const val MODEL_SELECTOR = "openai-codex/gpt-6-luna"
+    private const val REASONING_EFFORT = "medium"
     private val receiptDetailKeys = setOf(
         "id", "received_at", "date_time", "merchant", "settlement_place", "total_minor", "currency", "items",
     )
@@ -134,11 +136,15 @@ internal object ImportBenchmarkFixtureLoader {
         }
         requireKeys(
             root,
-            setOf("model_selector", "repetitions", "scenario", "preferences", "tool_replay", "evaluation_only"),
+            setOf("model_selector", "reasoning_effort", "repetitions", "scenario", "preferences", "tool_replay", "evaluation_only"),
             "document",
         )
         val modelSelector = root.requiredString("model_selector", "model selector")
         require(modelSelector == MODEL_SELECTOR) { "Benchmark fixture uses an unapproved model selector." }
+        val reasoningEffort = root.requiredString("reasoning_effort", "reasoning effort")
+        require(reasoningEffort == REASONING_EFFORT) {
+            "Benchmark fixture uses an unapproved reasoning effort."
+        }
         val repetitionsValue = root.requiredLong("repetitions", "repetitions")
         require(repetitionsValue == APPROVED_REPETITIONS.toLong()) {
             "Benchmark fixture has an unapproved repetition count."
@@ -331,6 +337,7 @@ internal object ImportBenchmarkFixtureLoader {
         require(noUnredactedPhones(root)) { "Benchmark fixture contains an unredacted phone number." }
         return ImportBenchmarkFixture(
             modelSelector = modelSelector,
+            reasoningEffort = reasoningEffort,
             repetitions = repetitions,
             modelInput = ImportBenchmarkModelInput(
                 userTurn = userTurn,

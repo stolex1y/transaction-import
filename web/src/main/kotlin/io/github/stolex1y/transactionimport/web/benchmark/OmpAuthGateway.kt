@@ -42,6 +42,7 @@ import java.util.concurrent.TimeoutException
 
 internal data class OmpGatewayMetadata(
     val modelSelector: String,
+    val reasoningEffort: String,
     val gatewayVersion: String,
     val fallbackOverlaySha256: String,
     val requestCount: Int,
@@ -64,6 +65,7 @@ internal interface OmpJsonLineConnection : Closeable {
 
 internal class OmpStdioChatCompletionGateway(
     private val modelSelector: String,
+    private val reasoningEffort: String,
     private val connection: OmpJsonLineConnection,
     private val approveFirstRequest: CodexRequestApproval,
     private val routingSummary: String,
@@ -104,7 +106,7 @@ internal class OmpStdioChatCompletionGateway(
     override suspend fun authorizeBeforeCompletion(request: ChatCompletionRequest) = mutex.withLock {
         check(gatewayVersion.isNotBlank()) { "OMP stdio gateway was not initialized." }
         check(authorizedRequest == null) { "OMP gateway already has an authorized request." }
-        val body = OmpCodexRequestProjection.body(request, modelSelector, json)
+        val body = OmpCodexRequestProjection.body(request, modelSelector, reasoningEffort, json)
         val bodyText = json.encodeToString(JsonObject.serializer(), body)
         val fingerprint = sha256(bodyText)
         if (!previewApproved) {
@@ -130,7 +132,7 @@ internal class OmpStdioChatCompletionGateway(
                 "OMP completion request was not authorized before the model-call deadline."
             }
         }
-        val body = authorized?.body ?: OmpCodexRequestProjection.body(request, modelSelector, json)
+        val body = authorized?.body ?: OmpCodexRequestProjection.body(request, modelSelector, reasoningEffort, json)
         val fingerprint = authorized?.fingerprint
             ?: sha256(json.encodeToString(JsonObject.serializer(), body))
         val requestId = ++nextRequestId
@@ -169,6 +171,7 @@ internal class OmpStdioChatCompletionGateway(
 
     fun metadata(fallbackOverlaySha256: String): OmpGatewayMetadata = OmpGatewayMetadata(
         modelSelector = modelSelector,
+        reasoningEffort = reasoningEffort,
         gatewayVersion = gatewayVersion,
         fallbackOverlaySha256 = fallbackOverlaySha256,
         requestCount = requestFingerprints.size,
@@ -198,18 +201,19 @@ internal object OmpCodexRequestProjection {
     fun body(
         request: ChatCompletionRequest,
         modelSelector: String,
+        reasoningEffort: String,
         json: Json = Json { encodeDefaults = true; explicitNulls = false },
     ): JsonObject {
-        require(modelSelector == APPROVED_MODEL_SELECTOR) { "Benchmark model selector changed after approval." }
+        require(
+            modelSelector == APPROVED_MODEL_SELECTOR && reasoningEffort == APPROVED_REASONING_EFFORT,
+        ) { "Benchmark model configuration changed after approval." }
         require(request.messages.isNotEmpty()) { "Application request has no messages." }
         val fields = json.encodeToJsonElement(request).jsonObject.toMutableMap()
         fields["model"] = JsonPrimitive(modelSelector)
         fields.remove("thinking")
-        fields.remove("reasoning_effort")
+        fields["reasoning_effort"] = JsonPrimitive(reasoningEffort)
         return JsonObject(fields)
     }
-
-    private const val APPROVED_MODEL_SELECTOR = "openai-codex/gpt-6-luna:min"
 }
 
 internal class OmpAuthGatewaySession private constructor(
@@ -232,11 +236,14 @@ internal class OmpAuthGatewaySession private constructor(
     companion object {
         suspend fun open(
             modelSelector: String,
+            reasoningEffort: String,
             approveFirstRequest: CodexRequestApproval,
             ompCommand: List<String> = listOf("omp"),
             workingDirectory: Path = Path.of("").toAbsolutePath(),
         ): OmpAuthGatewaySession {
-            require(modelSelector == OMP_MODEL_SELECTOR) { "Benchmark model selector changed after approval." }
+            require(
+                modelSelector == APPROVED_MODEL_SELECTOR && reasoningEffort == APPROVED_REASONING_EFFORT,
+            ) { "Benchmark model configuration changed after approval." }
             val overlayPath = Files.createTempFile(workingDirectory, ".import-benchmark-omp-", ".yml")
             var stage = "writing temporary fallback config"
             try {
@@ -279,6 +286,7 @@ internal class OmpAuthGatewaySession private constructor(
                 val connection = ProcessOmpJsonLineConnection(process)
                 val gateway = OmpStdioChatCompletionGateway(
                     modelSelector,
+                    reasoningEffort,
                     connection,
                     approveFirstRequest,
                     routeSummary,
@@ -377,7 +385,6 @@ internal class OmpAuthGatewaySession private constructor(
         }
 
         private const val PI_CONFIG_FILES = "PI_CONFIG_FILES"
-        private const val OMP_MODEL_SELECTOR = "openai-codex/gpt-6-luna:min"
         private const val MAX_CONFIG_OUTPUT_BYTES = 64 * 1024
         private const val CONFIG_TIMEOUT_SECONDS = 15L
         private val PROFILE_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -396,16 +403,16 @@ internal class OmpGatewayHttpStatusException(
 
 internal object OmpFallbackPolicy {
     fun overlay(modelSelector: String): String {
-        require(modelSelector == MODEL_SELECTOR) { "Benchmark model selector changed after approval." }
-        val providerQualifiedModel = modelSelector.substringBeforeLast(':')
-        val provider = providerQualifiedModel.substringBefore('/')
+        require(modelSelector == APPROVED_MODEL_SELECTOR) {
+            "Benchmark model configuration changed after approval."
+        }
+        val provider = modelSelector.substringBefore('/')
         return """
             retry:
               modelFallback: false
               usageAwareFallback: false
               fallbackChains:
                 "$modelSelector": []
-                "$providerQualifiedModel": []
                 "$provider/*": []
         """.trimIndent() + "\n"
     }
@@ -416,6 +423,9 @@ internal object OmpFallbackPolicy {
         usageAwareFallback: JsonElement,
         fallbackChains: JsonElement,
     ) {
+        if (modelSelector != APPROVED_MODEL_SELECTOR) {
+            throw OmpGatewayPreflightException("unexpected approved model selector")
+        }
         if ((modelFallback as? JsonPrimitive)?.booleanOrNull != false) {
             throw OmpGatewayPreflightException("effective retry.modelFallback is not false")
         }
@@ -424,15 +434,12 @@ internal object OmpFallbackPolicy {
         }
         val chains = fallbackChains as? JsonObject
             ?: throw OmpGatewayPreflightException("effective retry.fallbackChains is not an object")
-        val providerQualifiedModel = modelSelector.substringBeforeLast(':')
-        val provider = providerQualifiedModel.substringBefore('/')
-        val requiredEmptyChains = setOf(modelSelector, providerQualifiedModel, "$provider/*")
+        val provider = modelSelector.substringBefore('/')
+        val requiredEmptyChains = setOf(modelSelector, "$provider/*")
         if (!requiredEmptyChains.all { key -> (chains[key] as? JsonArray)?.isEmpty() == true }) {
             throw OmpGatewayPreflightException("required retry.fallbackChains entries are not empty")
         }
     }
-
-    private const val MODEL_SELECTOR = "openai-codex/gpt-6-luna:min"
 }
 
 internal class ProcessOmpJsonLineConnection(
@@ -534,7 +541,11 @@ internal class ProcessOmpJsonLineConnection(
 }
 
 private fun responseModelMatches(selector: String, responseModel: String): Boolean =
-    selector == "openai-codex/gpt-6-luna:min" && responseModel == selector
+    selector == APPROVED_MODEL_SELECTOR && responseModel == APPROVED_MODEL_ID
+
+private const val APPROVED_MODEL_SELECTOR = "openai-codex/gpt-6-luna"
+private const val APPROVED_MODEL_ID = "gpt-6-luna"
+private const val APPROVED_REASONING_EFFORT = "medium"
 
 private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
     .digest(value.toByteArray(StandardCharsets.UTF_8))

@@ -108,7 +108,7 @@ private suspend fun runBenchmarkCli(args: Array<String>, input: BenchmarkConsole
 private suspend fun inspectFirstProviderRequest(fixture: ImportBenchmarkFixture): Nothing {
     val runner = ImportBenchmarkRunner(
         fixture = fixture,
-        gatewayForRun = { PayloadInspectionGateway(fixture.modelSelector) },
+        gatewayForRun = { PayloadInspectionGateway(fixture.modelSelector, fixture.reasoningEffort) },
         confirmPreview = { _, _ -> false },
     )
     runner.run(1)
@@ -118,6 +118,7 @@ private suspend fun inspectFirstProviderRequest(fixture: ImportBenchmarkFixture)
 private suspend fun runOmpPreflight(fixture: ImportBenchmarkFixture) {
     val session = OmpAuthGatewaySession.open(
         modelSelector = fixture.modelSelector,
+        reasoningEffort = fixture.reasoningEffort,
         approveFirstRequest = CodexRequestApproval { _, _, _ -> false },
     )
     try {
@@ -170,6 +171,7 @@ private suspend fun runCodex(
                 }
                 val session = OmpAuthGatewaySession.open(
                     modelSelector = fixture.modelSelector,
+                    reasoningEffort = fixture.reasoningEffort,
                     approveFirstRequest = CodexRequestApproval { body, fingerprint, routingSummary ->
                         println("Повтор $repetition: маршрут OMP: $routingSummary")
                         println("Повтор $repetition: точный provider-facing request перед отправкой")
@@ -243,9 +245,10 @@ private fun printMetrics(repetition: Int, metrics: ImportBenchmarkMetrics) {
 
 private class PayloadInspectionGateway(
     private val modelSelector: String,
+    private val reasoningEffort: String,
 ) : ChatCompletionGateway {
     override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
-        val body = OmpCodexRequestProjection.body(request, modelSelector)
+        val body = OmpCodexRequestProjection.body(request, modelSelector, reasoningEffort)
         val prettyJson = Json { prettyPrint = true; explicitNulls = false }
         val pretty = prettyJson.encodeToString(JsonObject.serializer(), body)
         val compactBody = Json { encodeDefaults = true; explicitNulls = false }
