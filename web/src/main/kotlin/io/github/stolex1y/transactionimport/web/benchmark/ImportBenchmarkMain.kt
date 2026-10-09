@@ -54,7 +54,7 @@ fun main(args: Array<String>) {
         exitProcess(1)
     } catch (error: Throwable) {
         System.err.println(
-            "Benchmark остановлен без сохранения результата (${error::class.simpleName ?: "ошибка"}); " +
+            "Benchmark остановлен без сохранения результата (${safeBenchmarkFailureLabel(error)}); " +
                 "содержимое запросов, ответов и fixture скрыто.",
         )
         exitProcess(1)
@@ -62,6 +62,31 @@ fun main(args: Array<String>) {
         input.close()
     }
 }
+
+internal fun safeBenchmarkFailureLabel(error: Throwable): String {
+    val safeFrameLabel = error.stackTrace.firstNotNullOfOrNull { frame ->
+        SAFE_FAILURE_FRAME_LABELS[frame.className to frame.methodName]
+    }
+    if (safeFrameLabel == null) return error::class.simpleName ?: "ошибка"
+    val type = error::class.simpleName ?: "ошибка"
+    return "$type at $safeFrameLabel"
+}
+
+private val SAFE_FAILURE_FRAME_LABELS = mapOf(
+    ("io.github.stolex1y.transactionimport.web.NativeMcpAgent" to "handle") to "NativeMcpAgent.handle",
+    ("io.github.stolex1y.transactionimport.web.benchmark.ImportBenchmarkReplay" to "callConfiguredTool") to
+        "ImportBenchmarkReplay.callConfiguredTool",
+    ("io.github.stolex1y.transactionimport.web.benchmark.ImportBenchmarkReplay" to "listTransactions") to
+        "ImportBenchmarkReplay.listTransactions",
+    ("io.github.stolex1y.transactionimport.web.benchmark.ImportBenchmarkReplay" to "searchReceipts") to
+        "ImportBenchmarkReplay.searchReceipts",
+    ("io.github.stolex1y.transactionimport.web.benchmark.ImportBenchmarkReplay" to "receiptDetail") to
+        "ImportBenchmarkReplay.receiptDetail",
+    ("io.github.stolex1y.transactionimport.web.benchmark.ImportBenchmarkReplay" to "requiredText") to
+        "ImportBenchmarkReplay.requiredText",
+    ("io.github.stolex1y.transactionimport.web.benchmark.ImportBenchmarkReplay" to "parseDate") to
+        "ImportBenchmarkReplay.parseDate",
+)
 
 internal class BenchmarkConsoleInput(
     private val reader: BufferedReader,

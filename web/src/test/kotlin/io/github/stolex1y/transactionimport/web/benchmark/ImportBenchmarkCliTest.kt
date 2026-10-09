@@ -122,6 +122,38 @@ class ImportBenchmarkCliTest {
     }
 
     @Test
+    fun safeFailureLabelShowsOnlyExactAllowlistedFrameAndNeverMessage() {
+        val error = IllegalArgumentException("sensitive provider content").apply {
+            stackTrace = arrayOf(
+                StackTraceElement(
+                    "io.github.stolex1y.transactionimport.web.NativeMcpAgent",
+                    "handle",
+                    "NativeMcpAgent.kt",
+                    540,
+                ),
+            )
+        }
+
+        assertEquals(
+            "IllegalArgumentException at NativeMcpAgent.handle",
+            safeBenchmarkFailureLabel(error),
+        )
+        assertFalse(safeBenchmarkFailureLabel(error).contains("sensitive provider content"))
+
+        error.stackTrace = arrayOf(
+            StackTraceElement(
+                "io.github.stolex1y.transactionimport.web.ForgedTrustedPrefix",
+                "attackerControlledMethod",
+                "Forged.kt",
+                1,
+            ),
+        )
+        assertEquals("IllegalArgumentException", safeBenchmarkFailureLabel(error))
+
+        error.stackTrace = arrayOf(StackTraceElement("untrusted.Provider", "call", "Provider.kt", 1))
+        assertEquals("IllegalArgumentException", safeBenchmarkFailureLabel(error))
+    }
+    @Test
     fun nonNetworkModesCannotWriteOrEnableCodexEgress() {
         listOf("inspect", "preflight").forEach { mode ->
             assertFailsWith<IllegalArgumentException> {

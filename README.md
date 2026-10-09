@@ -895,9 +895,8 @@ fingerprints и metadata, без prompt, ответов модели, merchant v
 По умолчанию отчёт создаётся в `web/build/reports/import-benchmark/`;
 `--report=PATH` не перезаписывает существующий файл.
 
-Codex egress остаётся заблокирован до отдельного явного согласия пользователя в
-чате после проверки точного payload и route policy. Только после такого
-согласия запускайте команду с двумя отдельными CLI flags:
+Для утверждённой fixture пользователь разрешил benchmark egress и будущие запуски
+без повторного chat-разрешения. Используйте команду с двумя обязательными CLI flags:
 
 Перед egress учитывайте: первый body содержит application prompt и tools;
 последующие model rounds могут включать scrubbed результаты replay — операции
@@ -910,8 +909,8 @@ Codex egress остаётся заблокирован до отдельного
 ./gradlew :web:benchmarkImport --args='--mode=codex --allow-codex-egress --chat-egress-consent'
 ```
 
-`--chat-egress-consent` — дополнительное заявление оператора; CLI не читает и
-не проверяет переписку. Сам по себе этот flag не заменяет согласие в чате.
+`--chat-egress-consent` включает обязательный CLI gate; оно отражает уже полученное
+согласие в чате и не проверяет переписку самостоятельно.
 
 Используется selector `openai-codex/gpt-6-luna` через `omp auth-gateway stdio`
 с `reasoning_effort=medium`. Gateway принимает только catalog ID `gpt-6-luna`
@@ -950,15 +949,13 @@ CLI показывает counts и требует `CONFIRM`; только пот
 создают три отдельные DB/session и OMP gateway.
 
 Fallback и usage-aware fallback отключаются временным config overlay и
-проверяются через `omp config get`; любая ошибка прекращает benchmark. Для нового
-полного прогона заново покажите body/route и получите отдельное chat consent;
-согласие на diagnostic completion не разрешает benchmark repeats. Если selector
-или account authorization отклонены, первый payload всё равно мог быть передан
-наружу. У чеков нет accuracy: пользовательских receipt-link labels пока нет.
+проверяются через `omp config get`; любая ошибка прекращает benchmark. Если
+selector или account authorization отклонены, первый payload всё равно мог быть
+передан наружу. У чеков нет accuracy: пользовательских receipt-link labels пока нет.
 
 При model request failure CLI показывает безопасную стадию и allowlisted
-OMP response category/status/model ID. Неизвестные ошибки остаются generic; raw
-provider response, prompts и значения fixture не выводятся.
+OMP response category/status/model ID. Для внутренних исключений показывает type
+и class/method только из закрытого allowlist; message и raw provider response скрыты.
 
 Benchmark диагностический; он не является release gate и не добавляет
 merchant/category mappings или product rules. Категория оценивается только по
