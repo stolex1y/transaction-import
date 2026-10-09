@@ -958,8 +958,9 @@ selector или account authorization отклонены, первый payload �
 
 При model request failure CLI показывает безопасную стадию и allowlisted
 OMP response category/status/model ID. Для внутренних исключений показывает type
-и class/method из closed allowlist; для известных replay-ошибок — фиксированную
-категорию. Raw message, provider response и fixture values скрыты.
+и class/method из closed allowlist; для известных replay-ошибок и фиксированных
+runner invariants — заранее заданную категорию. Raw message, provider response
+и fixture values скрыты.
 
 Benchmark диагностический; он не является release gate и не добавляет
 merchant/category mappings или product rules. Категория оценивается только по

@@ -179,6 +179,32 @@ class ImportBenchmarkCliTest {
         )
         assertFalse(safeBenchmarkFailureLabel(unknown).contains("private"))
     }
+
+    @Test
+    fun safeFailureLabelMapsKnownRunnerInvariantAndDropsUnknownMessage() {
+        val frame = StackTraceElement(
+            "io.github.stolex1y.transactionimport.web.benchmark.ImportBenchmarkRunner",
+            "runOne",
+            "ImportBenchmarkRunner.kt",
+            131,
+        )
+        val known = IllegalStateException("Benchmark model did not produce an import preview.").apply {
+            stackTrace = arrayOf(frame)
+        }
+        val unknown = IllegalStateException("raw tool arguments include account value").apply {
+            stackTrace = arrayOf(frame)
+        }
+
+        assertEquals(
+            "IllegalStateException at ImportBenchmarkRunner.runOne (model produced no import preview)",
+            safeBenchmarkFailureLabel(known),
+        )
+        assertEquals(
+            "IllegalStateException at ImportBenchmarkRunner.runOne",
+            safeBenchmarkFailureLabel(unknown),
+        )
+        assertFalse(safeBenchmarkFailureLabel(unknown).contains("account value"))
+    }
     @Test
     fun nonNetworkModesCannotWriteOrEnableCodexEgress() {
         listOf("inspect", "preflight").forEach { mode ->

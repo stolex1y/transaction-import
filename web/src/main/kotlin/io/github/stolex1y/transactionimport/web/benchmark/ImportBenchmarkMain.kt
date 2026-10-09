@@ -82,6 +82,19 @@ private val SAFE_FAILURE_DETAIL_LABELS = mapOf(
     "Benchmark replay rejected a missing tool argument." to "replay rejected missing tool argument",
     "Benchmark replay rejected an invalid date." to "replay rejected invalid date",
     "Benchmark replay rejected an invalid transaction cursor." to "replay rejected transaction cursor",
+    "Benchmark model did not produce an import preview." to "model produced no import preview",
+    "Benchmark import preview is missing." to "import preview is missing",
+    "Benchmark preview did not contain the reviewed operation set." to "preview operation set mismatch",
+    "Native MCP preview changed the draft before explicit confirmation." to "preview changed draft before confirmation",
+    "Post-confirm inclusion review failed; this repetition cannot be scored." to "post-confirm inclusion review failed",
+    "Confirmed benchmark preview did not create a draft." to "confirmed preview did not create a draft",
+    "Confirmed benchmark draft did not contain the reviewed operation set." to "confirmed draft operation set mismatch",
+    "Benchmark draft row has no source reference." to "draft row lacks source reference",
+    "Benchmark result lost the approved operation identity mapping." to "approved operation identity mapping lost",
+    "Benchmark category label is unavailable in the active catalog." to "benchmark category label unavailable",
+    "Ambiguous receipt preview omitted reviewed candidates." to "ambiguous receipt candidates omitted",
+    "Confirmation changed an ambiguous receipt review; this repetition cannot be scored." to
+        "ambiguous receipt review changed",
 )
 
 private val SAFE_FAILURE_FRAME_LABELS = mapOf(
@@ -98,6 +111,12 @@ private val SAFE_FAILURE_FRAME_LABELS = mapOf(
         "ImportBenchmarkReplay.requiredText",
     ("io.github.stolex1y.transactionimport.web.benchmark.ImportBenchmarkReplay" to "parseDate") to
         "ImportBenchmarkReplay.parseDate",
+    ("io.github.stolex1y.transactionimport.web.benchmark.ImportBenchmarkRunner" to "runOne") to
+        "ImportBenchmarkRunner.runOne",
+    ("io.github.stolex1y.transactionimport.web.benchmark.ImportBenchmarkRunner" to "score") to
+        "ImportBenchmarkRunner.score",
+    ("io.github.stolex1y.transactionimport.web.benchmark.ImportBenchmarkRunner" to "requireAmbiguousReviewsPreserved") to
+        "ImportBenchmarkRunner.requireAmbiguousReviewsPreserved",
 )
 
 internal class BenchmarkConsoleInput(
