@@ -3,6 +3,9 @@ package io.github.stolex1y.transactionimport.web.benchmark
 import io.github.stolex1y.transactionimport.web.McpCallableTool
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -87,6 +90,62 @@ class ImportBenchmarkReplayTest {
             Json.parseToJsonElement(details.text).jsonObject.getValue("items").jsonArray.size
         }
         assertEquals(25, itemCount)
+    }
+
+    @Test
+    fun emptyTransactionCursorMatchesFirstPageButMalformedCursorFailsClosed() = runBlocking {
+        val replay = ImportBenchmarkReplay(ImportBenchmarkFixtureLoader.loadBundled())
+        val omittedCursor = call(
+            replay,
+            "tbank-transactions",
+            "get-account-transactions",
+            buildJsonObject {
+                put("account_ref", "benchmark-account")
+                put("from", "2026-09-01")
+                put("to", "2026-09-30")
+                put("limit", 100)
+            },
+        )
+        val emptyCursor = call(
+            replay,
+            "tbank-transactions",
+            "get-account-transactions",
+            buildJsonObject {
+                put("account_ref", "benchmark-account")
+                put("from", "2026-09-01")
+                put("to", "2026-09-30")
+                put("limit", 100)
+                put("cursor", "")
+            },
+        )
+        val page = Json.parseToJsonElement(emptyCursor.text).jsonObject
+        assertEquals(Json.parseToJsonElement(omittedCursor.text).jsonObject, page)
+        assertEquals(50, page.getValue("transactions").jsonArray.size)
+        assertEquals("false", page.getValue("has_more").jsonPrimitive.content)
+        assertEquals("", page.getValue("next_cursor").jsonPrimitive.content)
+
+        val invalidCursors = listOf<JsonElement>(
+            JsonPrimitive(" "),
+            JsonPrimitive("not-an-offset"),
+            JsonPrimitive("-1"),
+            JsonNull,
+            JsonPrimitive(1),
+        )
+        invalidCursors.forEach { malformedCursor ->
+            assertFailsWith<IllegalArgumentException> {
+                call(
+                    replay,
+                    "tbank-transactions",
+                    "get-account-transactions",
+                    buildJsonObject {
+                        put("account_ref", "benchmark-account")
+                        put("from", "2026-09-01")
+                        put("to", "2026-09-30")
+                        put("cursor", malformedCursor)
+                    },
+                )
+            }
+        }
     }
 
     @Test

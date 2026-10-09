@@ -106,8 +106,13 @@ internal class ImportBenchmarkReplay(
         }
         val limit = arguments["limit"]?.jsonPrimitive?.intOrNull ?: DEFAULT_TRANSACTION_LIMIT
         require(limit in 1..MAX_TRANSACTION_LIMIT) { "Benchmark replay rejected an invalid page limit." }
-        val offset = arguments["cursor"]?.jsonPrimitive?.contentOrNull
-            ?.let(::parseTransactionCursor) ?: 0
+        val cursorValue = arguments["cursor"]
+        val offset = when {
+            cursorValue == null -> 0
+            cursorValue is JsonPrimitive && cursorValue.isString ->
+                cursorValue.content.takeUnless(String::isEmpty)?.let(::parseTransactionCursor) ?: 0
+            else -> throw IllegalArgumentException("Benchmark replay rejected an invalid transaction cursor.")
+        }
         val matching = fixture.modelInput.transactions.filter { transaction ->
             val date = parseDate(transaction.occurredAt)
             date >= from && date <= to

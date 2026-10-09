@@ -895,6 +895,9 @@ fingerprints и metadata, без prompt, ответов модели, merchant v
 По умолчанию отчёт создаётся в `web/build/reports/import-benchmark/`;
 `--report=PATH` не перезаписывает существующий файл.
 
+В локальном transaction replay пустой optional `cursor` означает первую страницу;
+непустой нечисловой cursor остаётся ошибкой.
+
 Для утверждённой fixture пользователь разрешил benchmark egress и будущие запуски
 без повторного chat-разрешения. Используйте команду с двумя обязательными CLI flags:
 
