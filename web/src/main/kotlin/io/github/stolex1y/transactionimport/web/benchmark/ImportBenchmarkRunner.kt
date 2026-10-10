@@ -116,8 +116,14 @@ internal class ImportBenchmarkRunner(
         val results = ArrayList<ImportBenchmarkMetrics>(repetitions)
         for (repetition in 1..repetitions) {
             var validatedDraft: ImportBenchmarkDraftSnapshot? = null
+            var validatedPreview: ImportBenchmarkPreviewSnapshot? = null
             val result = try {
-                runOne(repetition, classifyRepeatFailures = false) { validatedDraft = it }
+                runOne(
+                    repetition,
+                    classifyRepeatFailures = false,
+                    onValidatedDraft = { validatedDraft = it },
+                    onValidatedPreview = { validatedPreview = it },
+                )
             } catch (error: Throwable) {
                 val failureCode = failureCodeFor(error)
                 if (failureCode != null) {
@@ -125,6 +131,7 @@ internal class ImportBenchmarkRunner(
                         repetition,
                         ImportBenchmarkOutcome.Failed(failureCode),
                         validatedDraft,
+                        preview = validatedPreview,
                     )
                 }
                 throw error
@@ -144,9 +151,15 @@ internal class ImportBenchmarkRunner(
         val outcomes = ArrayList<ImportBenchmarkOutcome>(repetitions)
         for (repetition in 1..repetitions) {
             var validatedDraft: ImportBenchmarkDraftSnapshot? = null
+            var validatedPreview: ImportBenchmarkPreviewSnapshot? = null
             var terminalFailure: Throwable? = null
             val outcome = try {
-                val result = runOne(repetition, classifyRepeatFailures = true) { validatedDraft = it }
+                val result = runOne(
+                    repetition,
+                    classifyRepeatFailures = true,
+                    onValidatedDraft = { validatedDraft = it },
+                    onValidatedPreview = { validatedPreview = it },
+                )
                 ImportBenchmarkOutcome.Scored(result.metrics)
             } catch (error: ImportBenchmarkCancelledException) {
                 terminalFailure = error
@@ -170,7 +183,7 @@ internal class ImportBenchmarkRunner(
             } catch (error: Exception) {
                 ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.UNEXPECTED_REPEAT_FAILURE)
             }
-            draftArtifactWriter?.write(repetition, outcome, validatedDraft)
+            draftArtifactWriter?.write(repetition, outcome, validatedDraft, preview = validatedPreview)
             outcomes += outcome
             terminalFailure?.let { throw it }
         }
@@ -194,7 +207,9 @@ internal class ImportBenchmarkRunner(
         repetition: Int,
         classifyRepeatFailures: Boolean,
         onValidatedDraft: (ImportBenchmarkDraftSnapshot) -> Unit,
+        onValidatedPreview: (ImportBenchmarkPreviewSnapshot) -> Unit,
     ): ImportBenchmarkRepeatResult {
+
 
         val workDirectory = workDirectoryFactory()
         var primaryFailure: Throwable? = null
@@ -270,9 +285,6 @@ internal class ImportBenchmarkRunner(
                 } else {
                     throw IllegalStateException("Benchmark import preview is missing.")
                 }
-            if (preview.receiptMatching?.status == ReceiptMatchingStageStatus.SOURCE_ERROR) {
-                throw ImportBenchmarkReceiptSourceException()
-            }
             val expectedSourceRefs = fixture.modelInput.transactions.map { it.id }.toSet()
             val previewSourceRefs = previewTransactionSourceRefs(
                 native,
@@ -306,6 +318,34 @@ internal class ImportBenchmarkRunner(
                     expectedSourceRefs = expectedSourceRefs,
                     previewSourceRefs = previewSourceRefs,
                 )
+            }
+            if (preview.receiptMatching?.status == ReceiptMatchingStageStatus.SOURCE_ERROR) {
+                val snapshot = try {
+                    ImportBenchmarkDraftArtifactWriter.snapshotPreview(
+                        fixture = fixture,
+                        preview = preview,
+                        sourceRefs = previewSourceRefs,
+                        categories = repository.listCategories(),
+                    )
+                } catch (error: IllegalArgumentException) {
+                    if (classifyRepeatFailures) {
+                        throw ImportBenchmarkRepeatFailure(
+                            ImportBenchmarkFailureCode.INVALID_PREVIEW,
+                            "Benchmark preview did not contain the reviewed operation set.",
+                        )
+                    }
+                    throw error
+                } catch (error: IllegalStateException) {
+                    if (classifyRepeatFailures) {
+                        throw ImportBenchmarkRepeatFailure(
+                            ImportBenchmarkFailureCode.INVALID_PREVIEW,
+                            "Benchmark preview did not contain the reviewed operation set.",
+                        )
+                    }
+                    throw error
+                }
+                onValidatedPreview(snapshot)
+                throw ImportBenchmarkReceiptSourceException()
             }
             val previewSummary = previewSummary(preview)
             emitPreview(repetition, previewSummary)

@@ -5,6 +5,9 @@ import io.github.stolex1y.transactionimport.core.ImportDraft
 import io.github.stolex1y.transactionimport.core.ReceiptAssociation
 import io.github.stolex1y.transactionimport.core.ReceiptAssociationSummary
 import io.github.stolex1y.transactionimport.core.TransactionCategory
+import io.github.stolex1y.transactionimport.web.McpPreview
+import io.github.stolex1y.transactionimport.web.McpPreviewTransaction
+import io.github.stolex1y.transactionimport.web.ReceiptMatchingStageStatus
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -26,6 +29,11 @@ internal data class ImportBenchmarkDraftSnapshot(
     val rows: Map<String, JsonObject>,
 )
 
+internal data class ImportBenchmarkPreviewSnapshot(
+    val status: String,
+    val rows: Map<String, JsonObject>,
+)
+
 internal class ImportBenchmarkDraftArtifactWriter(
     private val fixture: ImportBenchmarkFixture,
     private val directory: Path = Path.of("build", "reports", "import-benchmark"),
@@ -37,14 +45,23 @@ internal class ImportBenchmarkDraftArtifactWriter(
         outcome: ImportBenchmarkOutcome,
         draft: ImportBenchmarkDraftSnapshot?,
         generatedAt: String = Instant.now().toString(),
+        preview: ImportBenchmarkPreviewSnapshot? = null,
     ): Path {
         require(repetition in 1..fixture.repetitions)
         require(outcome !is ImportBenchmarkOutcome.Scored || draft != null) {
             "A scored benchmark artifact requires its validated draft."
         }
+        require(preview == null || draft == null) {
+            "A pre-confirmation preview cannot be stored as a finalized draft."
+        }
         val path = directory.resolve(fileNameForRepetition(repetition))
-        ImportBenchmarkReportWriter.writeNew(path, render(repetition, outcome, draft, generatedAt))
-        emit("Повтор $repetition: нормализованный draft сохранён локально: ${path.toAbsolutePath().normalize()}.")
+        ImportBenchmarkReportWriter.writeNew(path, render(repetition, outcome, draft, generatedAt, preview))
+        val savedKind = when {
+            draft != null -> "нормализованный draft"
+            preview != null -> "валидированный preview"
+            else -> "failure artifact"
+        }
+        emit("Повтор $repetition: $savedKind сохранён локально: ${path.toAbsolutePath().normalize()}.")
         return path
     }
 
@@ -53,10 +70,11 @@ internal class ImportBenchmarkDraftArtifactWriter(
         outcome: ImportBenchmarkOutcome,
         draft: ImportBenchmarkDraftSnapshot?,
         generatedAt: String,
+        preview: ImportBenchmarkPreviewSnapshot? = null,
     ): String = json.encodeToString(
         JsonObject.serializer(),
         buildJsonObject {
-            put("schemaVersion", 1)
+            put("schemaVersion", 2)
             put("generatedAt", generatedAt)
             put("repetition", repetition)
             put("modelSelector", fixture.modelSelector)
@@ -75,6 +93,13 @@ internal class ImportBenchmarkDraftArtifactWriter(
                     put("status", draft.status)
                     put("version", draft.version)
                     put("rows", JsonObject(draft.rows))
+                })
+            }
+            preview?.let {
+                put("preview", buildJsonObject {
+                    put("status", it.status)
+                    put("confirmed", false)
+                    put("rows", JsonObject(it.rows))
                 })
             }
         },
@@ -111,6 +136,51 @@ internal class ImportBenchmarkDraftArtifactWriter(
             return ImportBenchmarkDraftSnapshot(
                 status = draft.status.name.lowercase(),
                 version = draft.version,
+                rows = rows.toSortedMap(),
+            )
+        }
+
+        fun snapshotPreview(
+            fixture: ImportBenchmarkFixture,
+            preview: McpPreview,
+            sourceRefs: List<String?>?,
+            categories: List<TransactionCategory>,
+        ): ImportBenchmarkPreviewSnapshot {
+            val receiptMatching = preview.receiptMatching
+                ?.takeIf { it.status == ReceiptMatchingStageStatus.SOURCE_ERROR }
+                ?: throw IllegalStateException("Benchmark preview is not a receipt-source failure.")
+            val expectedSourceRefs = fixture.modelInput.transactions.map { transaction ->
+                require(transaction.id.matches(Regex("TX\\d{2}"))) {
+                    "Benchmark operation reference is not scrubbed."
+                }
+                transaction.id
+            }.toSet()
+            requireValidBenchmarkPreview(
+                preview = preview,
+                draftIsPresent = false,
+                expectedSourceRefs = expectedSourceRefs,
+                previewSourceRefs = sourceRefs,
+            )
+            val labelsBySourceRef = expectedSourceRefs.associateWith { it }
+            val categoryNames = ImportBenchmarkScoring.activeExpenseLeafNamesById(categories)
+            val categoryIdsByName = categoryNames.entries.associate { (id, name) -> name to id }
+            val refs = checkNotNull(sourceRefs)
+            val rows = preview.transactions.mapIndexed { index, transaction ->
+                val label = refs[index]?.let(labelsBySourceRef::get)
+                    ?: throw IllegalStateException("Benchmark preview has an unreviewed source reference.")
+                label to previewRowJson(
+                    fixture,
+                    transaction,
+                    label,
+                    categoryNames,
+                    categoryIdsByName,
+                )
+            }.toMap()
+            require(rows.size == preview.transactions.size && rows.keys == expectedSourceRefs) {
+                "Benchmark preview does not contain the reviewed operation set."
+            }
+            return ImportBenchmarkPreviewSnapshot(
+                status = receiptMatching.status.name.lowercase(),
                 rows = rows.toSortedMap(),
             )
         }
@@ -199,6 +269,70 @@ internal class ImportBenchmarkDraftArtifactWriter(
                         categoryComparison,
                     )
                     put("receiptAssociation", comparison(receiptMatches))
+                })
+            }
+        }
+
+        private fun previewRowJson(
+            fixture: ImportBenchmarkFixture,
+            row: McpPreviewTransaction,
+            label: String,
+            categoryNames: Map<String, String>,
+            categoryIdsByName: Map<String, String>,
+        ): JsonObject {
+            val actualCategory = row.categoryId?.let(categoryNames::get)
+            val hasExpectedCategoryLabel = label in fixture.evaluationOnly.categories
+            val expectedCategory = fixture.evaluationOnly.categories[label]
+            val expectedCategoryId = expectedCategory?.let(categoryIdsByName::get)
+            val categoryMatches = when {
+                expectedCategory == null -> row.categoryId == null
+                expectedCategoryId == null -> false
+                else -> row.categoryId == expectedCategoryId
+            }
+            val categoryComparison = if (hasExpectedCategoryLabel) {
+                comparison(categoryMatches)
+            } else {
+                "unlabeled"
+            }
+            val expectedReceipt = fixture.evaluationOnly.receiptAssociations.getValue(label)
+            return buildJsonObject {
+                put("actual", buildJsonObject {
+                    put("description", row.description)
+                    putNullable("direction", row.direction?.name?.lowercase())
+                    put("occurredAt", row.occurredAt)
+                    put("amountMinor", row.amountMinor)
+                    put("currency", row.currency)
+                    put("merchant", row.merchant)
+                    putNullable("sourceLabel", row.sourceLabel)
+                    putNullable("categoryId", row.categoryId)
+                    putNullable("category", actualCategory)
+                    put("categoryIssuePresent", row.categoryIssue != null)
+                    putJsonArray("items") {
+                        row.items.forEach { item ->
+                            add(buildJsonObject {
+                                put("name", item.name)
+                                put("quantity", item.quantity)
+                                put("priceMinor", item.priceMinor)
+                                put("sumMinor", item.sumMinor)
+                                put("currency", item.currency)
+                            })
+                        }
+                    }
+                    put("receiptAssociation", receiptAssociationJson(row.receiptAssociation) ?: JsonNull)
+                })
+                put("expected", buildJsonObject {
+                    put("selection", fixture.evaluationOnly.selection.getValue(label))
+                    if (hasExpectedCategoryLabel) {
+                        put("category", expectedCategory?.let(::JsonPrimitive) ?: JsonNull)
+                    } else {
+                        put("category", buildJsonObject { put("state", "unlabeled") })
+                    }
+                    put("receiptAssociation", expectedReceiptJson(fixture, expectedReceipt))
+                })
+                put("comparisons", buildJsonObject {
+                    put("selection", "not_finalized")
+                    put("category", categoryComparison)
+                    put("receiptAssociation", "not_scored")
                 })
             }
         }

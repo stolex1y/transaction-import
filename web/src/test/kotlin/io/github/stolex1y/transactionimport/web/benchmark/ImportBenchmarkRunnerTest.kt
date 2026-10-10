@@ -15,6 +15,10 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -397,7 +401,7 @@ class ImportBenchmarkRunnerTest {
     }
 
     @Test
-    fun receiptSearchSourceFailureAbortsBeforeConfirmationAndCleansTemporaryDatabase() = runBlocking {
+    fun receiptSearchSourceFailureSavesOnlyValidatedPreviewAndAbortsBeforeConfirmation() = runBlocking {
         val approved = ImportBenchmarkFixtureLoader.loadBundled()
         val fixture = approved.copy(
             modelInput = approved.modelInput.copy(
@@ -407,36 +411,126 @@ class ImportBenchmarkRunnerTest {
             ),
         )
         val workDirectories = mutableListOf<Path>()
+        val artifactDirectory = Files.createTempDirectory("import-benchmark-source-error-artifact-test-")
         val output = mutableListOf<String>()
         var gatewayCreations = 0
         var confirmations = 0
-        val runner = ImportBenchmarkRunner(
-            fixture = fixture,
-            gatewayForRun = { repetition ->
-                assertEquals(repetition, workDirectories.size)
-                assertTrue(Files.exists(workDirectories[repetition - 1].resolve("benchmark.sqlite")))
-                gatewayCreations += 1
-                OfflineBenchmarkGateway(fixture)
-            },
-            confirmPreview = { _, _ ->
-                confirmations += 1
-                true
-            },
-            workDirectoryFactory = {
-                Files.createTempDirectory("import-benchmark-source-error-test-").also(workDirectories::add)
-            },
-            emit = output::add,
-        )
+        try {
+            val writer = ImportBenchmarkDraftArtifactWriter(
+                fixture = fixture,
+                directory = artifactDirectory,
+                fileNameForRepetition = { "draft-repeat-$it.json" },
+            )
+            val runner = ImportBenchmarkRunner(
+                fixture = fixture,
+                gatewayForRun = { repetition ->
+                    assertEquals(repetition, workDirectories.size)
+                    assertTrue(Files.exists(workDirectories[repetition - 1].resolve("benchmark.sqlite")))
+                    gatewayCreations += 1
+                    OfflineBenchmarkGateway(fixture)
+                },
+                confirmPreview = { _, _ ->
+                    confirmations += 1
+                    true
+                },
+                workDirectoryFactory = {
+                    Files.createTempDirectory("import-benchmark-source-error-test-").also(workDirectories::add)
+                },
+                emit = output::add,
+                draftArtifactWriter = writer,
+            )
 
-        assertFailsWith<ImportBenchmarkReceiptSourceException> {
-            runner.run(fixture.repetitions)
+            assertFailsWith<ImportBenchmarkReceiptSourceException> {
+                runner.run(fixture.repetitions)
+            }
+
+            assertEquals(1, gatewayCreations)
+            assertEquals(0, confirmations)
+            assertTrue(output.isEmpty())
+            assertEquals(1, workDirectories.size)
+            assertTrue(workDirectories.all { !Files.exists(it) })
+
+            val artifactText = Files.readString(artifactDirectory.resolve("draft-repeat-1.json"))
+            val artifact = Json.parseToJsonElement(artifactText).jsonObject
+            assertEquals("2", artifact.getValue("schemaVersion").jsonPrimitive.content)
+            assertEquals("failed", artifact.getValue("status").jsonPrimitive.content)
+            assertEquals("receipt_source_failed", artifact.getValue("failureCode").jsonPrimitive.content)
+            assertEquals(JsonNull, artifact.getValue("draft"))
+            val preview = artifact.getValue("preview").jsonObject
+            assertEquals("source_error", preview.getValue("status").jsonPrimitive.content)
+            assertEquals("false", preview.getValue("confirmed").jsonPrimitive.content)
+            val rows = preview.getValue("rows").jsonObject
+            assertEquals(fixture.modelInput.transactions.map { it.id }.toSet(), rows.keys)
+            assertEquals(50, rows.size)
+
+            val firstId = fixture.modelInput.transactions.first().id
+            val firstRow = rows.getValue(firstId).jsonObject
+            val actual = firstRow.getValue("actual").jsonObject
+            val expected = firstRow.getValue("expected").jsonObject
+            val comparisons = firstRow.getValue("comparisons").jsonObject
+            assertTrue("merchant" in actual)
+            assertTrue("categoryId" in actual)
+            assertFalse("sourceRef" in actual)
+            assertEquals(
+                fixture.evaluationOnly.selection.getValue(firstId).toString(),
+                expected.getValue("selection").jsonPrimitive.content,
+            )
+            assertEquals("not_finalized", comparisons.getValue("selection").jsonPrimitive.content)
+            assertEquals("not_scored", comparisons.getValue("receiptAssociation").jsonPrimitive.content)
+            assertTrue(comparisons.getValue("category").jsonPrimitive.content in setOf("matched", "mismatched"))
+
+            assertFalse(artifactText.contains(fixture.modelInput.userTurn))
+            assertFalse(artifactText.contains("messages"))
+            assertFalse(artifactText.contains("rawResponse"))
+            fixture.modelInput.receiptSummaries.forEach { receipt ->
+                assertFalse(artifactText.contains("\"${receipt.id}\""))
+            }
+            fixture.modelInput.receiptDetails.keys.forEach { receiptId ->
+                assertFalse(artifactText.contains("\"$receiptId\""))
+            }
+        } finally {
+            deleteTestTree(artifactDirectory)
         }
+    }
 
-        assertEquals(1, gatewayCreations)
-        assertEquals(0, confirmations)
-        assertTrue(output.isEmpty())
-        assertEquals(1, workDirectories.size)
-        assertTrue(workDirectories.all { !Files.exists(it) })
+    @Test
+    fun invalidPreviewIdentityDoesNotSavePreviewArtifact() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val expectedIds = fixture.modelInput.transactions.map { it.id }
+        val invalidIds = expectedIds.dropLast(1) + "TX_UNEXPECTED"
+        val artifactDirectory = Files.createTempDirectory("import-benchmark-invalid-preview-artifact-test-")
+        var confirmations = 0
+        try {
+            val writer = ImportBenchmarkDraftArtifactWriter(
+                fixture = fixture,
+                directory = artifactDirectory,
+                fileNameForRepetition = { "draft-repeat-$it.json" },
+            )
+            val runner = ImportBenchmarkRunner(
+                fixture = fixture,
+                gatewayForRun = { OfflineBenchmarkGateway(fixture) },
+                confirmPreview = { _, _ ->
+                    confirmations += 1
+                    true
+                },
+                previewTransactionSourceRefs = { _, _, _, _ -> invalidIds },
+                draftArtifactWriter = writer,
+            )
+
+            assertEquals(
+                ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.INVALID_PREVIEW),
+                runner.runOutcomes(1).single(),
+            )
+            assertEquals(0, confirmations)
+
+            val artifact = Json.parseToJsonElement(
+                Files.readString(artifactDirectory.resolve("draft-repeat-1.json")),
+            ).jsonObject
+            assertEquals(JsonNull, artifact.getValue("draft"))
+            assertFalse("preview" in artifact)
+        } finally {
+            deleteTestTree(artifactDirectory)
+        }
     }
 
     @Test
