@@ -166,6 +166,63 @@ class ImportBenchmarkReplayTest {
         }
     }
 
+    @Test
+    fun receiptSearchSupportsFullRefundLookbackButRejectsOutsideApprovedEnvelope() = runBlocking {
+        val replay = ImportBenchmarkReplay(ImportBenchmarkFixtureLoader.loadBundled())
+
+        val refundWindow = call(
+            replay,
+            "receipts",
+            "search-receipts",
+            buildJsonObject {
+                put("from", "2026-08-27")
+                put("to", "2026-09-10")
+                put("limit", 20)
+                put("offset", 0)
+            },
+        )
+        assertFalse(refundWindow.isError)
+        val refundReceipts = Json.parseToJsonElement(refundWindow.text).jsonObject
+            .getValue("receipts").jsonArray
+        assertTrue(refundReceipts.isNotEmpty())
+        assertTrue(refundReceipts.all { receipt ->
+            val date = receipt.jsonObject.getValue("received_at").jsonPrimitive.content.take(10)
+            date >= "2026-08-27" && date <= "2026-09-10"
+        })
+
+        val earliestApprovedWindow = call(
+            replay,
+            "receipts",
+            "search-receipts",
+            buildJsonObject {
+                put("from", "2026-08-18")
+                put("to", "2026-10-01")
+                put("limit", 20)
+                put("offset", 0)
+            },
+        )
+        assertFalse(earliestApprovedWindow.isError)
+
+        listOf(
+            "2026-08-17" to "2026-10-01",
+            "2026-08-18" to "2026-10-02",
+        ).forEach { (from, to) ->
+            assertFailsWith<IllegalArgumentException> {
+                call(
+                    replay,
+                    "receipts",
+                    "search-receipts",
+                    buildJsonObject {
+                        put("from", from)
+                        put("to", to)
+                        put("limit", 20)
+                        put("offset", 0)
+                    },
+                )
+            }
+        }
+    }
+
     private suspend fun call(
         replay: ImportBenchmarkReplay,
         serverId: String,

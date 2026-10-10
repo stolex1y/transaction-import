@@ -914,6 +914,9 @@ identity остаётся неподтверждённой.
 `offline` выполняет три изолированных fake-повтора через production pipeline.
 Каждый preview автоматически подтверждается только в одноразовой SQLite DB,
 чтобы production `confirm()` вычислил inclusion; DB удаляется после scoring.
+Receipt fixture replay разрешает поиск от 14 дней до начала approved периода
+операций и до одного дня после его конца. Поиск всё равно фильтруется по
+утверждённой fixture; более широкий real-source доступ не включается.
 Это проверяет путь, но не качество Codex. Агрегированный отчёт содержит только
 метрики, fingerprints и metadata, без prompt, ответов модели, merchant values и
 IDs. `--report=PATH` задаёт только путь этого redacted-отчёта; существующий файл

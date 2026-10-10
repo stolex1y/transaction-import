@@ -238,7 +238,7 @@ internal class ImportBenchmarkReplay(
         val RECEIPT_ID_PATTERN = Regex("C\\d{3}")
         val APPROVED_FROM: LocalDate = LocalDate.parse("2026-09-01")
         val APPROVED_TO: LocalDate = LocalDate.parse("2026-09-30")
-        val RECEIPT_QUERY_FROM: LocalDate = LocalDate.parse("2026-08-31")
-        val RECEIPT_QUERY_TO: LocalDate = LocalDate.parse("2026-10-01")
+        val RECEIPT_QUERY_FROM: LocalDate = APPROVED_FROM.minusDays(14)
+        val RECEIPT_QUERY_TO: LocalDate = APPROVED_TO.plusDays(1)
     }
 }
