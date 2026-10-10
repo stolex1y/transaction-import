@@ -3393,7 +3393,11 @@ function createOperationCard(row) {
         ),
         fieldControl("Счёт / карта", readOnlyInput("source_label", editor.source_label), row, "source_label", editor.included),
     );
-    const receiptStatus = receiptAssociationIndicator(row.transaction.receipt_association, row.id);
+    const receiptStatus = receiptAssociationIndicator(
+        row.transaction.receipt_association,
+        row.id,
+        !editor.direction_unresolved && !dirtyFields.has(row.id),
+    );
     const itemDetails = transactionItemsDetails(row.transaction.items);
     const generalErrors = editor.included ? (row.field_errors?._transaction || []) : [];
     const footer = document.createElement("div");
@@ -3454,7 +3458,11 @@ function createOperationTableRow(row) {
         "description",
         editor.included,
     );
-    const receiptStatus = receiptAssociationIndicator(row.transaction.receipt_association, row.id);
+    const receiptStatus = receiptAssociationIndicator(
+        row.transaction.receipt_association,
+        row.id,
+        !editor.direction_unresolved && !dirtyFields.has(row.id),
+    );
     const itemDetails = transactionItemsDetails(row.transaction.items);
     if (receiptStatus) descriptionCell.append(receiptStatus);
     if (itemDetails) descriptionCell.append(itemDetails);
@@ -3484,7 +3492,7 @@ function createOperationTableRow(row) {
     tableRow.append(tableCell(action));
     return tableRow;
 }
-function receiptAssociationIndicator(association, transactionId = null) {
+function receiptAssociationIndicator(association, transactionId = null, directionConfirmed = false) {
     if (!association || typeof association.status !== "string") return null;
     const indicator = document.createElement("div");
     indicator.className = `receipt-association-status ${association.status}`;
@@ -3503,6 +3511,14 @@ function receiptAssociationIndicator(association, transactionId = null) {
         title.textContent = "Чек требует уточнения";
         const review = association.review;
         if (review && typeof review.reason === "string") {
+            const reason = review.reason;
+            const directionUnknown = reason === "bank_direction_unknown";
+            const receiptTypeNeedsRecheck = [
+                "receipt_operation_type_unknown",
+                "receipt_operation_type_incompatible",
+                "receipt_detail_unavailable",
+            ].includes(reason);
+            const canRetry = !directionUnknown || directionConfirmed;
             const explanation = document.createElement("p");
             const reasons = {
                 multiple_candidates: "Подошло несколько чеков.",
@@ -3510,8 +3526,14 @@ function receiptAssociationIndicator(association, transactionId = null) {
                 shared_by_operations: "Один чек подходит нескольким операциям.",
                 duplicate_selection: "Этот чек уже использован другой операцией.",
                 operation_type_unknown: "Категория не определена; направление операции известно.",
+                bank_direction_unknown: directionConfirmed
+                    ? "Направление операции сохранено; проверьте чек повторно."
+                    : "Сначала подтвердите и сохраните направление операции.",
+                receipt_operation_type_unknown: "В чеке не указан поддерживаемый тип операции.",
+                receipt_operation_type_incompatible: "Тип чека не совпадает с направлением банковской операции.",
+                receipt_detail_unavailable: "Детали чека недоступны; автоматическое подтверждение отключено.",
             };
-            explanation.textContent = reasons[review.reason] || "Нужно уточнение.";
+            explanation.textContent = reasons[reason] || "Нужно уточнение.";
             indicator.append(title, explanation);
             const candidates = Array.isArray(review.candidates) ? review.candidates.slice(0, 5) : [];
             if (candidates.length > 0) {
@@ -3528,11 +3550,15 @@ function receiptAssociationIndicator(association, transactionId = null) {
                             : null,
                     ].filter((value) => typeof value === "string" && value.trim());
                     option.append(document.createTextNode(parts.join(" · ")));
-                    if (transactionId) {
+                    if (transactionId && !directionUnknown) {
                         const actions = document.createElement("div");
                         actions.className = "receipt-association-actions";
+                        if (!receiptTypeNeedsRecheck) {
+                            actions.append(
+                                receiptAssociationActionButton(transactionId, "approve", "Утвердить чек", index),
+                            );
+                        }
                         actions.append(
-                            receiptAssociationActionButton(transactionId, "approve", "Утвердить чек", index),
                             receiptAssociationActionButton(transactionId, "reject", "Отклонить чек", index),
                         );
                         option.append(actions);
@@ -3542,13 +3568,28 @@ function receiptAssociationIndicator(association, transactionId = null) {
                 indicator.append(options);
             } else {
                 const note = document.createElement("p");
-                note.textContent = review.reason === "operation_type_unknown"
-                    ? "Варианты не сохранены в этом draft. Запустите сопоставление повторно."
-                    : "Безопасно различимых вариантов нет.";
+                if (directionUnknown) {
+                    note.textContent = directionConfirmed
+                        ? "Направление сохранено. Повторите проверку чеков."
+                        : "Сначала выберите направление операции и сохраните её.";
+                } else if (receiptTypeNeedsRecheck) {
+                    note.textContent = "Чек не подтверждён. Проверьте источник или повторите сопоставление.";
+                } else if (reason === "operation_type_unknown") {
+                    note.textContent = "Варианты не сохранены в этом draft. Запустите сопоставление повторно.";
+                } else {
+                    note.textContent = "Без безопасно различимых вариантов.";
+                }
                 indicator.append(note);
             }
-            if (transactionId && candidates.length === 0) {
-                indicator.append(receiptAssociationActionButton(transactionId, "match", "Сопоставить чеки"));
+            if (transactionId && canRetry && (directionUnknown || receiptTypeNeedsRecheck || candidates.length === 0)) {
+                indicator.append(
+                    receiptAssociationActionButton(
+                        transactionId,
+                        "match",
+                        directionUnknown ? "Проверить после сохранения" :
+                            receiptTypeNeedsRecheck ? "Повторить проверку чека" : "Сопоставить чеки",
+                    ),
+                );
             }
             return indicator;
         }
