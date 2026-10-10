@@ -923,21 +923,27 @@ IDs. `--report=PATH` задаёт только путь этого redacted-от
 не перезаписывается.
 
 После каждого повтора `offline` и `codex` сохраняется отдельный JSON
-`schemaVersion=2` в `web/build/reports/import-benchmark/draft-*.json`. Успешный
+`schemaVersion=3` в `web/build/reports/import-benchmark/draft-*.json`. Успешный
 файл содержит полный нормализованный draft: все actual поля и построчное
 сравнение размеченных expected selection/category/receipt.
 `category: null` — ожидаемое отсутствие категории и участвует в метрике; только
 отсутствующий ключ category label получает `unlabeled` и исключается из неё.
 Если валидированный draft получен, но поздний scoring завершился ошибкой,
-артефакт сохраняет его вместе с фиксированным failure code. Эти локальные файлы
-чувствительны даже при scrubbed fixture: не коммитьте и не копируйте их в общие
-логи. Aggregate report остаётся redacted.
-Если draft ещё не создан, после полной проверки `TX##` identity artifact сохраняет
-validated pre-confirm preview в sibling-поле `preview`; это не draft и не
-завершённый импорт. `draft` равно `null`, `confirmed=false`; selection —
-`not_finalized`, receipt comparison — `not_scored`. Preview фиксируется до
-confirmation и остаётся доступен при source или confirm failure; source failure
-при этом не вызывает подтверждение. Невалидированный preview не сохраняется.
+артефакт сохраняет его вместе с фиксированным failure code. Если draft ещё не
+создан, после полной проверки `TX##` identity artifact сохраняет validated
+pre-confirm preview в sibling-поле `preview`; это не draft и не завершённый
+импорт. `draft` равно `null`, `confirmed=false`; selection — `not_finalized`,
+receipt comparison — `not_scored`. Preview остаётся доступен при source или
+confirm failure; source failure при этом не вызывает подтверждение.
+Если preview ещё не сформирован/не валидирован, артефакт содержит fixed
+`failureCode` и enum `failureStage`, но не prompt, raw reply или exception text.
+Допустимые стадии фиксированы: `initialization`, `import_setup`, `import_preview`,
+`preview_validation`, `preview_snapshot`, `receipt_source_check`,
+`preview_confirmation`, `native_confirmation`, `post_confirmation_validation`,
+`draft_snapshot`, `scoring`, `cleanup`.
+Невалидированный preview не сохраняется. Эти локальные файлы чувствительны даже
+при scrubbed fixture: не коммитьте и не копируйте их в общие логи. Aggregate
+report остаётся redacted.
 После каждого повтора CLI выводит точный локальный путь артефакта; `--report`
 меняет только путь агрегированного отчёта.
 

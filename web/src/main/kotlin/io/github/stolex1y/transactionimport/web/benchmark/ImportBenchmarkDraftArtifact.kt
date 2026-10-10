@@ -46,6 +46,7 @@ internal class ImportBenchmarkDraftArtifactWriter(
         draft: ImportBenchmarkDraftSnapshot?,
         generatedAt: String = Instant.now().toString(),
         preview: ImportBenchmarkPreviewSnapshot? = null,
+        failureStage: ImportBenchmarkFailureStage? = null,
     ): Path {
         require(repetition in 1..fixture.repetitions)
         require(outcome !is ImportBenchmarkOutcome.Scored || draft != null) {
@@ -54,8 +55,14 @@ internal class ImportBenchmarkDraftArtifactWriter(
         require(preview == null || draft == null) {
             "A pre-confirmation preview cannot be stored as a finalized draft."
         }
+        require((outcome is ImportBenchmarkOutcome.Failed) == (failureStage != null)) {
+            "Only failed benchmark artifacts require a fixed failure stage."
+        }
         val path = directory.resolve(fileNameForRepetition(repetition))
-        ImportBenchmarkReportWriter.writeNew(path, render(repetition, outcome, draft, generatedAt, preview))
+        ImportBenchmarkReportWriter.writeNew(
+            path,
+            render(repetition, outcome, draft, generatedAt, preview, failureStage),
+        )
         val savedKind = when {
             draft != null -> "нормализованный draft"
             preview != null -> "валидированный preview"
@@ -71,10 +78,11 @@ internal class ImportBenchmarkDraftArtifactWriter(
         draft: ImportBenchmarkDraftSnapshot?,
         generatedAt: String,
         preview: ImportBenchmarkPreviewSnapshot? = null,
+        failureStage: ImportBenchmarkFailureStage? = null,
     ): String = json.encodeToString(
         JsonObject.serializer(),
         buildJsonObject {
-            put("schemaVersion", 2)
+            put("schemaVersion", 3)
             put("generatedAt", generatedAt)
             put("repetition", repetition)
             put("modelSelector", fixture.modelSelector)
@@ -84,6 +92,7 @@ internal class ImportBenchmarkDraftArtifactWriter(
                 is ImportBenchmarkOutcome.Failed -> {
                     put("status", "failed")
                     put("failureCode", outcome.failureCode.reportValue)
+                    put("failureStage", checkNotNull(failureStage).reportValue)
                 }
             }
             if (draft == null) {

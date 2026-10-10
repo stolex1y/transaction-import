@@ -56,6 +56,8 @@ class ImportBenchmarkDraftArtifactTest {
             val rows = draft.getValue("rows").jsonObject
             assertEquals(50, rows.size)
             assertEquals("scored", root.getValue("status").jsonPrimitive.content)
+            assertEquals("3", root.getValue("schemaVersion").jsonPrimitive.content)
+            assertFalse("failureStage" in root)
             assertEquals("ready", draft.getValue("status").jsonPrimitive.content)
 
             val firstOperation = fixture.modelInput.transactions.first()
@@ -251,6 +253,7 @@ class ImportBenchmarkDraftArtifactTest {
                     outcome = ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.INVALID_PREVIEW),
                     draft = null,
                     generatedAt = "2026-10-14T12:00:00Z",
+                    failureStage = ImportBenchmarkFailureStage.PREVIEW_VALIDATION,
                 )
             }
             assertEquals("existing artifact", Files.readString(path))
@@ -354,6 +357,8 @@ class ImportBenchmarkDraftArtifactTest {
             val artifact = Json.parseToJsonElement(text).jsonObject
             assertEquals("failed", artifact.getValue("status").jsonPrimitive.content)
             assertEquals("confirmation_failed", artifact.getValue("failureCode").jsonPrimitive.content)
+            assertEquals("3", artifact.getValue("schemaVersion").jsonPrimitive.content)
+            assertEquals("post_confirmation_validation", artifact.getValue("failureStage").jsonPrimitive.content)
             assertEquals(JsonNull, artifact.getValue("draft"))
             val preview = artifact.getValue("preview").jsonObject
             assertEquals("completed", preview.getValue("status").jsonPrimitive.content)

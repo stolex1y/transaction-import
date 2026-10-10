@@ -183,6 +183,7 @@ class ImportBenchmarkReportTest {
             it.getValue("status").jsonPrimitive.content
         })
         assertEquals("no_import_preview", reportedRuns.last().getValue("failureCode").jsonPrimitive.content)
+        assertFalse(reportedRuns.last().containsKey("failureStage"))
         assertFalse(reportedRuns.last().containsKey("metrics"))
         assertEquals(2, variation.getValue("observedRuns").jsonPrimitive.int)
         assertEquals(0.5, variation.getValue("minimum").jsonPrimitive.content.toDouble())

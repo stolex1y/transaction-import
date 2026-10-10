@@ -74,6 +74,21 @@ internal enum class ImportBenchmarkFailureCode(val reportValue: String) {
     UNEXPECTED_REPEAT_FAILURE("unexpected_repeat_failure"),
 }
 
+internal enum class ImportBenchmarkFailureStage(val reportValue: String) {
+    INITIALIZATION("initialization"),
+    IMPORT_SETUP("import_setup"),
+    IMPORT_PREVIEW("import_preview"),
+    PREVIEW_VALIDATION("preview_validation"),
+    PREVIEW_SNAPSHOT("preview_snapshot"),
+    RECEIPT_SOURCE_CHECK("receipt_source_check"),
+    PREVIEW_CONFIRMATION("preview_confirmation"),
+    NATIVE_CONFIRMATION("native_confirmation"),
+    POST_CONFIRMATION_VALIDATION("post_confirmation_validation"),
+    DRAFT_SNAPSHOT("draft_snapshot"),
+    SCORING("scoring"),
+    CLEANUP("cleanup"),
+}
+
 internal data class ImportBenchmarkRepeatResult(
     val metrics: ImportBenchmarkMetrics,
     val draft: ImportBenchmarkDraftSnapshot,
@@ -117,12 +132,14 @@ internal class ImportBenchmarkRunner(
         for (repetition in 1..repetitions) {
             var validatedDraft: ImportBenchmarkDraftSnapshot? = null
             var validatedPreview: ImportBenchmarkPreviewSnapshot? = null
+            var failureStage = ImportBenchmarkFailureStage.INITIALIZATION
             val result = try {
                 runOne(
                     repetition,
                     classifyRepeatFailures = false,
                     onValidatedDraft = { validatedDraft = it },
                     onValidatedPreview = { validatedPreview = it },
+                    onFailureStage = { failureStage = it },
                 )
             } catch (error: Throwable) {
                 val failureCode = failureCodeFor(error)
@@ -132,6 +149,7 @@ internal class ImportBenchmarkRunner(
                         ImportBenchmarkOutcome.Failed(failureCode),
                         validatedDraft,
                         preview = validatedPreview.takeIf { validatedDraft == null },
+                        failureStage = failureStage,
                     )
                 }
                 throw error
@@ -152,6 +170,7 @@ internal class ImportBenchmarkRunner(
         for (repetition in 1..repetitions) {
             var validatedDraft: ImportBenchmarkDraftSnapshot? = null
             var validatedPreview: ImportBenchmarkPreviewSnapshot? = null
+            var failureStage = ImportBenchmarkFailureStage.INITIALIZATION
             var terminalFailure: Throwable? = null
             val outcome = try {
                 val result = runOne(
@@ -159,6 +178,7 @@ internal class ImportBenchmarkRunner(
                     classifyRepeatFailures = true,
                     onValidatedDraft = { validatedDraft = it },
                     onValidatedPreview = { validatedPreview = it },
+                    onFailureStage = { failureStage = it },
                 )
                 ImportBenchmarkOutcome.Scored(result.metrics)
             } catch (error: ImportBenchmarkCancelledException) {
@@ -188,6 +208,7 @@ internal class ImportBenchmarkRunner(
                 outcome,
                 validatedDraft,
                 preview = validatedPreview.takeIf { validatedDraft == null },
+                failureStage = (outcome as? ImportBenchmarkOutcome.Failed)?.let { failureStage },
             )
             outcomes += outcome
             terminalFailure?.let { throw it }
@@ -213,12 +234,13 @@ internal class ImportBenchmarkRunner(
         classifyRepeatFailures: Boolean,
         onValidatedDraft: (ImportBenchmarkDraftSnapshot) -> Unit,
         onValidatedPreview: (ImportBenchmarkPreviewSnapshot) -> Unit,
+        onFailureStage: (ImportBenchmarkFailureStage) -> Unit,
     ): ImportBenchmarkRepeatResult {
-
-
+        onFailureStage(ImportBenchmarkFailureStage.INITIALIZATION)
         val workDirectory = workDirectoryFactory()
         var primaryFailure: Throwable? = null
         try {
+            onFailureStage(ImportBenchmarkFailureStage.IMPORT_SETUP)
             val database = workDirectory.resolve("benchmark.sqlite")
             val repository = SqliteImportSessionRepository(database.toString())
             repository.saveLongTermMemory(fixture.modelInput.preferences)
@@ -266,12 +288,14 @@ internal class ImportBenchmarkRunner(
                 config = runtime.defaultAgentConfig(),
                 contextManagement = runtime.sessionContextManagement(),
             )
+            onFailureStage(ImportBenchmarkFailureStage.IMPORT_PREVIEW)
             val handlingResult = native.handle(
                 sessionId = session.session.id,
                 expectedRevision = session.session.revision,
                 text = fixture.modelInput.userTurn,
             )
             gateway.throwIfFailed()
+            onFailureStage(ImportBenchmarkFailureStage.PREVIEW_VALIDATION)
             val handled = handlingResult as? NativeMcpHandlingResult.Handled
                 ?: if (classifyRepeatFailures) {
                     throw ImportBenchmarkRepeatFailure(
@@ -324,6 +348,7 @@ internal class ImportBenchmarkRunner(
                     previewSourceRefs = previewSourceRefs,
                 )
             }
+            if (draftArtifactWriter != null) onFailureStage(ImportBenchmarkFailureStage.PREVIEW_SNAPSHOT)
             val artifactCategories = draftArtifactWriter?.let { repository.listCategories() }
             if (draftArtifactWriter != null) {
                 val snapshot = try {
@@ -353,14 +378,17 @@ internal class ImportBenchmarkRunner(
                 onValidatedPreview(snapshot)
             }
             if (preview.receiptMatching?.status == ReceiptMatchingStageStatus.SOURCE_ERROR) {
+                onFailureStage(ImportBenchmarkFailureStage.RECEIPT_SOURCE_CHECK)
                 throw ImportBenchmarkReceiptSourceException()
             }
+            onFailureStage(ImportBenchmarkFailureStage.PREVIEW_CONFIRMATION)
             val previewSummary = previewSummary(preview)
             emitPreview(repetition, previewSummary)
             if (!confirmPreview(repetition, previewSummary)) {
                 throw ImportBenchmarkCancelledException()
             }
 
+            onFailureStage(ImportBenchmarkFailureStage.NATIVE_CONFIRMATION)
             val confirmed = if (!classifyRepeatFailures) {
                 native.confirm(
                     sessionId = session.session.id,
@@ -389,6 +417,7 @@ internal class ImportBenchmarkRunner(
                     )
                 }
             }
+            onFailureStage(ImportBenchmarkFailureStage.POST_CONFIRMATION_VALIDATION)
             gateway.throwIfFailed()
             if (confirmed.lastError != null) {
                 if (classifyRepeatFailures) {
@@ -437,9 +466,11 @@ internal class ImportBenchmarkRunner(
             } else {
                 requireAmbiguousReviewsPreserved(preview, draft.transactions)
             }
+            onFailureStage(ImportBenchmarkFailureStage.DRAFT_SNAPSHOT)
             val categories = artifactCategories ?: repository.listCategories()
             val draftSnapshot = ImportBenchmarkDraftArtifactWriter.snapshot(fixture, draft, categories)
             onValidatedDraft(draftSnapshot)
+            onFailureStage(ImportBenchmarkFailureStage.SCORING)
             val metrics = try {
                 ImportBenchmarkScoring.score(fixture, draft.transactions, categories)
             } catch (error: CancellationException) {
@@ -471,13 +502,14 @@ internal class ImportBenchmarkRunner(
                 if (originalFailure != null && originalIsFatal) {
                     originalFailure.addSuppressed(cleanupError)
                 } else {
+                onFailureStage(ImportBenchmarkFailureStage.CLEANUP)
                     throw BenchmarkCleanupException().also { cleanupFailure ->
                         originalFailure?.let(cleanupFailure::addSuppressed)
                         cleanupFailure.addSuppressed(cleanupError)
                     }
                 }
             }
-    }
+        }
 
     }
 

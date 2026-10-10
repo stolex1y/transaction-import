@@ -452,9 +452,10 @@ class ImportBenchmarkRunnerTest {
 
             val artifactText = Files.readString(artifactDirectory.resolve("draft-repeat-1.json"))
             val artifact = Json.parseToJsonElement(artifactText).jsonObject
-            assertEquals("2", artifact.getValue("schemaVersion").jsonPrimitive.content)
+            assertEquals("3", artifact.getValue("schemaVersion").jsonPrimitive.content)
             assertEquals("failed", artifact.getValue("status").jsonPrimitive.content)
             assertEquals("receipt_source_failed", artifact.getValue("failureCode").jsonPrimitive.content)
+            assertEquals("receipt_source_check", artifact.getValue("failureStage").jsonPrimitive.content)
             assertEquals(JsonNull, artifact.getValue("draft"))
             val preview = artifact.getValue("preview").jsonObject
             assertEquals("source_error", preview.getValue("status").jsonPrimitive.content)
@@ -490,6 +491,54 @@ class ImportBenchmarkRunnerTest {
             }
         } finally {
             deleteTestTree(artifactDirectory)
+        }
+    }
+
+
+    @Test
+    fun unexpectedFailureBeforeValidatedPreviewWritesOnlySafeStageAndCode() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val directory = Files.createTempDirectory("import-benchmark-unvalidated-preview-test-")
+        val rawMarker = "RAW_FAILURE_DETAIL_7F1A"
+        var confirmations = 0
+        try {
+            val writer = ImportBenchmarkDraftArtifactWriter(
+                fixture = fixture,
+                directory = directory,
+                fileNameForRepetition = { "draft-repeat-$it.json" },
+            )
+            val runner = ImportBenchmarkRunner(
+                fixture = fixture,
+                gatewayForRun = { OfflineBenchmarkGateway(fixture) },
+                confirmPreview = { _, _ ->
+                    confirmations += 1
+                    true
+                },
+                previewTransactionSourceRefs = { _, _, _, _ ->
+                    throw IllegalStateException(rawMarker)
+                },
+                draftArtifactWriter = writer,
+            )
+
+            val outcome = runner.runOutcomes(1).single()
+            assertEquals(
+                ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.UNEXPECTED_REPEAT_FAILURE),
+                outcome,
+            )
+            assertEquals(0, confirmations)
+
+            val text = Files.readString(directory.resolve("draft-repeat-1.json"))
+            val artifact = Json.parseToJsonElement(text).jsonObject
+            assertEquals("3", artifact.getValue("schemaVersion").jsonPrimitive.content)
+            assertEquals("failed", artifact.getValue("status").jsonPrimitive.content)
+            assertEquals("unexpected_repeat_failure", artifact.getValue("failureCode").jsonPrimitive.content)
+            assertEquals("preview_validation", artifact.getValue("failureStage").jsonPrimitive.content)
+            assertEquals(JsonNull, artifact.getValue("draft"))
+            assertFalse("preview" in artifact)
+            assertFalse(text.contains(rawMarker))
+            assertFalse(text.contains(fixture.modelInput.userTurn))
+        } finally {
+            deleteTestTree(directory)
         }
     }
 
