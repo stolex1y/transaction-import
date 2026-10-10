@@ -593,9 +593,9 @@ class AgentBrowserTest {
     }
 
     @Test
-    fun partialRefundAssociationShowsDerivedNetAndSurvivesReload() {
-        val database = Files.createTempFile("agent-refund-association-", ".sqlite")
-        val gateway = BrowserRefundAssociationGateway()
+    fun refundAndUnresolvedDirectionsSurviveDraftReload() {
+        val database = Files.createTempFile("agent-refund-draft-", ".sqlite")
+        val gateway = BrowserRefundDraftGateway()
         val port = ServerSocket(0).use { it.localPort }
         val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
             module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
@@ -615,28 +615,51 @@ class AgentBrowserTest {
                         waitForSessionReady(page)
                         page.locator("#agent-message").fill("Synthetic purchase and refund")
                         page.locator("#send-message").click()
-                        page.locator("#operation-table tbody tr[data-transaction-id='2']").waitFor()
+                        page.locator("tr[data-transaction-id='2']").waitFor()
 
                         val purchaseAmount =
                             page.locator("tr[data-transaction-id='1'] input[name='amount']").inputValue()
                         val refundAmount =
                             page.locator("tr[data-transaction-id='2'] input[name='amount']").inputValue()
-                        page.locator("#agent-message").fill("Операция 2 — частичный возврат по покупке 1.")
-                        page.locator("#send-message").click()
-                        page.waitForFunction(
-                            "() => document.querySelector('#draft-status')?.textContent.includes('чистая сумма покупки') === true",
-                        )
-
-                        val summary = page.locator("#draft-status").textContent()
-                        assertTrue(summary.contains("операция 2 связана с покупкой 1"), summary)
-                        assertTrue(summary.contains("900"), summary)
-                        assertTrue(summary.contains("RUB"), summary)
                         assertEquals(
                             "expense",
                             page.locator("tr[data-transaction-id='1'] select[name='direction']").inputValue(),
                         )
                         assertEquals(
-                            "income",
+                            "refund",
+                            page.locator("tr[data-transaction-id='2'] select[name='direction']").inputValue(),
+                        )
+                        val refundCategory =
+                            page.locator("tr[data-transaction-id='2'] select[name='category_id']")
+                        assertEquals(1, refundCategory.locator("option[value='food.groceries']").count())
+                        assertEquals(0, refundCategory.locator("option[value='income.salary']").count())
+                        assertFalse(page.locator("#draft-status").textContent().contains("чистая сумма"))
+                        assertEquals(3, page.locator("#operation-table tbody tr").count())
+                        val unresolvedRow = page.locator("tr[data-transaction-id='3']")
+                        val unresolvedDirection = unresolvedRow.locator("select[name='direction']")
+                        assertEquals("", unresolvedDirection.inputValue())
+                        assertEquals("Не определён", unresolvedDirection.locator("option:checked").textContent())
+                        unresolvedRow.locator("input[name='merchant']").fill("Synthetic credit, edited")
+                        unresolvedRow.locator("button[data-action='save-operation']").click()
+                        page.waitForFunction(
+                            """() => document.querySelector("tr[data-transaction-id='3'] input[name='merchant']")
+                                ?.value === "Synthetic credit, edited" &&
+                                document.querySelector(".agent-toast.success")?.textContent === "Операция сохранена."""",
+                        )
+                        assertEquals(
+                            "",
+                            page.locator("tr[data-transaction-id='3'] select[name='direction']").inputValue(),
+                        )
+                        assertFalse(
+                            page.locator("tr[data-transaction-id='3'] input[name='included']").isChecked,
+                        )
+                        captureDeliveryUi(page, "a05-refund-direction-expense-category.png")
+
+                        page.reload()
+                        waitForAgentInitialized(page)
+                        waitForSessionReady(page)
+                        assertEquals(
+                            "refund",
                             page.locator("tr[data-transaction-id='2'] select[name='direction']").inputValue(),
                         )
                         assertEquals(
@@ -647,88 +670,44 @@ class AgentBrowserTest {
                             refundAmount,
                             page.locator("tr[data-transaction-id='2'] input[name='amount']").inputValue(),
                         )
-                        captureDeliveryUi(page, "a05-refund-linked-derived-net-source-rows-unchanged.png")
-
-                        page.reload()
-                        waitForAgentInitialized(page)
-                        waitForSessionReady(page)
-                        page.waitForFunction(
-                            "() => document.querySelector('#draft-status')?.textContent.includes('операция 2 связана с покупкой 1') === true",
-                        )
-                        assertTrue(page.locator("#draft-status").textContent().contains("900"))
-                        captureDeliveryUi(page, "a05-refund-link-survives-reload.png")
-                        assertEquals(2, gateway.requests.size)
-                    }
-                }
-            }
-        } finally {
-            server.stop(1_000, 1_000)
-            database.deleteIfExists()
-        }
-    }
-
-    @Test
-    fun ambiguousRefundAsksForPurchaseBeforeCreatingRelation() {
-        val database = Files.createTempFile("agent-ambiguous-refund-", ".sqlite")
-        val gateway = BrowserAmbiguousRefundGateway()
-        val port = ServerSocket(0).use { it.localPort }
-        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
-            module(agentDependencies = fakeAgentDependencies(database.toString(), gateway))
-        }.start(wait = false)
-        try {
-            Playwright.create().use { playwright ->
-                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
-                    browser.newContext().use { context ->
-                        val page = context.newPage()
-                        page.navigate("http://127.0.0.1:$port/agent")
-                        waitForAgentInitialized(page)
-                        page.locator("#empty-new-session").click()
-                        waitForSessionReady(page)
-                        page.locator("#agent-message").fill("Synthetic purchases and partial refund")
-                        page.locator("#send-message").click()
-                        page.locator("tr[data-transaction-id='3']").waitFor()
-
-                        val amountsBefore = (1..3).map { transactionId ->
-                            page.locator("tr[data-transaction-id='$transactionId'] input[name='amount']").inputValue()
-                        }
-                        page.locator("#agent-message").fill("Сопоставь частичный возврат с подходящей покупкой.")
-                        page.locator("#send-message").click()
-                        page.waitForFunction(
-                            "() => document.querySelector('#message-list')?.textContent.includes(" +
-                                "'К какой покупке относится операция 2') === true",
-                        )
-
-                        val sessionId = page.evaluate("() => window.location.pathname.split('/').pop()").toString()
-                        val stateBeforeChoice = browserSessionState(page, sessionId)
-                        assertFalse(stateBeforeChoice.contains("purchase_transaction_id"))
-                        captureDeliveryUi(page, "a05-ambiguous-refund-asks-before-link.png")
+                        assertEquals(3, page.locator("#operation-table tbody tr").count())
                         assertEquals(
-                            amountsBefore,
-                            (1..3).map { transactionId ->
-                                page.locator("tr[data-transaction-id='$transactionId'] input[name='amount']").inputValue()
-                            },
+                            "",
+                            page.locator("tr[data-transaction-id='3'] select[name='direction']").inputValue(),
                         )
-                        page.locator("#agent-message").fill("К покупке 3.")
-                        page.locator("#send-message").click()
-                        page.waitForFunction(
-                            "() => document.querySelector('#draft-status')?.textContent.includes(" +
-                                "'операция 2 связана с покупкой 3') === true",
-                        )
-
-                        val summary = page.locator("#draft-status").textContent()
-                        assertTrue(summary.contains("150"), summary)
-                        assertTrue(summary.contains("RUB"), summary)
-                        val stateAfterChoice = browserSessionState(page, sessionId)
-                        assertTrue(stateAfterChoice.contains("\"purchase_transaction_id\":\"3\""))
-                        assertTrue(stateAfterChoice.contains("\"refund_transaction_id\":\"2\""))
                         assertEquals(
-                            amountsBefore,
-                            (1..3).map { transactionId ->
-                                page.locator("tr[data-transaction-id='$transactionId'] input[name='amount']").inputValue()
-                            },
+                            "Synthetic credit, edited",
+                            page.locator("tr[data-transaction-id='3'] input[name='merchant']").inputValue(),
                         )
-                        captureDeliveryUi(page, "a05-ambiguous-refund-linked-after-choice.png")
-                        assertEquals(3, gateway.requests.size)
+                        assertFalse(
+                            page.locator("tr[data-transaction-id='3'] input[name='included']").isChecked,
+                        )
+                        assertEquals(1, gateway.requests.size)
+                        unresolvedRow.locator("select[name='direction']").selectOption("refund")
+                        val editedRefundRow = page.locator("tr[data-transaction-id='2']")
+                        editedRefundRow.locator("input[name='merchant']").fill("Synthetic refund, edited")
+                        editedRefundRow.locator("button[data-action='save-operation']").click()
+                        page.waitForFunction(
+                            """() => document.querySelector("tr[data-transaction-id='2'] input[name='merchant']")
+                                ?.value === "Synthetic refund, edited" &&
+                                document.querySelector(".agent-toast.success")?.textContent === "Операция сохранена."""",
+                        )
+                        assertEquals("refund", unresolvedRow.locator("select[name='direction']").inputValue())
+                        unresolvedRow.locator("button[data-action='save-operation']").click()
+                        page.waitForFunction(
+                            """() => document.querySelector("tr[data-transaction-id='3'] select[name='direction']")
+                                ?.value === "refund" &&
+                                document.querySelector("tr[data-transaction-id='3'] select[name='category_id'] option[value='food.groceries']") !== null""",
+                        )
+                        unresolvedRow.locator("select[name='category_id']").selectOption("food.groceries")
+                        unresolvedRow.locator("button[data-action='save-operation']").click()
+                        page.waitForFunction(
+                            """() => document.querySelector("tr[data-transaction-id='3'] select[name='category_id']")
+                                ?.value === "food.groceries" &&
+                                document.querySelector("tr[data-transaction-id='3'] select[name='direction']")
+                                ?.value === "refund" &&
+                                document.querySelector(".agent-toast.success")?.textContent === "Операция сохранена."""",
+                        )
                     }
                 }
             }
@@ -836,7 +815,8 @@ class AgentBrowserTest {
                                   session_revision: 1,
                                   transactions: [{
                                     occurred_at: "2026-02-08",
-                                    amount_minor: -499,
+                                    direction: "refund",
+                                    amount_minor: 499,
                                     currency: "RUB",
                                     merchant: "Булочная Ф. Вол",
                                     description: "Свежая выпечка",
@@ -857,7 +837,16 @@ class AgentBrowserTest {
                         )
                         assertEquals(0, page.locator("#mcp-preview-panel").count())
                         assertEquals(1, page.locator("#message-list .message.assistant .mcp-inline-preview").count())
-                        assertEquals(7, page.locator(".mcp-inline-preview-table th").count())
+                        assertEquals(8, page.locator(".mcp-inline-preview-table th").count())
+                        assertEquals(
+                            "Возврат",
+                            page.locator(".mcp-inline-preview-table tbody tr td:nth-child(2)").first().textContent(),
+                        )
+                        assertEquals(
+                            "amount-refund",
+                            page.locator(".mcp-inline-preview-table tbody tr td:nth-child(3)")
+                                .first().getAttribute("class"),
+                        )
                         assertEquals("Принять операции", page.locator(".mcp-inline-preview button").last().textContent())
                         assertTrue(
                             page.locator(".receipt-matching-status").textContent()
@@ -870,6 +859,7 @@ class AgentBrowserTest {
                                   session_revision: 1,
                                   transactions: [{
                                     occurred_at: "2026-09-10",
+                                    direction: "expense",
                                     amount_minor: -34900,
                                     currency: "RUB",
                                     merchant: "ДЕМО МАРКЕТ",
@@ -4527,62 +4517,24 @@ private class BrowserMerchantRuleCardGateway : ChatCompletionGateway {
     }
 }
 
-private class BrowserRefundAssociationGateway : ChatCompletionGateway {
+private class BrowserRefundDraftGateway : ChatCompletionGateway {
     val requests = mutableListOf<ChatCompletionRequest>()
 
     override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
         requests += request
-        val content = if (requests.size == 1) {
-            """
-                {"status":"ready","rejection_reason":null,"transactions":[
-                  {"source_index":1,"included":true,"direction":"expense","occurred_at":"2026-09-10T10:00:00",
-                   "posted_at":null,"amount_minor":125050,"currency":"RUB","merchant":"Synthetic Shop",
-                   "category_id":"food.groceries","needs_review":false,"issues":[]},
-                  {"source_index":2,"included":true,"direction":"income","occurred_at":"2026-09-12T10:00:00",
-                   "posted_at":null,"amount_minor":35000,"currency":"RUB","merchant":"Synthetic Shop",
-                   "category_id":null,"needs_review":true,"issues":["category_id:тип дохода неизвестен"]}
-                ],"unparsed_fragments":[]}
-            """.trimIndent()
-        } else {
-            """{"intent":"refund_association","message":"Связал возврат с покупкой.","operations":[],"transactions":[],
-               "refund_associations":[{"purchase_transaction_id":"1","refund_transaction_id":"2"}]}"""
-        }
-        return ChatCompletionResponse(
-            choices = listOf(ChatChoice(ResponseMessage(content = content), "stop")),
-            usage = Usage(promptTokens = 20, completionTokens = 10, totalTokens = 30),
-        )
-    }
-}
-
-private class BrowserAmbiguousRefundGateway : ChatCompletionGateway {
-    val requests = mutableListOf<ChatCompletionRequest>()
-
-    override suspend fun complete(request: ChatCompletionRequest): ChatCompletionResponse {
-        requests += request
-        val content = when (requests.size) {
-            1 -> """
-                {"status":"ready","rejection_reason":null,"transactions":[
-                  {"source_index":1,"included":true,"direction":"expense","occurred_at":"2026-09-10T10:00:00",
-                   "posted_at":null,"amount_minor":10000,"currency":"RUB","merchant":"Synthetic purchase one",
-                   "category_id":"food.groceries","needs_review":false,"issues":[]},
-                  {"source_index":2,"included":true,"direction":"income","occurred_at":"2026-09-12T10:00:00",
-                   "posted_at":null,"amount_minor":5000,"currency":"RUB","merchant":"Synthetic refund",
-                   "category_id":null,"needs_review":true,"issues":["category_id:тип дохода неизвестен"]},
-                  {"source_index":3,"included":true,"direction":"expense","occurred_at":"2026-09-11T10:00:00",
-                   "posted_at":null,"amount_minor":20000,"currency":"RUB","merchant":"Synthetic purchase two",
-                   "category_id":"food.groceries","needs_review":false,"issues":[]}
-                ],"unparsed_fragments":[]}
-            """.trimIndent()
-            2 -> """
-                {"intent":"needs_clarification","message":"К какой покупке относится операция 2 — к 1 или 3?",
-                 "operations":[],"transactions":[],"refund_associations":[]}
-            """.trimIndent()
-            3 -> """
-                {"intent":"refund_association","message":"Связал с покупкой 3.","operations":[],"transactions":[],
-                 "refund_associations":[{"purchase_transaction_id":"3","refund_transaction_id":"2"}]}
-            """.trimIndent()
-            else -> error("Unexpected synthetic refund request ${requests.size}")
-        }
+        val content = """
+            {"status":"ready","rejection_reason":null,"transactions":[
+              {"source_index":1,"included":true,"direction":"expense","occurred_at":"2026-09-10T10:00:00",
+               "posted_at":null,"amount_minor":125050,"currency":"RUB","merchant":"Synthetic Shop",
+               "category_id":"food.groceries","needs_review":false,"issues":[]},
+              {"source_index":2,"included":true,"direction":"refund","occurred_at":"2026-09-12T10:00:00",
+               "posted_at":null,"amount_minor":35000,"currency":"RUB","merchant":"Synthetic Shop",
+               "category_id":"food.groceries","needs_review":false,"issues":[]},
+              {"source_index":3,"included":false,"direction":"income","occurred_at":"2026-09-13T10:00:00",
+               "posted_at":null,"amount_minor":500,"currency":"RUB","merchant":"Synthetic credit",
+               "category_id":null,"needs_review":true,"issues":["direction: Тип операции не определён."]}
+            ],"unparsed_fragments":[]}
+        """.trimIndent()
         return ChatCompletionResponse(
             choices = listOf(ChatChoice(ResponseMessage(content = content), "stop")),
             usage = Usage(promptTokens = 20, completionTokens = 10, totalTokens = 30),

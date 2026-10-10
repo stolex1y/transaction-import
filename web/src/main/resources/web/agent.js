@@ -2159,6 +2159,9 @@ function setActiveState(
             const previous = previousWorking.get(transactionId);
             for (const field of retainedFields) {
                 editor[field] = previous[field];
+                if (field === "direction") {
+                    editor.direction_unresolved = editor.direction == null || editor.direction === "";
+                }
                 if (field === "occurred_at" || field === "posted_at") {
                     editor[`${field}_iso`] = previous[`${field}_iso`];
                 }
@@ -2176,13 +2179,16 @@ function setActiveState(
 
 function editorFromRow(row) {
     const transaction = row.transaction;
+    const directionUnresolved = Array.isArray(transaction.issues) &&
+        transaction.issues.some((issue) => issue.startsWith("direction:"));
     return {
         included: row.included,
         occurred_at: formatTransactionDate(transaction.occurred_at),
         occurred_at_iso: transaction.occurred_at,
         posted_at: formatTransactionDate(transaction.posted_at || ""),
         posted_at_iso: transaction.posted_at || null,
-        direction: transaction.direction,
+        direction: directionUnresolved ? null : transaction.direction,
+        direction_unresolved: directionUnresolved,
         amount: minorToMajor(transaction.amount_minor, transaction.currency),
         currency: normalizeCurrencyCode(transaction.currency),
         merchant: transaction.merchant,
@@ -2748,7 +2754,7 @@ function renderInlineMcpPreview(preview) {
     table.className = "mcp-inline-preview-table";
     const header = document.createElement("thead");
     const headerRow = document.createElement("tr");
-    for (const label of ["Дата", "Сумма", "Merchant", "Описание", "Категория", "Источник", "Чек"]) {
+    for (const label of ["Дата", "Тип", "Сумма", "Merchant", "Описание", "Категория", "Источник", "Чек"]) {
         const cell = document.createElement("th");
         cell.scope = "col";
         cell.textContent = label;
@@ -2761,9 +2767,22 @@ function renderInlineMcpPreview(preview) {
         const row = document.createElement("tr");
         const date = document.createElement("td");
         date.textContent = formatTransactionDate(transaction.occurred_at);
+        const direction = document.createElement("td");
+        const directionLabels = {
+            expense: "Расход",
+            income: "Доход",
+            refund: "Возврат",
+        };
+        direction.textContent = directionLabels[transaction.direction] || "Не определён";
         const amount = document.createElement("td");
         const currency = normalizeCurrencyCode(transaction.currency);
-        amount.className = transaction.amount_minor < 0 ? "amount-expense" : "amount-income";
+        amount.className = transaction.direction === "refund"
+            ? "amount-refund"
+            : transaction.direction === "expense"
+                ? "amount-expense"
+                : transaction.direction === "income"
+                    ? "amount-income"
+                    : "";
         amount.textContent = `${minorToMajor(transaction.amount_minor, currency)} ${currency}`;
         const merchant = document.createElement("td");
         merchant.textContent = transaction.merchant || "Без названия";
@@ -2790,7 +2809,7 @@ function renderInlineMcpPreview(preview) {
         if (receiptItems) {
             receipt.append(receiptItems);
         }
-        row.append(date, amount, merchant, description, category, source, receipt);
+        row.append(date, direction, amount, merchant, description, category, source, receipt);
         body.append(row);
     }
     table.append(header, body);
@@ -3250,6 +3269,9 @@ function updateWorkingDraft(event) {
     const value = control.type === "checkbox" ? control.checked : control.value;
     if (editor[control.name] === value) return;
     editor[control.name] = value;
+    if (control.name === "direction") {
+        editor.direction_unresolved = value === "";
+    }
     if (control.name === "occurred_at" || control.name === "posted_at") {
         editor[`${control.name}_iso`] = transactionDateToIso(value, control.name);
     }
@@ -3282,8 +3304,6 @@ function updateDraftSummary(draft) {
         parts.push(`Исправьте ошибки в ${invalid} ${operationWord(invalid)}.`);
     }
     if (hasDirtyDraft()) parts.push("Есть несохранённые изменения.");
-    const refundSummary = refundAssociationSummary(draft);
-    if (refundSummary) parts.push(refundSummary);
     elements.draftStatus.textContent = parts.join(" ");
     renderReceiptStatus();
     elements.buildBatch.disabled = busy || included === 0 || invalid > 0 || hasDirtyDraft();
@@ -3291,39 +3311,6 @@ function updateDraftSummary(draft) {
     elements.selectAll.indeterminate = included > 0 && included < draft.transactions.length;
 }
 
-function refundAssociationSummary(draft) {
-    const associations = Array.isArray(draft.refund_associations) ? draft.refund_associations : [];
-    if (associations.length === 0) return "";
-    const transactions = new Map(
-        (draft.transactions || []).map((row) => [row.id, row.transaction]),
-    );
-    const totals = new Map();
-    for (const association of associations) {
-        const purchase = transactions.get(association.purchase_transaction_id);
-        const refund = transactions.get(association.refund_transaction_id);
-        if (!purchase || !refund ||
-            !Number.isSafeInteger(purchase.amount_minor) ||
-            !Number.isSafeInteger(refund.amount_minor) ||
-            normalizeCurrencyCode(purchase.currency) !== normalizeCurrencyCode(refund.currency)
-        ) continue;
-        const total = totals.get(association.purchase_transaction_id) || {
-            purchase,
-            refundMinor: 0,
-            refundIds: [],
-        };
-        total.refundMinor += refund.amount_minor;
-        total.refundIds.push(association.refund_transaction_id);
-        if (Number.isSafeInteger(total.refundMinor)) {
-            totals.set(association.purchase_transaction_id, total);
-        }
-    }
-    return Array.from(totals, ([purchaseId, total]) => {
-        const currency = normalizeCurrencyCode(total.purchase.currency);
-        const netMinor = total.purchase.amount_minor - total.refundMinor;
-        return `Частичный возврат: операция ${total.refundIds.join(", ")} связана с покупкой ${purchaseId}; ` +
-            `чистая сумма покупки — ${minorToMajor(netMinor, currency)} ${currency}.`;
-    }).join(" ");
-}
 
 function renderDraft() {
     const draft = activeState?.draft;
@@ -3392,12 +3379,18 @@ function createOperationCard(row) {
     grid.append(
         fieldControl("Дата и время операции", transactionDateInput("occurred_at", editor.occurred_at), row, "occurred_at", editor.included),
         fieldControl("Дата проводки", transactionDateInput("posted_at", editor.posted_at), row, "posted_at", editor.included),
-        fieldControl("Тип операции", directionSelect(editor.direction), row, "direction", editor.included),
+        fieldControl("Тип операции", directionSelect(editor.direction, editor.direction_unresolved), row, "direction", editor.included),
         fieldControl("Сумма", amountInput(editor.amount), row, "amount_minor", editor.included),
         fieldControl("Валюта", readOnlyInput("currency", editor.currency), row, "currency", editor.included),
         fieldControl("Магазин или получатель", textInput("merchant", editor.merchant), row, "merchant", editor.included),
         descriptionField,
-        fieldControl("Категория", categorySelect(editor.category_id, editor.direction), row, "category_id", editor.included),
+        fieldControl(
+            "Категория",
+            categorySelect(editor.category_id, editor.direction, editor.direction_unresolved),
+            row,
+            "category_id",
+            editor.included,
+        ),
         fieldControl("Счёт / карта", readOnlyInput("source_label", editor.source_label), row, "source_label", editor.included),
     );
     const receiptStatus = receiptAssociationIndicator(row.transaction.receipt_association, row.id);
@@ -3468,12 +3461,18 @@ function createOperationTableRow(row) {
     tableRow.append(
         tableFieldCell("Дата и время", transactionDateInput("occurred_at", editor.occurred_at), row, "occurred_at", editor.included),
         tableFieldCell("Дата проводки", transactionDateInput("posted_at", editor.posted_at), row, "posted_at", editor.included),
-        tableFieldCell("Тип", directionSelect(editor.direction), row, "direction", editor.included),
+        tableFieldCell("Тип", directionSelect(editor.direction, editor.direction_unresolved), row, "direction", editor.included),
         tableFieldCell("Сумма", amountInput(editor.amount), row, "amount_minor", editor.included),
         tableFieldCell("Валюта", readOnlyInput("currency", editor.currency), row, "currency", editor.included),
         tableFieldCell("Магазин или получатель", textInput("merchant", editor.merchant), row, "merchant", editor.included),
         descriptionCell,
-        tableFieldCell("Категория", categorySelect(editor.category_id, editor.direction), row, "category_id", editor.included),
+        tableFieldCell(
+            "Категория",
+            categorySelect(editor.category_id, editor.direction, editor.direction_unresolved),
+            row,
+            "category_id",
+            editor.included,
+        ),
         tableFieldCell("Счёт / карта", readOnlyInput("source_label", editor.source_label), row, "source_label", editor.included),
     );
 
@@ -3725,30 +3724,38 @@ function checkboxInput(name, checked) {
     return input;
 }
 
-function directionSelect(selected) {
+function directionSelect(selected, unresolved = false) {
     const select = document.createElement("select");
     select.name = "direction";
-    for (const [value, label] of [["expense", "Расход"], ["income", "Доход"]]) {
+    const options = [
+        ["expense", "Расход"],
+        ["income", "Доход"],
+        ["refund", "Возврат"],
+    ];
+    if (unresolved) options.unshift(["", "Не определён"]);
+    const selectedValue = unresolved ? "" : selected;
+    for (const [value, label] of options) {
         const option = document.createElement("option");
         option.value = value;
         option.textContent = label;
-        option.selected = value === selected;
+        option.selected = value === selectedValue;
         select.append(option);
     }
     return select;
 }
 
-function categorySelect(selected, direction) {
+function categorySelect(selected, direction, directionUnresolved = false) {
     const select = document.createElement("select");
     select.name = "category_id";
     const empty = document.createElement("option");
     empty.value = "";
     empty.textContent = "Не выбрана";
     select.append(empty);
-    const eligible = categoryCatalog.filter(
+    const categoryType = direction === "refund" ? "expense" : direction;
+    const eligible = directionUnresolved ? [] : categoryCatalog.filter(
         (category) => !category.archived &&
             categoryIsLeaf(category.id) &&
-            category.type === direction,
+            category.type === categoryType,
     );
     for (const category of eligible) {
         const option = document.createElement("option");
@@ -3824,7 +3831,7 @@ async function saveOperationEditor(editorElement) {
     const body = {
         revision: activeState.session.revision,
         included: editor.included,
-        direction: editor.direction,
+        direction: editor.direction_unresolved ? null : editor.direction,
         occurred_at: editor.occurred_at_iso,
         posted_at: editor.posted_at_iso,
         amount_minor: amountMinor,

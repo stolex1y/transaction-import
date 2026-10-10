@@ -178,6 +178,7 @@ data class NativeMcpToolCallResult(
 data class McpPreviewTransaction(
     @SerialName("occurred_at") val occurredAt: String,
     @SerialName("amount_minor") val amountMinor: Long,
+    val direction: TransactionDirection? = null,
     val currency: String,
     val merchant: String,
     val description: String,
@@ -376,6 +377,11 @@ class NativeMcpAgent(
                     -transaction.amountMinor
                 } else {
                     transaction.amountMinor
+                },
+                direction = transaction.direction.takeUnless {
+                    transaction.issues.any { issue ->
+                        issue.substringBefore(':').trim() == "direction"
+                    }
                 },
                 currency = transaction.currency,
                 merchant = transaction.merchant,
@@ -1336,6 +1342,11 @@ private suspend fun receiptInfoResponse(
         } else {
             transaction.amountMinor
         },
+        direction = transaction.direction.takeUnless {
+            transaction.issues.any { issue ->
+                issue.substringBefore(':').trim() == "direction"
+            }
+        },
         currency = transaction.currency,
         merchant = transaction.merchant,
         description = row.description,
@@ -1418,12 +1429,15 @@ private suspend fun handleReceiptAssociation(
         ExternalTransactionCandidate(
             occurredAt = transaction.occurredAt,
             postedAt = transaction.postedAt,
-            amountMinor = if (transaction.direction ==
-                io.github.stolex1y.transactionimport.core.TransactionDirection.EXPENSE
-            ) {
+            amountMinor = if (transaction.direction == TransactionDirection.EXPENSE) {
                 -transaction.amountMinor
             } else {
                 transaction.amountMinor
+            },
+            direction = transaction.direction.takeUnless {
+                transaction.issues.any { issue ->
+                    issue.substringBefore(':').trim() == "direction"
+                }
             },
             currency = transaction.currency,
             merchant = transaction.merchant,
@@ -1761,6 +1775,7 @@ private data class BankReceiptMatch(
                 currency = candidate.currency,
                 merchant = candidate.merchant,
                 description = candidate.description,
+                direction = candidate.direction,
                 sourceLabel = candidate.sourceLabel,
                 categoryId = candidate.categoryId,
                 categoryIssue = candidate.categoryIssue,

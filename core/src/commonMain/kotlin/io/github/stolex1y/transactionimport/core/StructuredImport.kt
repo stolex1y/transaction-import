@@ -5,7 +5,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
-const val STRUCTURED_SCHEMA_SIGNATURE = "transaction-import.v2"
+const val STRUCTURED_SCHEMA_SIGNATURE = "transaction-import.v3"
 
 @Serializable
 enum class CategoryType {
@@ -189,7 +189,8 @@ class CategoryCatalog(
 private fun CategoryType.matches(direction: TransactionDirection): Boolean =
     when (this) {
         CategoryType.INCOME -> direction == TransactionDirection.INCOME
-        CategoryType.EXPENSE -> direction == TransactionDirection.EXPENSE
+        CategoryType.EXPENSE ->
+            direction == TransactionDirection.EXPENSE || direction == TransactionDirection.REFUND
     }
 
 @Serializable
@@ -208,6 +209,9 @@ enum class TransactionDirection {
 
     @SerialName("expense")
     EXPENSE,
+
+    @SerialName("refund")
+    REFUND,
 }
 
 @Serializable
@@ -462,6 +466,7 @@ internal fun transactionFieldErrors(
             val directionLabel = when (transaction.direction) {
                 TransactionDirection.INCOME -> "доходов"
                 TransactionDirection.EXPENSE -> "расходов"
+                TransactionDirection.REFUND -> "возвратов"
             }
             add(
                 "category_id",

@@ -1576,6 +1576,10 @@ html[data-theme="light"] .agent-body select {
     color: var(--agent-danger);
 }
 
+.amount-refund {
+    color: var(--agent-accent);
+}
+
 .facts-list {
     display: grid;
     gap: 8px;

@@ -336,6 +336,57 @@ class AgentIntegrationTest {
 
 
     @Test
+    fun exportsRefundAsPositiveExpenseCategoryOverHttp() {
+        val database = Files.createTempFile("agent-refund-export-", ".sqlite")
+        val gateway = FakeAgentGateway(
+            ArrayDeque(
+                listOf(
+                    """
+                        {"status":"ready","rejection_reason":null,"transactions":[
+                          {"source_index":1,"included":true,"direction":"refund",
+                           "occurred_at":"2026-02-08T12:10:00","posted_at":null,
+                           "amount_minor":35000,"currency":"RUB","merchant":"Synthetic Shop",
+                           "description":"Возврат покупки","category_id":"food.groceries",
+                           "needs_review":false,"issues":[]}
+                        ],"unparsed_fragments":[]}
+                    """.trimIndent(),
+                ),
+            ),
+        )
+        try {
+            testApplication {
+                application { module(agentDependencies = fakeAgentDependencies(database.toString(), gateway)) }
+                val created = client.post("/api/agent/sessions").jsonObject()
+                val sessionId = created.sessionId()
+                val imported = client.post("/api/agent/sessions/$sessionId/messages") {
+                    jsonBody("""{"revision":0,"text":"Synthetic refund"}""")
+                }
+                assertEquals(HttpStatusCode.OK, imported.status)
+                val importedTransaction = imported.jsonObject()["draft"]!!
+                    .jsonObject["transactions"]!!.jsonArray.single().jsonObject["transaction"]!!.jsonObject
+                assertEquals("refund", importedTransaction["direction"]!!.jsonPrimitive.content)
+                assertEquals(
+                    35_000L,
+                    importedTransaction["amount_minor"]!!.jsonPrimitive.content.toLong(),
+                )
+                assertEquals(
+                    "food.groceries",
+                    importedTransaction["category_id"]!!.jsonPrimitive.content,
+                )
+
+                val batchResponse = client.get("/api/agent/sessions/$sessionId/batch")
+                assertEquals(HttpStatusCode.OK, batchResponse.status)
+                val exported = batchResponse.jsonObject()["transactions"]!!.jsonArray.single().jsonObject
+                assertEquals("refund", exported["direction"]!!.jsonPrimitive.content)
+                assertEquals(35_000L, exported["amount_minor"]!!.jsonPrimitive.content.toLong())
+                assertEquals("food.groceries", exported["category_id"]!!.jsonPrimitive.content)
+            }
+        } finally {
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
     fun fakeProviderDrivesHttpAgentWorkflowWithoutExternalApi() {
         val database = Files.createTempFile("agent-integration-", ".sqlite")
         val gateway = FakeAgentGateway()

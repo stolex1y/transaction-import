@@ -557,6 +557,59 @@ class SqliteImportSessionRepositoryTest {
     }
 
     @Test
+    fun dropsLegacyRefundAssociationStorageWithoutDroppingDraft() = runBlocking {
+        val database = Files.createTempFile("transaction-import-refund-cutover-", ".sqlite")
+        try {
+            var id = 0
+            val repository = SqliteImportSessionRepository(database.absolutePathString())
+            val agent = SmartExpenseAgent(
+                repository = repository,
+                gatewayResolver = AgentGatewayResolver { SingleResponseGateway(initialDraftJson) },
+                idGenerator = { "refund-cutover-${++id}" },
+                nowEpochMs = { 12_000L + id },
+            )
+            val created = agent.createSession("Refund cutover", defaultConfig)
+            val imported = agent.sendMessage(created.session.id, 0, "Выписка")
+            val previousDraft = imported.draft!!
+
+            DriverManager.getConnection("jdbc:sqlite:${database.absolutePathString()}").use { connection ->
+                connection.createStatement().use { statement ->
+                    statement.execute(
+                        """
+                        CREATE TABLE draft_refund_associations (
+                            session_id TEXT NOT NULL,
+                            purchase_transaction_id TEXT NOT NULL,
+                            refund_transaction_id TEXT NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                }
+                connection.prepareStatement(
+                    "INSERT INTO draft_refund_associations VALUES (?, ?, ?)",
+                ).use { statement ->
+                    statement.setString(1, created.session.id)
+                    statement.setString(2, "1")
+                    statement.setString(3, "1")
+                    assertEquals(1, statement.executeUpdate())
+                }
+            }
+
+            val restored = SqliteImportSessionRepository(database.absolutePathString())
+                .get(created.session.id)!!
+            assertEquals(previousDraft, restored.draft)
+            DriverManager.getConnection("jdbc:sqlite:${database.absolutePathString()}").use { connection ->
+                connection.prepareStatement(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'draft_refund_associations'",
+                ).use { statement ->
+                    statement.executeQuery().use { rows -> assertFalse(rows.next()) }
+                }
+            }
+        } finally {
+            deleteDatabase(database)
+        }
+    }
+
+    @Test
     fun migratesVersionTwoDatabaseWithoutDeletingSessions() = runBlocking {
         val database = Files.createTempFile("transaction-import-v2-", ".sqlite")
         try {

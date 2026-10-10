@@ -1,6 +1,9 @@
 package io.github.stolex1y.transactionimport.core
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -984,6 +987,98 @@ class SmartExpenseAgentTest {
         assertEquals(appended.session.revision, reviewed.session.revision)
         assertEquals(appended.draft, reviewed.draft)
         assertTrue(reviewed.lastError.orEmpty().contains("не выполнена"))
+    }
+
+
+    @Test
+    fun postImportReviewCannotSelectDirectionUnresolvedCredit() = runBlocking {
+        val gateway = QueuedGateway(
+            """{"operations":[{"transaction_id":"1","included":true}],"message":"Синтетический ответ"}""",
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val created = agent.createSession("Unresolved imported credit", defaultConfig)
+        val appended = agent.appendExternalTransactions(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-09-10",
+                    amountMinor = 500,
+                    currency = "RUB",
+                    merchant = "Synthetic credit",
+                    issues = listOf("direction: Тип операции не определён."),
+                ),
+            ),
+        )
+        val imported = appended.draft!!.transactions.single()
+        assertFalse(imported.included)
+
+        val reviewed = agent.reviewImportedDraftInclusion(
+            sessionId = created.session.id,
+            expectedRevision = appended.session.revision,
+            importedTransactionIds = listOf(imported.id),
+            userText = "Импортируй операцию.",
+        )
+        val result = reviewed.draft!!.transactions.single()
+
+        assertFalse(result.included)
+        assertTrue(result.transaction.issues.any { it.startsWith("direction:") })
+        assertEquals(1, gateway.requests.size)
+    }
+
+    @Test
+    fun editingOtherFieldsPreservesUnresolvedDirectionUntilExplicitCorrection() = runBlocking {
+        val agent = testAgent(MemoryImportSessionRepository(), QueuedGateway())
+        val created = agent.createSession("Unresolved direction edit", defaultConfig)
+        val appended = agent.appendExternalTransactions(
+            sessionId = created.session.id,
+            expectedRevision = created.session.revision,
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-09-10",
+                    amountMinor = 500,
+                    currency = "RUB",
+                    merchant = "Synthetic credit",
+                    issues = listOf("direction: Тип операции не определён."),
+                ),
+            ),
+        )
+        val original = appended.draft!!.transactions.single()
+        val edited = agent.replaceTransaction(
+            sessionId = created.session.id,
+            expectedRevision = appended.session.revision,
+            transactionId = original.id,
+            included = false,
+            description = "Уточнённое описание",
+            replacement = original.transaction.copy(
+                merchant = "Synthetic credit, edited",
+                issues = original.transaction.issues,
+            ),
+        )
+        val stillUnresolved = edited.draft!!.transactions.single()
+
+        assertEquals(TransactionDirection.INCOME, stillUnresolved.transaction.direction)
+        assertTrue(stillUnresolved.transaction.needsReview)
+        assertTrue(stillUnresolved.transaction.issues.any { it.startsWith("direction:") })
+        assertFalse(stillUnresolved.included)
+
+        val corrected = agent.replaceTransaction(
+            sessionId = created.session.id,
+            expectedRevision = edited.session.revision,
+            transactionId = original.id,
+            included = true,
+            description = "Уточнённое описание",
+            replacement = stillUnresolved.transaction.copy(
+                categoryId = "income.salary",
+                needsReview = false,
+                issues = emptyList(),
+            ),
+        ).draft!!.transactions.single()
+
+        assertEquals(TransactionDirection.INCOME, corrected.transaction.direction)
+        assertEquals("income.salary", corrected.transaction.categoryId)
+        assertTrue(corrected.transaction.issues.isEmpty())
+        assertTrue(corrected.included)
     }
 
     @Test
@@ -2445,150 +2540,238 @@ class SmartExpenseAgentTest {
     }
 
     @Test
-    fun ambiguousRefundTargetAsksOnceBeforePersistingAssociation() = runBlocking {
-        val refundDraft = Regex(
-            """"source_index": 2,\s*"included": true,\s*"direction": "expense",\s*"occurred_at": "2026-01-16T08:30:00",\s*"posted_at": null,\s*"amount_minor": 45000""",
-        ).replace(initialDraftJson) { match ->
-            match.value
-                .replace("\"direction\": \"expense\"", "\"direction\": \"income\"")
-                .replace("45000", "35000")
-        }
-        val thirdPurchase = """
-            {"source_index":3,"included":true,"direction":"expense",
-             "occurred_at":"2026-01-15T12:11:00","posted_at":null,
-             "amount_minor":85000,"currency":"RUB","merchant":"DEMO MARKET",
-             "category_id":"food.groceries","needs_review":false,"issues":[]}
-        """.trimIndent()
-        val ambiguousDraft = Regex(
-            """("source_index"\s*:\s*2[\s\S]*?"issues"\s*:\s*\[\]\s*})\s*]""",
-        ).replace(refundDraft) { match ->
-            "${match.groupValues[1]},\n$thirdPurchase\n]"
-        }
-        val clarification = """
-            {"intent":"needs_clarification","message":"К какой покупке относится операция 2 — к 1 или 3?",
-             "operations":[],"transactions":[],"refund_associations":[]}
-        """.trimIndent()
-        val association = """
-            {"intent":"refund_association","message":"Связал с покупкой 3.","operations":[],"transactions":[],
-             "refund_associations":[{"purchase_transaction_id":"3","refund_transaction_id":"2"}]}
-        """.trimIndent()
-        val gateway = QueuedGateway(ambiguousDraft, clarification, association)
+    fun keepsPurchaseAndRefundAsSeparateOperationsAndRequiresExpenseCategory() = runBlocking {
+        val gateway = QueuedGateway(
+            """{"items":[
+                {"index":0,"direction":"expense","merchant":"DEMO MARKET","description":"","category_id":"food.groceries"},
+                {"index":1,"direction":"refund","merchant":"DEMO MARKET","description":"","category_id":"food.groceries"},
+                {"index":2,"direction":"refund","merchant":"DEMO MARKET","description":"","category_id":"income.salary"}
+            ]}""".trimIndent(),
+        )
         val agent = testAgent(MemoryImportSessionRepository(), gateway)
-        val created = agent.createSession("Неоднозначный возврат", defaultConfig)
-        val imported = agent.sendMessage(created.session.id, 0, "Синтетические покупки и возврат.")
-        val before = imported.draft!!.transactions
-        val asked = agent.sendMessage(
-            imported.session.id,
-            imported.session.revision,
-            "Операция 2 — частичный возврат, но продавца не помню.",
+        val session = agent.createSession("Purchase and refund", defaultConfig)
+        val classified = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            userText = "Импортируй покупки и возвраты отдельно.",
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-01-15",
+                    amountMinor = -100_000,
+                    currency = "RUB",
+                    merchant = "DEMO MARKET",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-01-16",
+                    amountMinor = 25_000,
+                    currency = "RUB",
+                    merchant = "DEMO MARKET",
+                    description = "Возврат покупки",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-01-17",
+                    amountMinor = 40_000,
+                    currency = "RUB",
+                    merchant = "DEMO MARKET",
+                    description = "Возврат покупки",
+                ),
+            ),
         )
 
-        assertEquals(emptyList(), asked.draft!!.refundAssociations)
-        assertEquals(before, asked.draft!!.transactions)
-        assertEquals("К какой покупке относится операция 2 — к 1 или 3?", asked.messages.last().displayText)
-        assertTrue(
-            gateway.requests.last().messages.first().content.contains("If more than one purchase could be the target"),
-        )
+        assertEquals(TransactionDirection.EXPENSE, classified[0].direction)
+        assertEquals(TransactionDirection.REFUND, classified[1].direction)
+        assertEquals("food.groceries", classified[1].categoryId)
+        assertEquals(TransactionDirection.REFUND, classified[2].direction)
+        assertNull(classified[2].categoryId)
+        assertTrue(classified[2].categoryIssue.orEmpty().contains("не подходит по направлению"))
 
-        val linked = agent.sendMessage(
-            asked.session.id,
-            asked.session.revision,
-            "К покупке 3.",
+        val imported = agent.appendExternalTransactions(
+            sessionId = session.session.id,
+            expectedRevision = session.session.revision,
+            candidates = classified,
         )
-        assertEquals(listOf(RefundAssociation("3", "2")), linked.draft!!.refundAssociations)
-        assertEquals(before, linked.draft!!.transactions)
-    }
-
-    @Test
-    fun explicitlyAssociatesPartialRefundWithoutChangingSourceTransactions() = runBlocking {
-        val refundDraft = Regex(
-            """"source_index": 2,\s*"included": true,\s*"direction": "expense",\s*"occurred_at": "2026-01-16T08:30:00",\s*"posted_at": null,\s*"amount_minor": 45000""",
-        ).replace(initialDraftJson) { match ->
-            match.value
-                .replace("\"direction\": \"expense\"", "\"direction\": \"income\"")
-                .replace("45000", "35000")
-        }
-        val associationResponse = """
-            {"intent":"refund_association","message":"Связал возврат с покупкой.","operations":[],"transactions":[],
-             "refund_associations":[{"purchase_transaction_id":"1","refund_transaction_id":"2"}]}
-        """.trimIndent()
-        val gateway = QueuedGateway(refundDraft, associationResponse)
-        val agent = testAgent(MemoryImportSessionRepository(), gateway)
-        val created = agent.createSession("Связь возврата", defaultConfig)
-        val imported = agent.sendMessage(created.session.id, 0, "Синтетические покупка и возврат.")
-        val before = imported.draft!!.transactions
-        val associated = agent.sendMessage(
-            imported.session.id,
-            imported.session.revision,
-            "Операция 2 — частичный возврат по покупке 1.",
-        )
-
+        val rows = imported.draft!!.transactions
+        assertEquals(3, rows.size)
         assertEquals(
-            listOf(RefundAssociation("1", "2")),
-            associated.draft!!.refundAssociations,
+            listOf(
+                TransactionDirection.EXPENSE,
+                TransactionDirection.REFUND,
+                TransactionDirection.REFUND,
+            ),
+            rows.map { it.transaction.direction },
         )
-        assertEquals(before, associated.draft!!.transactions)
-        assertEquals(90_050L, associated.draft!!.transactions[0].transaction.amountMinor -
-            associated.draft!!.transactions[1].transaction.amountMinor)
-        assertTrue(gateway.requests.last().messages.first().content.contains("Never infer a refund link"))
+        assertEquals(listOf(100_000L, 25_000L, 40_000L), rows.map { it.transaction.amountMinor })
+        assertEquals("food.groceries", rows[1].transaction.categoryId)
+        assertNull(rows[2].transaction.categoryId)
+        assertTrue(rows[2].transaction.needsReview)
+    }
+    @Test
+    fun exportsIncomeExpenseAndRefundDirectionsThroughCoreJsonRoundTrip() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        val agent = testAgent(repository, QueuedGateway(initialDraftJson))
+        val created = agent.createSession("Direction export", defaultConfig)
+        val extracted = agent.sendMessage(created.session.id, created.session.revision, "Синтетическая выписка")
+        val appended = agent.appendExternalTransactions(
+            sessionId = created.session.id,
+            expectedRevision = extracted.session.revision,
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-01-20",
+                    amountMinor = 200_000,
+                    direction = TransactionDirection.INCOME,
+                    currency = "RUB",
+                    merchant = "DEMO EMPLOYER",
+                    categoryId = "income.salary",
+                ),
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-01-21",
+                    amountMinor = 25_000,
+                    direction = TransactionDirection.REFUND,
+                    currency = "RUB",
+                    merchant = "DEMO MARKET",
+                    categoryId = "food.cafe",
+                ),
+            ),
+        )
+
+        val batch = agent.buildImportBatch(created.session.id)
+        val encoded = Json.encodeToString(batch)
+        val roundTripped = Json.decodeFromString<ImportBatch>(encoded)
+        val income = roundTripped.transactions.single {
+            it.direction == TransactionDirection.INCOME
+        }
+        val refund = roundTripped.transactions.single {
+            it.direction == TransactionDirection.REFUND
+        }
+
+        assertEquals(batch, roundTripped)
+        assertEquals(2, roundTripped.transactions.count { it.direction == TransactionDirection.EXPENSE })
+        assertEquals(200_000L, income.amountMinor)
+        assertEquals(25_000L, refund.amountMinor)
+        assertEquals("food.cafe", refund.categoryId)
+        assertTrue(encoded.contains("\"direction\":\"refund\""))
+        assertTrue(encoded.contains("\"amount_minor\":25000"))
+        assertEquals(appended.session.revision, agent.getSession(created.session.id).session.revision)
     }
 
     @Test
-    fun rejectsRefundAssociationToExplicitTransferWithoutPartialMutation() = runBlocking {
-        val transferRefundDraft = Regex(
-            """"source_index": 2,\s*"included": true,\s*"direction": "expense",\s*"occurred_at": "2026-01-16T08:30:00",\s*"posted_at": null,\s*"amount_minor": 45000""",
-        ).replace(initialDraftJson) { match ->
-            match.value
-                .replace("\"direction\": \"expense\"", "\"direction\": \"income\"")
-                .replace("45000", "35000")
-        }.replace("\"merchant\": \"DEMO MARKET\"", "\"merchant\": \"Перевод\"")
-        val associationResponse = """
-            {"intent":"refund_association","message":"Связал возврат.","operations":[],"transactions":[],
-             "refund_associations":[{"purchase_transaction_id":"1","refund_transaction_id":"2"}]}
-        """.trimIndent()
+    fun rejectsRefundIncomeCategoryCorrectionWithoutPartialDraftMutation() = runBlocking {
+        val gateway = QueuedGateway(
+            initialDraftJson,
+            """{"intent":"correction","message":"Изменение выполнено.","operations":[
+                {"transaction_id":"1","action":"set_field","field":"description","value":"Не сохранять"},
+                {"transaction_id":"3","action":"set_field","field":"category_id","value":"income.salary"}
+            ],"transactions":[]}""",
+        )
         val repository = MemoryImportSessionRepository()
-        val agent = testAgent(repository, QueuedGateway(transferRefundDraft, associationResponse))
-        val created = agent.createSession("Перевод не покупка", defaultConfig)
-        val imported = agent.sendMessage(created.session.id, 0, "Синтетические перевод и возврат.")
+        val agent = testAgent(repository, gateway)
+        val created = agent.createSession("Atomic refund category correction", defaultConfig)
+        val extracted = agent.sendMessage(created.session.id, created.session.revision, "Синтетическая выписка")
+        val appended = agent.appendExternalTransactions(
+            sessionId = created.session.id,
+            expectedRevision = extracted.session.revision,
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-01-21",
+                    amountMinor = 25_000,
+                    direction = TransactionDirection.REFUND,
+                    currency = "RUB",
+                    merchant = "DEMO MARKET",
+                    categoryId = "food.cafe",
+                ),
+            ),
+        )
+        val refund = appended.draft!!.transactions.single {
+            it.transaction.direction == TransactionDirection.REFUND
+        }
+        assertEquals("3", refund.id)
+        val before = repository.get(created.session.id)
 
         assertFailsWith<AgentResponseException> {
             agent.sendMessage(
-                imported.session.id,
-                imported.session.revision,
-                "Операция 2 — частичный возврат по покупке 1.",
+                appended.session.id,
+                appended.session.revision,
+                "Измени описание первой операции и назначь возврату категорию дохода.",
             )
         }
 
-        val unchanged = agent.getSession(created.session.id)
-        assertEquals(imported.session, unchanged.session)
-        assertEquals(imported.draft, unchanged.draft)
+        assertEquals(before, repository.get(created.session.id))
     }
 
     @Test
-    fun rejectsInvalidRefundAssociationWithoutPersistingPartialState() = runBlocking {
-        val refundDraft = Regex(
-            """"source_index": 2,\s*"included": true,\s*"direction": "expense",\s*"occurred_at": "2026-01-16T08:30:00",\s*"posted_at": null,\s*"amount_minor": 45000""",
-        ).replace(initialDraftJson) { match ->
-            match.value
-                .replace("\"direction\": \"expense\"", "\"direction\": \"income\"")
-                .replace("45000", "35000")
-        }
-        val invalidResponse = """
-            {"intent":"refund_association","message":"Связал возврат.","operations":[],"transactions":[],
-             "refund_associations":[{"purchase_transaction_id":"missing","refund_transaction_id":"2"}]}
-        """.trimIndent()
-        val repository = MemoryImportSessionRepository()
-        val agent = testAgent(repository, QueuedGateway(refundDraft, invalidResponse))
-        val created = agent.createSession("Недопустимая связь возврата", defaultConfig)
-        val imported = agent.sendMessage(created.session.id, 0, "Синтетические покупка и возврат.")
+    fun unresolvedPositiveCreditNeedsExplicitDirectionAndCannotBeMarkedReviewed() = runBlocking {
+        val gateway = QueuedGateway(
+            """{"items":[{"index":0,"merchant":"НЕИЗВЕСТНО","description":"","category_id":"food.cafe"}]}""",
+            """{"intent":"correction","message":"Описание сохранено.","operations":[
+                {"transaction_id":"1","action":"set_field","field":"description","value":"Проверено вручную"}
+            ],"transactions":[]}""",
+            """{"intent":"correction","message":"Проверено.","operations":[
+                {"transaction_id":"1","action":"mark_reviewed","field":null,"value":null}
+            ],"transactions":[]}""",
+            """{"intent":"correction","message":"Тип уточнён.","operations":[
+                {"transaction_id":"1","action":"set_field","field":"direction","value":"refund"}
+            ],"transactions":[]}""",
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val session = agent.createSession("Unresolved credit", defaultConfig)
+        val classified = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            userText = "Импортируй входящее поступление.",
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-01-16",
+                    amountMinor = 35_000,
+                    currency = "RUB",
+                    merchant = "НЕИЗВЕСТНО",
+                ),
+            ),
+        ).single()
+
+        assertNull(classified.direction)
+        assertNull(classified.categoryId)
+        assertTrue(classified.issues.any { it.startsWith("direction:") })
+
+        val imported = agent.appendExternalTransactions(
+            sessionId = session.session.id,
+            expectedRevision = session.session.revision,
+            candidates = listOf(classified),
+        )
+        val unresolved = imported.draft!!.transactions.single()
+        assertFalse(unresolved.included)
+        assertEquals(35_000L, unresolved.transaction.amountMinor)
+        assertTrue(unresolved.transaction.issues.any { it.startsWith("direction:") })
+        assertTrue(unresolved.fieldErrors.getValue("direction").isNotEmpty())
+
+        val described = agent.sendMessage(
+            imported.session.id,
+            imported.session.revision,
+            "Уточни описание операции.",
+        )
+        val describedRow = described.draft!!.transactions.single()
+        assertEquals("Проверено вручную", describedRow.description)
+        assertTrue(describedRow.transaction.needsReview)
+        assertTrue(describedRow.transaction.issues.any { it.startsWith("direction:") })
 
         assertFailsWith<AgentResponseException> {
-            agent.sendMessage(imported.session.id, imported.session.revision, "Свяжи возврат.")
+            agent.sendMessage(
+                described.session.id,
+                described.session.revision,
+                "Отметь операцию проверенной.",
+            )
         }
+        val unchanged = agent.getSession(described.session.id)
+        assertEquals(described.session, unchanged.session)
+        assertEquals(described.draft, unchanged.draft)
 
-        val unchanged = agent.getSession(created.session.id)
-        assertEquals(imported.session, unchanged.session)
-        assertEquals(imported.draft, unchanged.draft)
+        val corrected = agent.sendMessage(
+            described.session.id,
+            described.session.revision,
+            "Это возврат.",
+        )
+        val refund = corrected.draft!!.transactions.single()
+        assertEquals(TransactionDirection.REFUND, refund.transaction.direction)
+        assertEquals(35_000L, refund.transaction.amountMinor)
+        assertTrue(refund.transaction.issues.none { it.startsWith("direction:") })
+        assertTrue(refund.fieldErrors.getValue("category_id").isNotEmpty())
     }
 
 
