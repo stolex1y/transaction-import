@@ -1,5 +1,10 @@
 package io.github.stolex1y.transactionimport.web.benchmark
 
+import io.github.stolex1y.transactionimport.core.ChatChoice
+import io.github.stolex1y.transactionimport.core.ChatCompletionGateway
+import io.github.stolex1y.transactionimport.core.ChatCompletionRequest
+import io.github.stolex1y.transactionimport.core.ChatCompletionResponse
+import io.github.stolex1y.transactionimport.core.ResponseMessage
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -286,6 +291,7 @@ class ImportBenchmarkDraftArtifactTest {
             )
             val failed = Json.parseToJsonElement(Files.readString(directory.resolve("repeat-1.json"))).jsonObject
             assertEquals("scoring_failed", failed.getValue("failureCode").jsonPrimitive.content)
+            assertFalse("preview" in failed)
             val rows = failed.getValue("draft").jsonObject.getValue("rows").jsonObject
             assertEquals(50, rows.size)
             assertEquals(
@@ -293,6 +299,97 @@ class ImportBenchmarkDraftArtifactTest {
                 rows.getValue(labeledTransaction).jsonObject.getValue("expected").jsonObject
                     .getValue("category").jsonPrimitive.content,
             )
+        } finally {
+            deleteTree(directory)
+        }
+    }
+
+    @Test
+    fun validatedPreviewSurvivesConfirmationFailure() = runBlocking {
+        val fixture = ImportBenchmarkFixtureLoader.loadBundled()
+        val directory = Files.createTempDirectory("import-benchmark-confirmation-preview-test-")
+        try {
+            val writer = ImportBenchmarkDraftArtifactWriter(
+                fixture = fixture,
+                directory = directory,
+                fileNameForRepetition = { "repeat-$it.json" },
+            )
+            val offline = OfflineBenchmarkGateway(fixture)
+            var inclusionReviewRequests = 0
+            val runner = ImportBenchmarkRunner(
+                fixture = fixture,
+                gatewayForRun = {
+                    object : ChatCompletionGateway {
+                        override suspend fun complete(
+                            request: ChatCompletionRequest,
+                        ): ChatCompletionResponse {
+                            val inclusionReview = request.messages.any { message ->
+                                message.role == "user" &&
+                                    message.content.startsWith("Новые операции после принятия MCP preview:")
+                            }
+                            if (inclusionReview) {
+                                inclusionReviewRequests += 1
+                                return ChatCompletionResponse(
+                                    choices = listOf(
+                                        ChatChoice(
+                                            message = ResponseMessage(role = "assistant", content = "not JSON"),
+                                            finishReason = "stop",
+                                        ),
+                                    ),
+                                )
+                            }
+                            return offline.complete(request)
+                        }
+                    }
+                },
+                confirmPreview = { _, _ -> true },
+                draftArtifactWriter = writer,
+            )
+
+            val outcome = runner.runOutcomes(1).single()
+
+            assertEquals(ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.CONFIRMATION_FAILED), outcome)
+            assertEquals(1, inclusionReviewRequests)
+            val text = Files.readString(directory.resolve("repeat-1.json"))
+            val artifact = Json.parseToJsonElement(text).jsonObject
+            assertEquals("failed", artifact.getValue("status").jsonPrimitive.content)
+            assertEquals("confirmation_failed", artifact.getValue("failureCode").jsonPrimitive.content)
+            assertEquals(JsonNull, artifact.getValue("draft"))
+            val preview = artifact.getValue("preview").jsonObject
+            assertEquals("completed", preview.getValue("status").jsonPrimitive.content)
+            assertEquals("false", preview.getValue("confirmed").jsonPrimitive.content)
+            val rows = preview.getValue("rows").jsonObject
+            assertEquals(fixture.modelInput.transactions.map { it.id }.toSet(), rows.keys)
+            assertEquals(50, rows.size)
+            rows.values.forEach { row ->
+                assertFalse("sourceRef" in row.jsonObject.getValue("actual").jsonObject)
+            }
+
+            val firstId = fixture.modelInput.transactions.first().id
+            val firstRow = rows.getValue(firstId).jsonObject
+            val actual = firstRow.getValue("actual").jsonObject
+            val expected = firstRow.getValue("expected").jsonObject
+            assertTrue("merchant" in actual)
+            assertTrue("direction" in actual)
+            assertTrue("items" in actual)
+            assertEquals(
+                fixture.evaluationOnly.selection.getValue(firstId).toString(),
+                expected.getValue("selection").jsonPrimitive.content,
+            )
+            assertTrue("category" in expected)
+            assertTrue("receiptAssociation" in expected)
+            val comparisons = firstRow.getValue("comparisons").jsonObject
+            assertEquals("not_finalized", comparisons.getValue("selection").jsonPrimitive.content)
+            assertEquals("not_scored", comparisons.getValue("receiptAssociation").jsonPrimitive.content)
+            assertFalse(text.contains(fixture.modelInput.userTurn))
+            assertFalse(text.contains("rawResponse"))
+            assertFalse(text.contains("messages"))
+            fixture.modelInput.receiptSummaries.forEach { receipt ->
+                assertFalse(text.contains("\"${receipt.id}\""))
+            }
+            fixture.modelInput.receiptDetails.keys.forEach { receiptId ->
+                assertFalse(text.contains("\"$receiptId\""))
+            }
         } finally {
             deleteTree(directory)
         }

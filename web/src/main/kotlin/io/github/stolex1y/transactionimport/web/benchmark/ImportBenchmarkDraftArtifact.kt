@@ -146,9 +146,7 @@ internal class ImportBenchmarkDraftArtifactWriter(
             sourceRefs: List<String?>?,
             categories: List<TransactionCategory>,
         ): ImportBenchmarkPreviewSnapshot {
-            val receiptMatching = preview.receiptMatching
-                ?.takeIf { it.status == ReceiptMatchingStageStatus.SOURCE_ERROR }
-                ?: throw IllegalStateException("Benchmark preview is not a receipt-source failure.")
+            val receiptStatus = preview.receiptMatching?.status?.name?.lowercase() ?: "not_run"
             val expectedSourceRefs = fixture.modelInput.transactions.map { transaction ->
                 require(transaction.id.matches(Regex("TX\\d{2}"))) {
                     "Benchmark operation reference is not scrubbed."
@@ -180,7 +178,7 @@ internal class ImportBenchmarkDraftArtifactWriter(
                 "Benchmark preview does not contain the reviewed operation set."
             }
             return ImportBenchmarkPreviewSnapshot(
-                status = receiptMatching.status.name.lowercase(),
+                status = receiptStatus,
                 rows = rows.toSortedMap(),
             )
         }

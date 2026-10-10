@@ -929,17 +929,15 @@ IDs. `--report=PATH` задаёт только путь этого redacted-от
 `category: null` — ожидаемое отсутствие категории и участвует в метрике; только
 отсутствующий ключ category label получает `unlabeled` и исключается из неё.
 Если валидированный draft получен, но поздний scoring завершился ошибкой,
-артефакт сохраняет его вместе с фиксированным failure code; без
-валидированного draft записывается `draft: null`. Эти локальные файлы
+артефакт сохраняет его вместе с фиксированным failure code. Эти локальные файлы
 чувствительны даже при scrubbed fixture: не коммитьте и не копируйте их в общие
 логи. Aggregate report остаётся redacted.
-При ошибке источника чеков до подтверждения валидированный preview сохраняется
-отдельно в sibling-поле `preview`: это не draft и не завершённый импорт. В таком
-артефакте `draft` остаётся `null`, `confirmed` равно `false`, selection имеет
-сравнение `not_finalized`, receipt comparison — `not_scored`; подтверждение не
-вызывается. Preview записывается только после проверки полного набора строк и
-их соответствия scrubbed ключам `TX##`. Если проверка не прошла, сохраняется
-только safe failure code.
+Если draft ещё не создан, после полной проверки `TX##` identity artifact сохраняет
+validated pre-confirm preview в sibling-поле `preview`; это не draft и не
+завершённый импорт. `draft` равно `null`, `confirmed=false`; selection —
+`not_finalized`, receipt comparison — `not_scored`. Preview фиксируется до
+confirmation и остаётся доступен при source или confirm failure; source failure
+при этом не вызывает подтверждение. Невалидированный preview не сохраняется.
 После каждого повтора CLI выводит точный локальный путь артефакта; `--report`
 меняет только путь агрегированного отчёта.
 

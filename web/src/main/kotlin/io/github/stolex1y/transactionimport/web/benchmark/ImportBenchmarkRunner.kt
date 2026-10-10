@@ -131,7 +131,7 @@ internal class ImportBenchmarkRunner(
                         repetition,
                         ImportBenchmarkOutcome.Failed(failureCode),
                         validatedDraft,
-                        preview = validatedPreview,
+                        preview = validatedPreview.takeIf { validatedDraft == null },
                     )
                 }
                 throw error
@@ -183,7 +183,12 @@ internal class ImportBenchmarkRunner(
             } catch (error: Exception) {
                 ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.UNEXPECTED_REPEAT_FAILURE)
             }
-            draftArtifactWriter?.write(repetition, outcome, validatedDraft, preview = validatedPreview)
+            draftArtifactWriter?.write(
+                repetition,
+                outcome,
+                validatedDraft,
+                preview = validatedPreview.takeIf { validatedDraft == null },
+            )
             outcomes += outcome
             terminalFailure?.let { throw it }
         }
@@ -319,13 +324,14 @@ internal class ImportBenchmarkRunner(
                     previewSourceRefs = previewSourceRefs,
                 )
             }
-            if (preview.receiptMatching?.status == ReceiptMatchingStageStatus.SOURCE_ERROR) {
+            val artifactCategories = draftArtifactWriter?.let { repository.listCategories() }
+            if (draftArtifactWriter != null) {
                 val snapshot = try {
                     ImportBenchmarkDraftArtifactWriter.snapshotPreview(
                         fixture = fixture,
                         preview = preview,
                         sourceRefs = previewSourceRefs,
-                        categories = repository.listCategories(),
+                        categories = checkNotNull(artifactCategories),
                     )
                 } catch (error: IllegalArgumentException) {
                     if (classifyRepeatFailures) {
@@ -345,6 +351,8 @@ internal class ImportBenchmarkRunner(
                     throw error
                 }
                 onValidatedPreview(snapshot)
+            }
+            if (preview.receiptMatching?.status == ReceiptMatchingStageStatus.SOURCE_ERROR) {
                 throw ImportBenchmarkReceiptSourceException()
             }
             val previewSummary = previewSummary(preview)
@@ -429,7 +437,7 @@ internal class ImportBenchmarkRunner(
             } else {
                 requireAmbiguousReviewsPreserved(preview, draft.transactions)
             }
-            val categories = repository.listCategories()
+            val categories = artifactCategories ?: repository.listCategories()
             val draftSnapshot = ImportBenchmarkDraftArtifactWriter.snapshot(fixture, draft, categories)
             onValidatedDraft(draftSnapshot)
             val metrics = try {
