@@ -3721,6 +3721,166 @@ class AgentBrowserTest {
     }
 
     @Test
+    fun refundReceiptTypesAreCheckedThroughImportPreview() {
+        val database = Files.createTempFile("agent-browser-receipt-types-", ".sqlite")
+        val classifier = FakeAgentGateway(
+            ArrayDeque(
+                listOf(
+                    """{"items":[
+                        {"index":0,"category_id":"food.groceries"},
+                        {"index":1,"category_id":"food.groceries"},
+                        {"index":2,"direction":"income","category_id":null},
+                        {"index":3,"category_id":null},
+                        {"index":4,"category_id":null},
+                        {"index":5,"direction":"refund","category_id":"food.groceries"},
+                        {"index":6,"category_id":"food.groceries"},
+                        {"index":7,"category_id":"food.groceries"}
+                    ],"merchant_canonical_candidates":[]}""",
+                    """{"items":[
+                        {"index":0,"category_id":"food.cafe"},
+                        {"index":4,"category_id":"food.cafe"},
+                        {"index":5,"category_id":"food.groceries"}
+                    ]}""",
+                ),
+            ),
+        )
+        val planner = BrowserEligibilityPlanGateway()
+        val source = BrowserEligibilityMcpSource(operationTypeRows = true)
+        val base = fakeAgentDependencies(database.toString(), classifier)
+        val runtime = base.runtimeConfig.copy(
+            mcpToolLoop = base.runtimeConfig.mcpToolLoop.copy(enabled = true),
+        )
+        var selectorCalls = 0
+        val native = NativeMcpAgent(
+            agent = base.agent,
+            gatewayResolver = AgentGatewayResolver { planner },
+            mcpTools = source,
+            runtimeConfig = runtime,
+            receiptMatchSelector = ReceiptMatchSelector { _, _, choices, _, _ ->
+                selectorCalls += 1
+                choices.singleOrNull()?.let { ReceiptSelectionResponseView(it.alias, 0.98) }
+            },
+        )
+        val dependencies = AgentWebDependencies(
+            agent = base.agent,
+            catalog = base.catalog,
+            runtimeConfig = runtime,
+            availableProviderIds = base.availableProviderIds,
+            newSessionTitle = base.newSessionTitle,
+            mcpCatalog = base.mcpCatalog,
+            tbankMcp = base.tbankMcp,
+            nativeMcpAgent = native,
+            scheduler = base.scheduler,
+            receiptsProxy = base.receiptsProxy,
+        )
+        val port = ServerSocket(0).use { it.localPort }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = port) {
+            module(agentDependencies = dependencies)
+        }.start(wait = false)
+        try {
+            Playwright.create().use { playwright ->
+                playwright.chromium().launch(BrowserType.LaunchOptions().setHeadless(true)).use { browser ->
+                    browser.newContext().use { context ->
+                        val page = context.newPage()
+                        page.navigate("http://127.0.0.1:$port/agent")
+                        waitForAgentInitialized(page)
+                        page.locator("#empty-new-session").click()
+                        waitForSessionReady(page)
+                        page.locator("#agent-message").fill(
+                            "Импортируй синтетические операции и сопоставь совместимые чеки.",
+                        )
+                        val importResponse = page.waitForResponse(
+                            { response ->
+                                response.request().method() == "POST" &&
+                                    response.url().endsWith("/messages")
+                            },
+                            { page.locator("#send-message").click() },
+                        )
+                        assertTrue(importResponse.status() in 200..299, importResponse.text())
+                        val preview = page.locator(".mcp-inline-preview").last()
+                        preview.waitFor()
+                        assertEquals(8, preview.locator("tbody tr").count())
+                        val purchaseRow = preview.locator("tbody tr").nth(0)
+                        assertTrue(purchaseRow.locator("td").nth(1).textContent().contains("Расход"))
+                        assertEquals(1, purchaseRow.locator(".receipt-association-status.matched").count())
+                        assertTrue(purchaseRow.textContent().contains("Synthetic item"))
+                        assertEquals(1, purchaseRow.locator(".transaction-items").count())
+
+                        val refundRow = preview.locator("tbody tr").nth(5)
+                        assertTrue(refundRow.locator("td").nth(1).textContent().contains("Возврат"))
+                        assertTrue(refundRow.locator("td").nth(2).getAttribute("class")
+                            .orEmpty().contains("amount-refund"))
+                        assertEquals(1, refundRow.locator(".receipt-association-status.matched").count())
+                        assertTrue(refundRow.textContent().contains("Synthetic compatible refund item"))
+                        assertEquals(1, refundRow.locator(".transaction-items").count())
+
+                        val incompatibleReview = preview.locator("tbody tr").nth(6)
+                            .locator(".receipt-association-status.ambiguous")
+                        assertTrue(incompatibleReview.textContent()
+                            .contains("Тип чека не совпадает с направлением банковской операции"))
+                        assertFalse(incompatibleReview.locator("button").allInnerTexts()
+                            .any { it.contains("Утвердить чек") })
+                        assertEquals(0, preview.locator("tbody tr").nth(6).locator(".transaction-items").count())
+                        val unknownReview = preview.locator("tbody tr").nth(7)
+                            .locator(".receipt-association-status.ambiguous")
+                        assertTrue(unknownReview.textContent()
+                            .contains("В чеке не указан поддерживаемый тип операции"))
+                        assertFalse(unknownReview.locator("button").allInnerTexts()
+                            .any { it.contains("Утвердить чек") })
+                        assertEquals(0, preview.locator("tbody tr").nth(7).locator(".transaction-items").count())
+
+                        val refinementRequest = classifier.requests.last().messages.joinToString("\n") { it.content }
+                        assertTrue(refinementRequest.contains("Synthetic compatible refund item"))
+                        assertFalse(refinementRequest.contains("Synthetic private incompatible item"))
+                        assertFalse(refinementRequest.contains("Synthetic private unknown-type item"))
+                        assertEquals(0, selectorCalls)
+                        assertEquals(1, source.searchCalls)
+                        assertEquals(7, source.detailCalls)
+                        captureDeliveryUi(page, "a14-typed-refund-and-review.png")
+
+                        val confirmResponse = page.waitForResponse(
+                            { response ->
+                                response.url().contains("/mcp-previews/") &&
+                                    response.url().endsWith("/confirm")
+                            },
+                            { preview.locator("button").last().click() },
+                        )
+                        assertTrue(confirmResponse.status() in 200..299, confirmResponse.text())
+                        page.waitForFunction(
+                            "() => document.querySelectorAll('#operation-table tbody tr').length === 8",
+                        )
+                        page.reload()
+                        waitForAgentInitialized(page)
+                        page.waitForFunction(
+                            "() => document.querySelectorAll('#operation-table tbody tr').length === 8",
+                        )
+                        assertEquals(
+                            1,
+                            page.locator("#operation-table tr[data-transaction-id='6'] " +
+                                ".receipt-association-status.matched").count(),
+                        )
+                        assertTrue(page.locator("#operation-table tr[data-transaction-id='6']")
+                            .textContent().contains("Возврат"))
+                        assertTrue(page.locator("#operation-table tr[data-transaction-id='7']")
+                            .textContent().contains("Тип чека не совпадает"))
+                        assertTrue(page.locator("#operation-table tr[data-transaction-id='8']")
+                            .textContent().contains("поддерживаемый тип операции"))
+                        assertEquals(0, page.locator("#operation-table tr[data-transaction-id='7'] " +
+                            ".transaction-items").count())
+                        assertEquals(0, page.locator("#operation-table tr[data-transaction-id='8'] " +
+                            ".transaction-items").count())
+                        captureDeliveryUi(page, "a14-typed-refund-review-reloaded.png")
+                    }
+                }
+            }
+        } finally {
+            base.scheduler?.close()
+            server.stop(1_000, 5_000)
+            database.deleteIfExists()
+        }
+    }
+
+    @Test
     fun unknownExpenseReceiptControlsApproveRejectAndDetachInDraft() {
         val database = Files.createTempFile("agent-browser-receipt-controls-", ".sqlite")
         val classifier = FakeAgentGateway(
@@ -4670,6 +4830,7 @@ private class BrowserEligibilityPlanGateway : ChatCompletionGateway {
 
 private class BrowserEligibilityMcpSource(
     private val categoryRuleRows: Boolean = false,
+    private val operationTypeRows: Boolean = false,
 ) : McpToolProvider {
     var searchCalls = 0
     var detailCalls = 0
@@ -4705,6 +4866,14 @@ private class BrowserEligibilityMcpSource(
             """.trimIndent(),
         )
         "tbank-transactions" to "get-account-transactions" -> {
+            val operationTypeTransactions = if (operationTypeRows) """
+                  ,{"date":"2026-09-10T15:00:00Z","amount_minor":5000,"currency":"RUB",
+                   "merchant":"Synthetic refund","description":"Synthetic refund"}
+                  ,{"date":"2026-09-10T16:00:00Z","amount_minor":-6000,"currency":"RUB",
+                   "merchant":"Synthetic incompatible","description":"Synthetic incompatible"}
+                  ,{"date":"2026-09-10T17:00:00Z","amount_minor":-7000,"currency":"RUB",
+                   "merchant":"Synthetic unknown-type","description":"Synthetic unknown-type"}
+            """.trimIndent() else ""
             val transactionText = """
                 {"account_name":"Synthetic account","transactions":[
                   {"date":"2026-09-10T10:00:00Z","amount_minor":-1000,"currency":"RUB",
@@ -4717,6 +4886,7 @@ private class BrowserEligibilityMcpSource(
                    "merchant":"Synthetic unknown","description":"Synthetic unknown type"},
                   {"date":"2026-09-10T14:00:00Z","amount_minor":-3300,"currency":"RUB",
                    "merchant":"Synthetic unique unknown","description":"Synthetic unique unknown type"}
+                  $operationTypeTransactions
                 ]}
             """.trimIndent()
             val categoryRuleText = transactionText
@@ -4734,12 +4904,18 @@ private class BrowserEligibilityMcpSource(
                 text = if (returnNoReceipts) {
                     """{"receipts":[],"has_more":false}"""
                 } else {
+                    val operationTypeReceipts = if (operationTypeRows) """
+                          ,{"receipt_key":"synthetic-browser-refund-compatible","merchant":"Synthetic refund","received_at":"2026-09-10T15:05:00Z","amount_minor":5000,"currency":"RUB"}
+                          ,{"receipt_key":"synthetic-browser-refund-incompatible","merchant":"Synthetic incompatible","received_at":"2026-09-10T16:05:00Z","amount_minor":6000,"currency":"RUB"}
+                          ,{"receipt_key":"synthetic-browser-unknown-type","merchant":"Synthetic unknown-type","received_at":"2026-09-10T17:05:00Z","amount_minor":7000,"currency":"RUB"}
+                    """.trimIndent() else ""
                     """
                         {"receipts":[
                           {"receipt_key":"synthetic-browser-receipt-key","merchant":"Synthetic purchase","received_at":"2026-09-10T10:05:00Z","amount_minor":1000,"currency":"RUB"},
                           {"receipt_key":"synthetic-browser-receipt-key-a","merchant":"Synthetic receipt A","received_at":"2026-09-10T13:01:00Z","amount_minor":2200,"currency":"RUB"},
                           {"receipt_key":"synthetic-browser-receipt-key-b","merchant":"Synthetic receipt B","received_at":"2026-09-10T13:02:00Z","amount_minor":2200,"currency":"RUB"},
                           {"receipt_key":"synthetic-browser-receipt-key-unique","merchant":"Synthetic unique receipt","received_at":"2026-09-10T14:02:00Z","amount_minor":3300,"currency":"RUB"}
+                          $operationTypeReceipts
                         ],"has_more":false}
                     """.trimIndent()
                 },
@@ -4776,6 +4952,27 @@ private class BrowserEligibilityMcpSource(
                          "date_time":"2026-09-10T14:02:00Z","total_minor":3300,"currency":"RUB","operation_type":1,
                          "merchant":"Synthetic unique receipt","settlement_place":"Synthetic unique place",
                          "items":[{"name":"Synthetic unique item","quantity":1,"price_minor":3300,"sum_minor":3300}]}
+                    """.trimIndent()
+                    "synthetic-browser-refund-compatible" -> """
+                        {"receipt_key":"synthetic-browser-refund-compatible",
+                         "date_time":"2026-09-10T15:05:00Z","total_minor":5000,"currency":"RUB",
+                         "operation_type":2,"merchant":"Synthetic refund",
+                         "items":[{"name":"Synthetic compatible refund item","quantity":1,
+                                   "price_minor":5000,"sum_minor":5000}]}
+                    """.trimIndent()
+                    "synthetic-browser-refund-incompatible" -> """
+                        {"receipt_key":"synthetic-browser-refund-incompatible",
+                         "date_time":"2026-09-10T16:05:00Z","total_minor":6000,"currency":"RUB",
+                         "operation_type":2,"merchant":"Synthetic incompatible",
+                         "items":[{"name":"Synthetic private incompatible item","quantity":1,
+                                   "price_minor":6000,"sum_minor":6000}]}
+                    """.trimIndent()
+                    "synthetic-browser-unknown-type" -> """
+                        {"receipt_key":"synthetic-browser-unknown-type",
+                         "date_time":"2026-09-10T17:05:00Z","total_minor":7000,"currency":"RUB",
+                         "merchant":"Synthetic unknown-type",
+                         "items":[{"name":"Synthetic private unknown-type item","quantity":1,
+                                   "price_minor":7000,"sum_minor":7000}]}
                     """.trimIndent()
                     else -> error("Unexpected synthetic receipt key")
                 },
