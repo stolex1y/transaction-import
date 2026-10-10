@@ -1,5 +1,11 @@
 package io.github.stolex1y.transactionimport.web.benchmark
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import java.nio.charset.StandardCharsets
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -12,9 +18,9 @@ class ImportBenchmarkFixtureTest {
     fun bundledFixtureKeepsModelInputAndEvaluationLabelsSeparate() {
         val fixture = ImportBenchmarkFixtureLoader.loadBundled()
 
-        assertEquals("openai-codex/gpt-6-luna", fixture.modelSelector)
+        assertEquals("openai-codex/gpt-6-luna:min", fixture.modelSelector)
         assertEquals("medium", fixture.reasoningEffort)
-        assertEquals("f3a43eb8f3d2eea95334fe0d9174fed9ce8b736f3abd0e8f7f07b08b7c6faeb4", fixture.sha256)
+        assertEquals("c3a25d07ee6ab69ba0bf56688744d53803abb747742333bd26f1b33ba376809d", fixture.sha256)
         assertEquals(3, fixture.repetitions)
         assertTrue(fixture.modelInput.userTurn.isNotBlank())
         assertEquals(50, fixture.modelInput.transactions.size)
@@ -25,8 +31,34 @@ class ImportBenchmarkFixtureTest {
         assertEquals(50, fixture.evaluationOnly.selection.size)
         assertEquals(26, fixture.evaluationOnly.selection.values.count { it })
         assertEquals(24, fixture.evaluationOnly.selection.values.count { !it })
-        assertEquals(4, fixture.evaluationOnly.categories.size)
-        assertTrue(fixture.evaluationOnly.categories.values.all { it == "Кафе и рестораны" })
+        assertEquals(50, fixture.evaluationOnly.categories.size)
+        assertEquals(23, fixture.evaluationOnly.categories.values.count { it != null })
+        assertEquals(27, fixture.evaluationOnly.categories.values.count { it == null })
+        assertEquals(null, fixture.evaluationOnly.categories.getValue("TX02"))
+        assertEquals("Рацион", fixture.evaluationOnly.categories.getValue("TX30"))
+        assertEquals(50, fixture.evaluationOnly.receiptAssociations.size)
+        assertEquals(
+            42,
+            fixture.evaluationOnly.receiptAssociations.values.count {
+                it.expectation == BenchmarkReceiptExpectation.NO_RECEIPT
+            },
+        )
+        assertEquals(
+            7,
+            fixture.evaluationOnly.receiptAssociations.values.count {
+                it.expectation == BenchmarkReceiptExpectation.MATCHED
+            },
+        )
+        assertEquals(
+            1,
+            fixture.evaluationOnly.receiptAssociations.values.count {
+                it.expectation == BenchmarkReceiptExpectation.AMBIGUOUS
+            },
+        )
+        assertEquals(
+            setOf("C026", "C027"),
+            fixture.evaluationOnly.receiptAssociations.getValue("TX34").receiptIds,
+        )
         assertTrue(fixture.modelInput.transactions.all { transaction ->
             when (transaction.direction) {
                 "expense" -> transaction.signedAmountMinor < 0L
@@ -34,6 +66,42 @@ class ImportBenchmarkFixtureTest {
                 else -> false
             }
         })
+    }
+
+    @Test
+    fun acceptsMissingCategoryLabelsWithoutConfusingExplicitNoCategoryLabels() {
+        val root = Json.parseToJsonElement(bundledText()).jsonObject
+        val evaluation = root.getValue("evaluation_only").jsonObject
+        val categoryLabels = evaluation.getValue("categories").jsonArray
+        val omittedIndex = categoryLabels.indexOfFirst {
+            it.jsonObject.getValue("category") !is JsonNull
+        }
+        assertTrue(omittedIndex >= 0)
+        val remainingLabels = JsonArray(categoryLabels.filterIndexed { index, _ -> index != omittedIndex })
+        assertTrue(remainingLabels.any { it.jsonObject.getValue("category") is JsonNull })
+        val alteredEvaluation = JsonObject(evaluation + ("categories" to remainingLabels))
+        val alteredRoot = JsonObject(root + ("evaluation_only" to alteredEvaluation))
+
+        ImportBenchmarkFixtureLoader.validateForTest(alteredRoot.toString())
+    }
+
+    @Test
+    fun rejectsUnknownReceiptReferenceInEvaluationOnlyLabels() {
+        val source = bundledText()
+        val receiptId = Regex(
+            """("transaction_id"\s*:\s*"TX15",\s*"expected_status"\s*:\s*"matched",\s*"receipt_id"\s*:\s*")C017(")""",
+        ).find(source) ?: error("Fixture has no expected receipt association.")
+        val altered = source.replaceRange(
+            receiptId.range,
+            "${receiptId.groupValues[1]}C999${receiptId.groupValues[2]}",
+        )
+
+        val error = assertFailsWith<IllegalArgumentException> {
+            ImportBenchmarkFixtureLoader.validateForTest(altered)
+        }
+
+        assertFalse(error.message.orEmpty().contains("C999"))
+        assertTrue(error.message.orEmpty().contains("unknown receipt"))
     }
 
     @Test

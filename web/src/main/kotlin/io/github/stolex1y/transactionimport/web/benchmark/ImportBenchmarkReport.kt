@@ -41,7 +41,7 @@ internal object ImportBenchmarkReportWriter {
         return json.encodeToString(
             JsonObject.serializer(),
             buildJsonObject {
-                put("schemaVersion", 2)
+                put("schemaVersion", 3)
                 put("generatedAt", generatedAt)
                 put("sourceCommit", sourceCommit)
                 put("mode", mode)
@@ -118,15 +118,18 @@ internal object ImportBenchmarkReportWriter {
         put("selectionTruePositive", metrics.selectionTruePositive)
         put("selectionFalsePositive", metrics.selectionFalsePositive)
         put("selectionFalseNegative", metrics.selectionFalseNegative)
-        put("categoryAccuracy", metrics.categoryAccuracy)
-        put("categoryCoverage", metrics.categoryCoverage)
+        putNullable("categoryAccuracy", metrics.categoryAccuracy)
+        putNullable("categoryCoverage", metrics.categoryCoverage)
         putNullable("categoryAccuracyWhenAssigned", metrics.categoryAccuracyWhenAssigned)
         put("categoryCorrect", metrics.categoryCorrect)
         put("categoryAssigned", metrics.categoryAssigned)
         put("categoryLabelCount", metrics.categoryLabelCount)
+        put("categoryApplicableLabelCount", metrics.categoryApplicableLabelCount)
         put("matchedReceiptCount", metrics.matchedReceiptCount)
         put("ambiguousReceiptCount", metrics.ambiguousReceiptCount)
         put("unmatchedReceiptCount", metrics.unmatchedReceiptCount)
+        put("receiptCorrectCount", metrics.receiptCorrectCount)
+        put("receiptAccuracy", metrics.receiptAccuracy)
         put("receiptLabelCount", metrics.receiptLabelCount)
     }
 
@@ -135,6 +138,7 @@ internal object ImportBenchmarkReportWriter {
         put("selectionRecall", rangeJson(metrics.map(ImportBenchmarkMetrics::selectionRecall)))
         put("categoryAccuracy", rangeJson(metrics.map(ImportBenchmarkMetrics::categoryAccuracy)))
         put("categoryCoverage", rangeJson(metrics.map(ImportBenchmarkMetrics::categoryCoverage)))
+        put("receiptAccuracy", rangeJson(metrics.map(ImportBenchmarkMetrics::receiptAccuracy)))
     }
 
     private fun rangeJson(values: List<Double?>): JsonObject {

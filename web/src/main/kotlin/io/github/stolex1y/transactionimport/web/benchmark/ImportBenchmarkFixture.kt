@@ -41,7 +41,19 @@ internal data class ImportBenchmarkModelInput(
 
 internal data class ImportBenchmarkEvaluation(
     val selection: Map<String, Boolean>,
-    val categories: Map<String, String>,
+    val categories: Map<String, String?>,
+    val receiptAssociations: Map<String, BenchmarkReceiptLabel>,
+)
+
+internal enum class BenchmarkReceiptExpectation {
+    NO_RECEIPT,
+    MATCHED,
+    AMBIGUOUS,
+}
+
+internal data class BenchmarkReceiptLabel(
+    val expectation: BenchmarkReceiptExpectation,
+    val receiptIds: Set<String>,
 )
 
 internal data class BenchmarkTransaction(
@@ -73,8 +85,8 @@ internal object ImportBenchmarkFixtureLoader {
     const val RESOURCE = "/benchmarks/codex-import-september-2026.json"
     private const val MAX_FIXTURE_BYTES = 256 * 1024
     private const val APPROVED_REPETITIONS = 3
-    private const val APPROVED_FIXTURE_SHA256 = "f3a43eb8f3d2eea95334fe0d9174fed9ce8b736f3abd0e8f7f07b08b7c6faeb4"
-    private const val MODEL_SELECTOR = "openai-codex/gpt-6-luna"
+    private const val APPROVED_FIXTURE_SHA256 = "c3a25d07ee6ab69ba0bf56688744d53803abb747742333bd26f1b33ba376809d"
+    private const val MODEL_SELECTOR = "openai-codex/gpt-6-luna:min"
     private const val REASONING_EFFORT = "medium"
     private val receiptDetailKeys = setOf(
         "id", "received_at", "date_time", "merchant", "settlement_place", "total_minor", "currency", "items",
@@ -303,7 +315,7 @@ internal object ImportBenchmarkFixtureLoader {
         require(itemCount == 25) { "Benchmark fixture has an unexpected receipt-item count." }
 
         val labelsObject = root.requiredObject("evaluation_only", "evaluation labels")
-        requireKeys(labelsObject, setOf("selection", "categories"), "evaluation labels")
+        requireKeys(labelsObject, setOf("selection", "categories", "receipt_associations"), "evaluation labels")
         val transactionIds = transactions.mapTo(hashSetOf()) { it.id }
         val selectionArray = labelsObject.requiredArray("selection", "selection labels")
         require(selectionArray.size == 50) { "Benchmark fixture has an unexpected selection-label count." }
@@ -315,22 +327,80 @@ internal object ImportBenchmarkFixtureLoader {
             val included = label.requiredBoolean("included", "selection label")
             id to included
         }
-        require(selectionLabels.size == selectionArray.size) { "Benchmark fixture has duplicate selection labels." }
+        require(selectionLabels.size == selectionArray.size && selectionLabels.keys == transactionIds) {
+            "Benchmark fixture has incomplete or duplicate selection labels."
+        }
         require(selectionLabels.values.count { it } == 26 && selectionLabels.values.count { !it } == 24) {
             "Benchmark fixture has unexpected selection-label values."
         }
+
         val categoryArray = labelsObject.requiredArray("categories", "category labels")
-        require(categoryArray.size == 4) { "Benchmark fixture has an unexpected category-label count." }
+        require(categoryArray.size <= transactionIds.size) {
+            "Benchmark fixture has too many category labels."
+        }
         val categoryLabels = categoryArray.associate { value ->
             val label = value.objectValue("category label")
             requireKeys(label, setOf("transaction_id", "category"), "category label")
             val id = label.requiredString("transaction_id", "category label id")
             require(id in transactionIds) { "Benchmark category label has no operation." }
-            id to label.requiredString("category", "category label")
+            val categoryValue = label["category"] ?: invalid("category label")
+            val category = when (categoryValue) {
+                JsonNull -> null
+                is JsonPrimitive -> categoryValue.takeIf { it.isString }
+                    ?.contentOrNull?.takeIf(String::isNotBlank) ?: invalid("category label")
+                else -> invalid("category label")
+            }
+            id to category
         }
-        require(categoryLabels.size == categoryArray.size) { "Benchmark fixture has duplicate category labels." }
-        require(categoryLabels.values.all { it == "Кафе и рестораны" }) {
-            "Benchmark fixture has unexpected category labels."
+        require(categoryLabels.size == categoryArray.size) {
+            "Benchmark fixture has duplicate category labels."
+        }
+
+        val knownReceiptIds = summaries.mapTo(hashSetOf()) { it.id }
+        val receiptArray = labelsObject.requiredArray("receipt_associations", "receipt-association labels")
+        require(receiptArray.size == 50) { "Benchmark fixture has an unexpected receipt-label count." }
+        val receiptLabels = receiptArray.associate { value ->
+            val label = value.objectValue("receipt-association label")
+            val id = label.requiredString("transaction_id", "receipt-label transaction id")
+            require(id in transactionIds) { "Benchmark receipt label has no operation." }
+            val expectedStatus = label.requiredString("expected_status", "receipt-label status")
+            val parsed = when (expectedStatus) {
+                "no_receipt" -> {
+                    requireKeys(label, setOf("transaction_id", "expected_status"), "no-receipt label")
+                    BenchmarkReceiptLabel(BenchmarkReceiptExpectation.NO_RECEIPT, emptySet())
+                }
+                "matched" -> {
+                    requireKeys(label, setOf("transaction_id", "expected_status", "receipt_id"), "matched receipt label")
+                    BenchmarkReceiptLabel(
+                        BenchmarkReceiptExpectation.MATCHED,
+                        setOf(label.requiredString("receipt_id", "receipt label id")),
+                    )
+                }
+                "ambiguous" -> {
+                    requireKeys(label, setOf("transaction_id", "expected_status", "receipt_ids"), "ambiguous receipt label")
+                    val ids = label.requiredArray("receipt_ids", "ambiguous receipt ids")
+                        .map { it.string("ambiguous receipt id") }
+                    require(ids.size >= 2 && ids.toSet().size == ids.size) {
+                        "Benchmark ambiguous receipt label has an invalid candidate set."
+                    }
+                    BenchmarkReceiptLabel(BenchmarkReceiptExpectation.AMBIGUOUS, ids.toSet())
+                }
+                else -> invalid("receipt-label status")
+            }
+            require(parsed.receiptIds.all { it in knownReceiptIds }) {
+                "Benchmark receipt label refers to an unknown receipt."
+            }
+            id to parsed
+        }
+        require(receiptLabels.size == receiptArray.size && receiptLabels.keys == transactionIds) {
+            "Benchmark fixture has incomplete or duplicate receipt labels."
+        }
+        require(
+            receiptLabels.values.count { it.expectation == BenchmarkReceiptExpectation.NO_RECEIPT } == 42 &&
+                receiptLabels.values.count { it.expectation == BenchmarkReceiptExpectation.MATCHED } == 7 &&
+                receiptLabels.values.count { it.expectation == BenchmarkReceiptExpectation.AMBIGUOUS } == 1,
+        ) {
+            "Benchmark fixture has unexpected receipt-label values."
         }
 
         require(noForbiddenFields(root)) { "Benchmark fixture contains a raw source identifier or sensitive field." }
@@ -354,6 +424,7 @@ internal object ImportBenchmarkFixtureLoader {
             evaluationOnly = ImportBenchmarkEvaluation(
                 selection = selectionLabels,
                 categories = categoryLabels,
+                receiptAssociations = receiptLabels,
             ),
             sha256 = sha256(text),
         )

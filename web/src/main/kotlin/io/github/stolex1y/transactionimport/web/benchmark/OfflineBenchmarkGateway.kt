@@ -80,11 +80,20 @@ internal class OfflineBenchmarkGateway(
         }
         return buildJsonObject {
             putJsonArray("items") {
-                operations.forEach { (index, direction) ->
+                operations.forEach { (index, bankFlow) ->
+                    val direction = when (bankFlow) {
+                        "outgoing" -> "expense"
+                        "incoming" -> "income"
+                        else -> null
+                    }
                     add(
                         buildJsonObject {
                             put("index", index)
-                            put("category_id", if (direction == "expense") JsonPrimitive(CAFE_CATEGORY_ID) else JsonNull)
+                            put("direction", direction?.let(::JsonPrimitive) ?: JsonNull)
+                            put(
+                                "category_id",
+                                if (direction == "expense") JsonPrimitive(CAFE_CATEGORY_ID) else JsonNull,
+                            )
                         },
                     )
                 }
@@ -135,6 +144,6 @@ internal class OfflineBenchmarkGateway(
         const val RECEIPT_SELECTOR_REPLY =
             """{"receipt_alias":null,"confidence":0,"not_target":false}"""
         const val EMPTY_PLANNER_REPLY = "Операции готовы к проверке."
-        val OPERATION_LINE = Regex("^\\s*(\\d+)\\. direction=(expense|income);")
+        val OPERATION_LINE = Regex("^\\s*(\\d+)\\. bank_flow=(outgoing|incoming|zero);")
     }
 }

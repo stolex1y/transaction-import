@@ -48,15 +48,18 @@ internal data class ImportBenchmarkMetrics(
     val selectionTruePositive: Int,
     val selectionFalsePositive: Int,
     val selectionFalseNegative: Int,
-    val categoryAccuracy: Double,
-    val categoryCoverage: Double,
+    val categoryAccuracy: Double?,
+    val categoryCoverage: Double?,
     val categoryAccuracyWhenAssigned: Double?,
     val categoryCorrect: Int,
     val categoryAssigned: Int,
     val categoryLabelCount: Int,
+    val categoryApplicableLabelCount: Int,
     val matchedReceiptCount: Int,
     val ambiguousReceiptCount: Int,
     val unmatchedReceiptCount: Int,
+    val receiptCorrectCount: Int,
+    val receiptAccuracy: Double,
     val receiptLabelCount: Int,
 )
 
@@ -71,10 +74,16 @@ internal enum class ImportBenchmarkFailureCode(val reportValue: String) {
     UNEXPECTED_REPEAT_FAILURE("unexpected_repeat_failure"),
 }
 
+internal data class ImportBenchmarkRepeatResult(
+    val metrics: ImportBenchmarkMetrics,
+    val draft: ImportBenchmarkDraftSnapshot,
+)
+
 internal sealed interface ImportBenchmarkOutcome {
     data class Scored(val metrics: ImportBenchmarkMetrics) : ImportBenchmarkOutcome
     data class Failed(val failureCode: ImportBenchmarkFailureCode) : ImportBenchmarkOutcome
 }
+
 
 internal class ImportBenchmarkRepeatFailure(
     val failureCode: ImportBenchmarkFailureCode,
@@ -100,51 +109,100 @@ internal class ImportBenchmarkRunner(
     private val workDirectoryFactory: () -> Path = { Files.createTempDirectory("import-benchmark-") },
     private val deleteWorkDirectory: (Path) -> Unit = ::deleteBenchmarkTree,
     private val emit: (String) -> Unit = {},
+    private val draftArtifactWriter: ImportBenchmarkDraftArtifactWriter? = null,
 ) {
     suspend fun run(repetitions: Int): List<ImportBenchmarkMetrics> {
         require(repetitions in 1..fixture.repetitions) { "Benchmark repetition count is not approved." }
-        return (1..repetitions).map { repetition -> runOne(repetition, classifyRepeatFailures = false) }
+        val results = ArrayList<ImportBenchmarkMetrics>(repetitions)
+        for (repetition in 1..repetitions) {
+            var validatedDraft: ImportBenchmarkDraftSnapshot? = null
+            val result = try {
+                runOne(repetition, classifyRepeatFailures = false) { validatedDraft = it }
+            } catch (error: Throwable) {
+                val failureCode = failureCodeFor(error)
+                if (failureCode != null) {
+                    draftArtifactWriter?.write(
+                        repetition,
+                        ImportBenchmarkOutcome.Failed(failureCode),
+                        validatedDraft,
+                    )
+                }
+                throw error
+            }
+            draftArtifactWriter?.write(
+                repetition,
+                ImportBenchmarkOutcome.Scored(result.metrics),
+                result.draft,
+            )
+            results += result.metrics
+        }
+        return results
     }
 
     internal suspend fun runOutcomes(repetitions: Int): List<ImportBenchmarkOutcome> {
         require(repetitions in 1..fixture.repetitions) { "Benchmark repetition count is not approved." }
         val outcomes = ArrayList<ImportBenchmarkOutcome>(repetitions)
         for (repetition in 1..repetitions) {
-            try {
-                outcomes += ImportBenchmarkOutcome.Scored(runOne(repetition, classifyRepeatFailures = true))
+            var validatedDraft: ImportBenchmarkDraftSnapshot? = null
+            var terminalFailure: Throwable? = null
+            val outcome = try {
+                val result = runOne(repetition, classifyRepeatFailures = true) { validatedDraft = it }
+                ImportBenchmarkOutcome.Scored(result.metrics)
             } catch (error: ImportBenchmarkCancelledException) {
-                throw error
+                terminalFailure = error
+                ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.PROVIDER_REQUEST_FAILED)
             } catch (error: OmpGatewayPreflightException) {
-                throw error
+                terminalFailure = error
+                ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.PROVIDER_REQUEST_FAILED)
             } catch (error: ImportBenchmarkModelRequestException) {
-                if (error.fatal) throw error
-                outcomes += ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.PROVIDER_REQUEST_FAILED)
+                if (error.fatal) terminalFailure = error
+                ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.PROVIDER_REQUEST_FAILED)
             } catch (error: CancellationException) {
                 if (!currentCoroutineContext().isActive) throw error
-                outcomes += ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.REPEAT_TIMEOUT)
+                ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.REPEAT_TIMEOUT)
             } catch (error: BenchmarkCleanupException) {
-                throw error
+                terminalFailure = error
+                ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.UNEXPECTED_REPEAT_FAILURE)
             } catch (error: ImportBenchmarkReceiptSourceException) {
-                outcomes += ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.RECEIPT_SOURCE_FAILED)
+                ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.RECEIPT_SOURCE_FAILED)
             } catch (error: ImportBenchmarkRepeatFailure) {
-                outcomes += ImportBenchmarkOutcome.Failed(error.failureCode)
+                ImportBenchmarkOutcome.Failed(error.failureCode)
             } catch (error: Exception) {
-                outcomes += ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.UNEXPECTED_REPEAT_FAILURE)
+                ImportBenchmarkOutcome.Failed(ImportBenchmarkFailureCode.UNEXPECTED_REPEAT_FAILURE)
             }
+            draftArtifactWriter?.write(repetition, outcome, validatedDraft)
+            outcomes += outcome
+            terminalFailure?.let { throw it }
         }
         return outcomes
+    }
+
+    private suspend fun failureCodeFor(error: Throwable): ImportBenchmarkFailureCode? = when (error) {
+        is ImportBenchmarkCancelledException -> null
+        is OmpGatewayPreflightException, is ImportBenchmarkModelRequestException ->
+            ImportBenchmarkFailureCode.PROVIDER_REQUEST_FAILED
+        is CancellationException ->
+            if (currentCoroutineContext().isActive) ImportBenchmarkFailureCode.REPEAT_TIMEOUT else null
+        is BenchmarkCleanupException -> ImportBenchmarkFailureCode.UNEXPECTED_REPEAT_FAILURE
+        is ImportBenchmarkReceiptSourceException -> ImportBenchmarkFailureCode.RECEIPT_SOURCE_FAILED
+        is ImportBenchmarkRepeatFailure -> error.failureCode
+        is Exception -> ImportBenchmarkFailureCode.UNEXPECTED_REPEAT_FAILURE
+        else -> null
     }
 
     private suspend fun runOne(
         repetition: Int,
         classifyRepeatFailures: Boolean,
-    ): ImportBenchmarkMetrics {
+        onValidatedDraft: (ImportBenchmarkDraftSnapshot) -> Unit,
+    ): ImportBenchmarkRepeatResult {
+
         val workDirectory = workDirectoryFactory()
         var primaryFailure: Throwable? = null
         try {
             val database = workDirectory.resolve("benchmark.sqlite")
             val repository = SqliteImportSessionRepository(database.toString())
             repository.saveLongTermMemory(fixture.modelInput.preferences)
+            for (category in BENCHMARK_ONLY_CATEGORIES) repository.insertCategory(category)
 
             val catalog = benchmarkProviderCatalog()
             val loop = McpToolLoopConfig(
@@ -328,19 +386,26 @@ internal class ImportBenchmarkRunner(
                         "Post-confirm inclusion review failed; this repetition cannot be scored.",
                     )
                 }
-                return try {
-                    score(draft.transactions, repository.listCategories())
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Exception) {
+            } else {
+                requireAmbiguousReviewsPreserved(preview, draft.transactions)
+            }
+            val categories = repository.listCategories()
+            val draftSnapshot = ImportBenchmarkDraftArtifactWriter.snapshot(fixture, draft, categories)
+            onValidatedDraft(draftSnapshot)
+            val metrics = try {
+                ImportBenchmarkScoring.score(fixture, draft.transactions, categories)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (classifyRepeatFailures) {
                     throw ImportBenchmarkRepeatFailure(
                         ImportBenchmarkFailureCode.SCORING_FAILED,
                         "Benchmark scoring failed.",
                     )
                 }
+                throw error
             }
-            requireAmbiguousReviewsPreserved(preview, draft.transactions)
-            return score(draft.transactions, repository.listCategories())
+            return ImportBenchmarkRepeatResult(metrics, draftSnapshot)
         } catch (error: Throwable) {
             primaryFailure = error
             throw error
@@ -368,57 +433,6 @@ internal class ImportBenchmarkRunner(
 
     }
 
-    private fun score(
-        rows: List<DraftTransaction>,
-        categories: List<TransactionCategory>,
-    ): ImportBenchmarkMetrics {
-        val bySourceId = rows.associateBy { row ->
-            row.transaction.sourceRef?.takeIf(String::isNotBlank)
-                ?: throw IllegalStateException("Benchmark draft row has no source reference.")
-        }
-        require(bySourceId.size == rows.size && bySourceId.keys == fixture.evaluationOnly.selection.keys) {
-            "Benchmark result lost the approved operation identity mapping."
-        }
-        val selection = fixture.evaluationOnly.selection
-        val truePositive = selection.count { (id, expected) -> expected && bySourceId.getValue(id).included }
-        val falsePositive = selection.count { (id, expected) -> !expected && bySourceId.getValue(id).included }
-        val falseNegative = selection.count { (id, expected) -> expected && !bySourceId.getValue(id).included }
-        val predictedIncluded = truePositive + falsePositive
-        val expectedIncluded = selection.values.count { it }
-        val categoryIdByName = categoryLeafIdsByName(categories)
-        val categoryLabels = fixture.evaluationOnly.categories
-        val expectedCategoryIds = categoryLabels.mapValues { (_, name) ->
-            categoryIdByName[name]
-                ?: throw IllegalStateException("Benchmark category label is unavailable in the active catalog.")
-        }
-        val categoryAssigned = expectedCategoryIds.count { (id, _) ->
-            bySourceId.getValue(id).transaction.categoryId != null
-        }
-        val categoryCorrect = expectedCategoryIds.count { (id, expectedId) ->
-            bySourceId.getValue(id).transaction.categoryId == expectedId
-        }
-        val associationCounts = rows.mapNotNull { it.transaction.receiptAssociation?.status }
-            .groupingBy { it }
-            .eachCount()
-        return ImportBenchmarkMetrics(
-            selectionPrecision = predictedIncluded.takeIf { it > 0 }?.let { truePositive.toDouble() / it },
-            selectionRecall = truePositive.toDouble() / expectedIncluded,
-            selectionTruePositive = truePositive,
-            selectionFalsePositive = falsePositive,
-            selectionFalseNegative = falseNegative,
-            categoryAccuracy = categoryCorrect.toDouble() / categoryLabels.size,
-            categoryCoverage = categoryAssigned.toDouble() / categoryLabels.size,
-            categoryAccuracyWhenAssigned = categoryAssigned.takeIf { it > 0 }
-                ?.let { categoryCorrect.toDouble() / it },
-            categoryCorrect = categoryCorrect,
-            categoryAssigned = categoryAssigned,
-            categoryLabelCount = categoryLabels.size,
-            matchedReceiptCount = associationCounts[ReceiptAssociationStatus.MATCHED] ?: 0,
-            ambiguousReceiptCount = associationCounts[ReceiptAssociationStatus.AMBIGUOUS] ?: 0,
-            unmatchedReceiptCount = associationCounts[ReceiptAssociationStatus.UNMATCHED] ?: 0,
-            receiptLabelCount = 0,
-        )
-    }
 
     private fun requireAmbiguousReviewsPreserved(
         preview: McpPreview,
@@ -441,14 +455,6 @@ internal class ImportBenchmarkRunner(
         }
     }
 
-    private fun categoryLeafIdsByName(categories: List<TransactionCategory>): Map<String, String> {
-        val parentIds = categories.mapNotNullTo(hashSetOf()) { it.parentId }
-        return categories.asSequence()
-            .filter { !it.archived && it.type == CategoryType.EXPENSE && it.id !in parentIds }
-            .groupBy(TransactionCategory::displayName)
-            .mapNotNull { (name, matches) -> matches.singleOrNull()?.let { name to it.id } }
-            .toMap()
-    }
 
     private fun previewSummary(preview: McpPreview): ImportBenchmarkPreviewSummary {
         val receiptStatuses = preview.transactions.mapNotNull { it.receiptAssociation?.status }
@@ -496,6 +502,27 @@ internal class ImportBenchmarkRunner(
         const val BENCHMARK_PROVIDER = "benchmark-local"
         const val BENCHMARK_MODEL = "benchmark-local-model"
         const val DISABLED_REASONING = "disabled"
+        val BENCHMARK_ONLY_CATEGORIES = listOf(
+            TransactionCategory(
+                id = "benchmark.clothing",
+                displayName = "Одежда",
+                type = CategoryType.EXPENSE,
+                hint = "Одежда, обувь и аксессуары.",
+            ),
+            TransactionCategory(
+                id = "benchmark.food.ration",
+                displayName = "Рацион",
+                type = CategoryType.EXPENSE,
+                parentId = "category.food",
+                hint = "Готовые рационы и питание по плану.",
+            ),
+            TransactionCategory(
+                id = "benchmark.beauty",
+                displayName = "Красота",
+                type = CategoryType.EXPENSE,
+                hint = "Косметика и товары для ухода.",
+            ),
+        )
     }
 }
 
@@ -582,8 +609,10 @@ private class BenchmarkProviderFailureGuard(
             return when (error.safeReportedModelId) {
                 "gpt-6-luna" ->
                     "One-completion diagnostic matched catalog model ID gpt-6-luna; scoring stopped by design"
+                "openai-codex/gpt-6-luna:min" ->
+                    "One-completion diagnostic matched exact approved selector openai-codex/gpt-6-luna:min; scoring stopped by design"
                 "openai-codex/gpt-6-luna" ->
-                    "One-completion diagnostic accepted exact response alias openai-codex/gpt-6-luna; scoring stopped by design"
+                    "One-completion diagnostic matched base response alias openai-codex/gpt-6-luna; scoring stopped by design"
                 else -> "One-completion diagnostic completed; response model ID omitted; scoring stopped by design"
             }
         }

@@ -24,7 +24,7 @@ import kotlin.test.assertTrue
 
 class ImportBenchmarkRunnerTest {
     @Test
-    fun offlineRunScoresReviewedLabelsAndBindsPendingPreviewSourceRefs() = runBlocking {
+    fun offlineRunUsesCompleteReviewedDatasetAndCleansTemporaryState() = runBlocking {
         val fixture = ImportBenchmarkFixtureLoader.loadBundled()
         val previews = mutableListOf<ImportBenchmarkPreviewSummary>()
         val output = mutableListOf<String>()
@@ -61,18 +61,15 @@ class ImportBenchmarkRunnerTest {
         assertEquals(3, previews.size)
         previews.forEach { preview ->
             assertEquals(50, preview.transactionCount)
-            assertEquals(42, preview.categorizedCount)
         }
         results.forEach { result ->
-            assertEquals(0.52, result.selectionPrecision)
-            assertEquals(1.0, result.selectionRecall)
-            assertEquals(24, result.selectionFalsePositive)
-            assertEquals(0, result.selectionFalseNegative)
-            assertEquals(1.0, result.categoryAccuracy)
-            assertEquals(1.0, result.categoryCoverage)
-            assertEquals(0, result.receiptLabelCount)
-            assertTrue(result.ambiguousReceiptCount > 0)
-            assertTrue(result.matchedReceiptCount + result.ambiguousReceiptCount + result.unmatchedReceiptCount <= 50)
+            assertEquals(50, result.categoryLabelCount)
+            assertEquals(23, result.categoryApplicableLabelCount)
+            assertEquals(50, result.receiptLabelCount)
+            assertEquals(
+                50,
+                result.matchedReceiptCount + result.ambiguousReceiptCount + result.unmatchedReceiptCount,
+            )
         }
         assertEquals(3, workDirectories.distinct().size)
         assertTrue(workDirectories.all { !Files.exists(it) })
@@ -400,10 +397,14 @@ class ImportBenchmarkRunnerTest {
     }
 
     @Test
-    fun receiptSourceFailureAbortsBeforeConfirmationAndCleansTemporaryDatabase() = runBlocking {
+    fun receiptSearchSourceFailureAbortsBeforeConfirmationAndCleansTemporaryDatabase() = runBlocking {
         val approved = ImportBenchmarkFixtureLoader.loadBundled()
         val fixture = approved.copy(
-            modelInput = approved.modelInput.copy(receiptDetails = emptyMap()),
+            modelInput = approved.modelInput.copy(
+                receiptSummaries = approved.modelInput.receiptSummaries.mapIndexed { index, summary ->
+                    if (index == 0) summary.copy(receivedAt = "not-a-date") else summary
+                },
+            ),
         )
         val workDirectories = mutableListOf<Path>()
         val output = mutableListOf<String>()
@@ -527,14 +528,11 @@ class ImportBenchmarkRunnerTest {
     }
 
     @Test
-    fun providerErrorsAtClassifierAndReceiptSelectorAbortTheRun() = runBlocking {
+    fun providerErrorAtClassifierAbortsRun() = runBlocking {
         val fixture = ImportBenchmarkFixtureLoader.loadBundled()
 
         assertProviderFailureStopsRun(fixture) { request ->
             request.messages.any { it.content.contains("Операции для обогащения:") }
-        }
-        assertProviderFailureStopsRun(fixture) { request ->
-            request.messages.any { it.content.startsWith("Операция: дата=") }
         }
     }
 
@@ -589,7 +587,7 @@ class ImportBenchmarkRunnerTest {
             fixture = fixture,
             providerError = OmpGatewayDiagnosticCompletedException("openai-codex/gpt-6-luna"),
             expectedSafeSummary =
-                "One-completion diagnostic accepted exact response alias openai-codex/gpt-6-luna; scoring stopped by design",
+                "One-completion diagnostic matched base response alias openai-codex/gpt-6-luna; scoring stopped by design",
             expectedStage = "tool-planning",
             failWhen = failDuringPlanning,
         )

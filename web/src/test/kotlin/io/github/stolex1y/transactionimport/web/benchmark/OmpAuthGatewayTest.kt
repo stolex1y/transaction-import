@@ -698,7 +698,7 @@ class OmpAuthGatewayTest {
     }
 
     private companion object {
-        const val MODEL_SELECTOR = "openai-codex/gpt-6-luna"
+        const val MODEL_SELECTOR = "openai-codex/gpt-6-luna:min"
         const val EXPECTED_MODEL_ID = "gpt-6-luna"
         const val REASONING_EFFORT = "medium"
     }

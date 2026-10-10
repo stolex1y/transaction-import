@@ -48,14 +48,16 @@ fun main(args: Array<String>) {
         exitProcess(1)
     } catch (error: ImportBenchmarkModelRequestException) {
         System.err.println(
-            "Benchmark остановлен без сохранения результата (${error.message}); " +
-                "содержимое запросов, ответов и fixture скрыто.",
+            "Benchmark остановлен без агрегированного отчёта; локальные артефакты уже завершённых повторов, " +
+                "если они есть, остаются на диске (${error.message}). " +
+                "Содержимое запросов, ответов и fixture скрыто.",
         )
         exitProcess(1)
     } catch (error: Throwable) {
         System.err.println(
-            "Benchmark остановлен без сохранения результата (${safeBenchmarkFailureLabel(error)}); " +
-                "содержимое запросов, ответов и fixture скрыто.",
+            "Benchmark остановлен без агрегированного отчёта; локальные артефакты уже завершённых повторов, " +
+                "если они есть, остаются на диске. Содержимое запросов, ответов и fixture скрыто " +
+                "(${safeBenchmarkFailureLabel(error)}).",
         )
         exitProcess(1)
     } finally {
@@ -203,16 +205,24 @@ private suspend fun runOffline(
             true
         },
         emit = ::println,
+        draftArtifactWriter = ImportBenchmarkDraftArtifactWriter(fixture, emit = ::println),
     )
-    val metrics = runner.run(fixture.repetitions)
+    val outcomes = runner.runOutcomes(fixture.repetitions)
     writeReport(
         "offline",
         fixture,
-        metrics.map { result -> ImportBenchmarkRun(ImportBenchmarkOutcome.Scored(result)) },
+        outcomes.map { outcome -> ImportBenchmarkRun(outcome) },
         options.reportPath,
     )
-    metrics.forEachIndexed { index, result -> printMetrics(index + 1, result) }
+    outcomes.forEachIndexed { index, outcome ->
+        when (outcome) {
+            is ImportBenchmarkOutcome.Scored -> printMetrics(index + 1, outcome.metrics)
+            is ImportBenchmarkOutcome.Failed ->
+                println("Повтор ${index + 1}: завершён без оценки (${outcome.failureCode.reportValue}).")
+        }
+    }
 }
+
 
 private suspend fun runCodex(
     fixture: ImportBenchmarkFixture,
@@ -259,6 +269,7 @@ private suspend fun runCodex(
                 true
             },
             emit = ::println,
+            draftArtifactWriter = ImportBenchmarkDraftArtifactWriter(fixture, emit = ::println),
         )
         val outcomes = runner.runOutcomes(fixture.repetitions)
         activeSession?.let { last ->
@@ -304,7 +315,7 @@ private suspend fun runCodex(
 }
 
 internal const val APPROVED_BENCHMARK_BODY_SHA256 =
-    "05b0b60cae7052872e48a425e501eff943f67f04b2e0691b04240e39ee2f38a3"
+    "f78d6f3dc3a469212b055d96986801c8f99d4e1cc085ae216f07878d192d533f"
 internal const val APPROVED_BENCHMARK_ROUTING_SUMMARY =
     "OMP routing: profile=unset (OMP default profile); config=benchmark fallback-only overlay; " +
         "inherited PI_CONFIG_FILES is not set; other inherited environment is preserved. Account identity is not verified."

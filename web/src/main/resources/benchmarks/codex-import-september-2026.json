@@ -1,5 +1,5 @@
 {
-  "model_selector": "openai-codex/gpt-6-luna",
+  "model_selector": "openai-codex/gpt-6-luna:min",
   "reasoning_effort": "medium",
   "repetitions": 3,
   "scenario": {
@@ -11,7 +11,7 @@
       "Исключать переводы между собственными счетами.",
       "Исключать переводы по телефонным суффиксам PHONE_SUFFIX_A и PHONE_SUFFIX_B.",
       "Исключать переводы с description prefix «Перевод с договора …».",
-      "systemletbefit/letbefit → категория «Еда», каноническое имя BeFit.",
+      "systemletbefit/letbefit → категория «Рацион», каноническое имя BeFit.",
       "ИП-ПРОДАВЕЦ-02 → «Хлебник» (food.cafe).",
       "ИП-ПРОДАВЕЦ-01 → «Хлебник» (food.cafe).",
       "Исключать переводы контрагентам [Контрагент-A] и [Контрагент-B].",
@@ -1416,12 +1416,84 @@
     ],
     "categories": [
       {
+        "transaction_id": "TX01",
+        "category": "Кафе и рестораны"
+      },
+      {
+        "transaction_id": "TX02",
+        "category": null
+      },
+      {
+        "transaction_id": "TX03",
+        "category": "Аптеки и здоровье"
+      },
+      {
         "transaction_id": "TX04",
         "category": "Кафе и рестораны"
       },
       {
-        "transaction_id": "TX23",
+        "transaction_id": "TX05",
+        "category": null
+      },
+      {
+        "transaction_id": "TX06",
+        "category": null
+      },
+      {
+        "transaction_id": "TX07",
+        "category": null
+      },
+      {
+        "transaction_id": "TX08",
+        "category": null
+      },
+      {
+        "transaction_id": "TX09",
+        "category": null
+      },
+      {
+        "transaction_id": "TX10",
+        "category": "Аптеки и здоровье"
+      },
+      {
+        "transaction_id": "TX11",
+        "category": null
+      },
+      {
+        "transaction_id": "TX12",
         "category": "Кафе и рестораны"
+      },
+      {
+        "transaction_id": "TX13",
+        "category": null
+      },
+      {
+        "transaction_id": "TX14",
+        "category": null
+      },
+      {
+        "transaction_id": "TX15",
+        "category": "Транспорт"
+      },
+      {
+        "transaction_id": "TX16",
+        "category": null
+      },
+      {
+        "transaction_id": "TX17",
+        "category": null
+      },
+      {
+        "transaction_id": "TX18",
+        "category": "Кафе и рестораны"
+      },
+      {
+        "transaction_id": "TX19",
+        "category": "Продукты"
+      },
+      {
+        "transaction_id": "TX20",
+        "category": null
       },
       {
         "transaction_id": "TX21",
@@ -1430,6 +1502,331 @@
       {
         "transaction_id": "TX22",
         "category": "Кафе и рестораны"
+      },
+      {
+        "transaction_id": "TX23",
+        "category": "Кафе и рестораны"
+      },
+      {
+        "transaction_id": "TX24",
+        "category": null
+      },
+      {
+        "transaction_id": "TX25",
+        "category": "Кафе и рестораны"
+      },
+      {
+        "transaction_id": "TX26",
+        "category": "Одежда"
+      },
+      {
+        "transaction_id": "TX27",
+        "category": null
+      },
+      {
+        "transaction_id": "TX28",
+        "category": null
+      },
+      {
+        "transaction_id": "TX29",
+        "category": null
+      },
+      {
+        "transaction_id": "TX30",
+        "category": "Рацион"
+      },
+      {
+        "transaction_id": "TX31",
+        "category": "Рацион"
+      },
+      {
+        "transaction_id": "TX32",
+        "category": null
+      },
+      {
+        "transaction_id": "TX33",
+        "category": null
+      },
+      {
+        "transaction_id": "TX34",
+        "category": "Красота"
+      },
+      {
+        "transaction_id": "TX35",
+        "category": "Красота"
+      },
+      {
+        "transaction_id": "TX36",
+        "category": null
+      },
+      {
+        "transaction_id": "TX37",
+        "category": "Кафе и рестораны"
+      },
+      {
+        "transaction_id": "TX38",
+        "category": "Кафе и рестораны"
+      },
+      {
+        "transaction_id": "TX39",
+        "category": null
+      },
+      {
+        "transaction_id": "TX40",
+        "category": null
+      },
+      {
+        "transaction_id": "TX41",
+        "category": null
+      },
+      {
+        "transaction_id": "TX42",
+        "category": "Одежда"
+      },
+      {
+        "transaction_id": "TX43",
+        "category": null
+      },
+      {
+        "transaction_id": "TX44",
+        "category": null
+      },
+      {
+        "transaction_id": "TX45",
+        "category": null
+      },
+      {
+        "transaction_id": "TX46",
+        "category": null
+      },
+      {
+        "transaction_id": "TX47",
+        "category": null
+      },
+      {
+        "transaction_id": "TX48",
+        "category": "Рацион"
+      },
+      {
+        "transaction_id": "TX49",
+        "category": "Рацион"
+      },
+      {
+        "transaction_id": "TX50",
+        "category": "Кафе и рестораны"
+      }
+    ],
+    "receipt_associations": [
+      {
+        "transaction_id": "TX01",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX02",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX03",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX04",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX05",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX06",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX07",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX08",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX09",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX10",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX11",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX12",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX13",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX14",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX15",
+        "expected_status": "matched",
+        "receipt_id": "C017"
+      },
+      {
+        "transaction_id": "TX16",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX17",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX18",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX19",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX20",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX21",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX22",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX23",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX24",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX25",
+        "expected_status": "matched",
+        "receipt_id": "C022"
+      },
+      {
+        "transaction_id": "TX26",
+        "expected_status": "matched",
+        "receipt_id": "C024"
+      },
+      {
+        "transaction_id": "TX27",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX28",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX29",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX30",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX31",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX32",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX33",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX34",
+        "expected_status": "ambiguous",
+        "receipt_ids": [
+          "C026",
+          "C027"
+        ]
+      },
+      {
+        "transaction_id": "TX35",
+        "expected_status": "matched",
+        "receipt_id": "C028"
+      },
+      {
+        "transaction_id": "TX36",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX37",
+        "expected_status": "matched",
+        "receipt_id": "C034"
+      },
+      {
+        "transaction_id": "TX38",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX39",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX40",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX41",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX42",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX43",
+        "expected_status": "matched",
+        "receipt_id": "C037"
+      },
+      {
+        "transaction_id": "TX44",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX45",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX46",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX47",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX48",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX49",
+        "expected_status": "no_receipt"
+      },
+      {
+        "transaction_id": "TX50",
+        "expected_status": "matched",
+        "receipt_id": "C039"
       }
     ]
   }
