@@ -291,6 +291,7 @@ class AgentIntegrationTest {
                 assertEquals("2026-09-01T10:00:00+03:00", detail["date_time"]!!.jsonPrimitive.content)
                 assertEquals(4200, detail["total_minor"]!!.jsonPrimitive.content.toLong())
                 assertEquals("RUB", detail["currency"]!!.jsonPrimitive.content)
+                assertEquals(1, detail["operation_type"]!!.jsonPrimitive.content.toInt())
                 assertEquals(1, detail["items"]!!.jsonArray.size)
                 assertEquals(
                     "Синтетическая торговая точка",
@@ -963,7 +964,7 @@ class AgentIntegrationTest {
                         retailPlaceAddress?.let { ",\"retailPlaceAddress\":\"$it\"" } ?: ""
                     TbankToolCallResponse(
                         tool = tool,
-                        text = """{"receipt_key":"${RAW_KEY_PREFIX}1","date_time":"2026-09-01T10:00:00+03:00","fiscal_document_number":"100","total_minor":4200,"currency":"RUB"$settlementField$addressField,"items":[{"name":"Хлеб","quantity":1,"price_minor":4200,"sum_minor":4200,"vat_rate":"20%"}]}""",
+                        text = """{"receipt_key":"${RAW_KEY_PREFIX}1","date_time":"2026-09-01T10:00:00+03:00","fiscal_document_number":"100","total_minor":4200,"currency":"RUB","operation_type":1$settlementField$addressField,"items":[{"name":"Хлеб","quantity":1,"price_minor":4200,"sum_minor":4200,"vat_rate":"20%"}]}""",
                     )
                 }
                 else -> TbankToolCallResponse(tool = tool, isError = true, text = "unexpected tool")

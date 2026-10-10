@@ -42,7 +42,12 @@ class SchedulerServiceTest {
         var now = epoch("2026-09-10")
         var id = 0
         val classifier = FakeAgentGateway(
-            ArrayDeque(listOf(FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON)),
+            ArrayDeque(
+                listOf(
+                    FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON,
+                    """{"items":[{"index":0,"category_id":"food.cafe"}]}""",
+                ),
+            ),
         )
         val dependencies = fakeAgentDependencies(database.toString(), classifier)
         val source = RecordingSchedulerSource()
@@ -87,10 +92,11 @@ class SchedulerServiceTest {
             assertEquals(1, firstResult.receiptDetailCount)
             assertEquals(0, firstResult.unmatchedCount)
             assertEquals(0, firstResult.ambiguousCount)
-            assertEquals(1, classifier.requests.size)
-            assertFalse(classifier.requests.single().messages.any { message ->
+            assertEquals(2, classifier.requests.size)
+            assertFalse(classifier.requests.first().messages.any { message ->
                 message.content.contains("SYNTHETIC_SCHEDULER_HISTORY")
             })
+            assertFalse(classifier.requests.last().messages.last().content.contains("transaction-ref-001"))
             assertEquals(emptyLinkedSession.session.revision + 1, withPriorConversation.session.revision)
             assertEquals("2026-09-11", first.cursorDate)
             assertEquals(
@@ -106,7 +112,7 @@ class SchedulerServiceTest {
             val session = dependencies.agent.getSession(linkedSessionId)
             val item = assertNotNull(session.draft).transactions.single()
             val transaction = item.transaction
-            assertEquals("food.groceries", transaction.categoryId)
+            assertEquals("food.cafe", transaction.categoryId)
             assertEquals("transaction-ref-001", transaction.sourceRef)
             assertEquals("Синтетический чек [идентификатор чека скрыт]", item.description)
             dependencies.agent.replaceTransaction(
@@ -418,7 +424,7 @@ class SchedulerServiceTest {
                 "receipts" to "get-receipt" -> TbankToolCallResponse(
                     tool = tool,
                     text = """
-                        {"date_time":"2026-09-10T12:00:00Z","total_minor":1,"currency":"RUB","items":[{"name":"Кофе","quantity":1,"price_minor":1,"sum_minor":1}]}
+                        {"date_time":"2026-09-10T12:00:00Z","total_minor":1,"currency":"RUB","operation_type":1,"items":[{"name":"Кофе","quantity":1,"price_minor":1,"sum_minor":1}]}
                     """.trimIndent(),
                 )
                 else -> TbankToolCallResponse(tool = tool, isError = true, text = "unexpected source call")

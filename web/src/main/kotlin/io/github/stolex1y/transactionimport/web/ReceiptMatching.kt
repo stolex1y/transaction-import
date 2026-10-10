@@ -8,6 +8,7 @@ import io.github.stolex1y.transactionimport.core.ReceiptAssociationSummary
 import io.github.stolex1y.transactionimport.core.ReceiptReviewEvidence
 import io.github.stolex1y.transactionimport.core.ReceiptReviewReason
 import io.github.stolex1y.transactionimport.core.SchedulerTraceEvent
+import io.github.stolex1y.transactionimport.core.TransactionDirection
 import io.github.stolex1y.transactionimport.core.TransactionItem
 import io.github.stolex1y.transactionimport.core.normalizeCurrencyCode
 import kotlinx.coroutines.CancellationException
@@ -49,13 +50,15 @@ private val RECEIPT_REFERENCE_PATTERN = Regex(
 )
 private val SENSITIVE_RECEIPT_VALUE_PATTERN = Regex(
     "(?iu)(?<![\\p{L}\\p{N}_])(?:receipt[_ -]?key|fiscal[_ -]?(?:drive|document|sign|id)|" +
-        "фискальн(?:ый|ого)?[_ -]?(?:накопитель|документ|признак|идентификатор)|" +
-        "qr[_ -]?(?:code|код)?|кассир|cashier|buyer|покупател(?:ь|я|ю|ем|е))(?![\\p{L}\\p{N}_])\\s*[:=#]?\\s*[^,;\\n]+",
+        "(?:(?:фн|фд|фп)(?=\\s*[:=#№]?\\s*\\p{Nd})|фискальн(?:ый|ого)?[_ -]?(?:накопитель|документ|признак|идентификатор))|" +
+        "qr[_ -]?(?:code|код)?|кассир|cashier|buyer|покупател(?:ь|я|ю|ем|е))(?![\\p{L}\\p{N}_])\\s*[:=#№]?\\s*[^,;\\n]+",
 )
 
 
 private enum class ReceiptEligibility {
     PURCHASE,
+    REFUND,
+    BANK_DIRECTION_UNKNOWN,
     NOT_A_PURCHASE,
 }
 
@@ -68,6 +71,20 @@ private data class ReceiptSummaryCandidate(
     val alias: String,
 )
 
+private data class DatedReceiptOperation(
+    val transaction: ExternalTransactionCandidate,
+    val date: LocalDate,
+    val eligibility: ReceiptEligibility,
+)
+
+private fun ReceiptSummaryCandidate.safeSummary() = ReceiptAssociationSummary(
+    date = date.toString(),
+    merchant = merchant,
+    amountMinor = amountMinor,
+    currency = currency,
+    privacyVersion = ReceiptAssociationSummary.CURRENT_PRIVACY_VERSION,
+)
+
 private data class ReceiptDetailCandidate(
     val summary: ReceiptSummaryCandidate,
     val merchant: String,
@@ -75,6 +92,7 @@ private data class ReceiptDetailCandidate(
     val dateTime: String,
     val amountMinor: Long,
     val currency: String,
+    val operationType: Int?,
     val settlementPlace: String?,
     val items: List<TransactionItem>,
 ) {
@@ -111,14 +129,24 @@ class ReceiptMatchingEngine(
         autoLinkUniqueReceipt: Boolean = false,
     ): ReceiptMatchingRun {
         if (transactions.isEmpty()) return ReceiptMatchingRun(emptyList(), 0, 0)
-        val searchableTransactions = transactions.filter {
-            it.receiptEligibility() != ReceiptEligibility.NOT_A_PURCHASE
+        val datedTransactions = transactions.mapNotNull { transaction ->
+            val eligibility = transaction.receiptEligibility()
+            if (eligibility != ReceiptEligibility.PURCHASE && eligibility != ReceiptEligibility.REFUND) {
+                null
+            } else {
+                DatedReceiptOperation(
+                    transaction = transaction,
+                    date = parseDate(transaction.occurredAt),
+                    eligibility = eligibility,
+                )
+            }
         }
-        val datedTransactions = searchableTransactions.map { transaction ->
-            transaction to parseDate(transaction.occurredAt)
+        val periodFrom = datedTransactions.minOfOrNull { operation ->
+            operation.date.minusDays(if (operation.eligibility == ReceiptEligibility.REFUND) 14 else 1)
         }
-        val periodFrom = datedTransactions.minOfOrNull { it.second }?.minusDays(1)
-        val periodTo = datedTransactions.maxOfOrNull { it.second }?.plusDays(1)
+        val periodTo = datedTransactions.maxOfOrNull { operation ->
+            operation.date.plusDays(if (operation.eligibility == ReceiptEligibility.PURCHASE) 1 else 0)
+        }
         val summaries = if (periodFrom == null || periodTo == null) {
             emptyList()
         } else {
@@ -135,10 +163,12 @@ class ReceiptMatchingEngine(
         val summaryCandidates = summaries.mapIndexed { index, summary ->
             summary.copy(alias = "receipt-${index + 1}")
         }
-        val summariesByTransaction = datedTransactions.associate { (transaction, date) ->
+        val summariesByTransaction = datedTransactions.associate { operation ->
+            val transaction = operation.transaction
             transaction.sourceRef.orEmpty() to summaryCandidates.filter { summary ->
                 isEligible(
-                    operationDate = date,
+                    eligibility = operation.eligibility,
+                    operationDate = operation.date,
                     operationAmount = transaction.amountMinor,
                     operationCurrency = transaction.currency,
                     receiptDate = summary.date,
@@ -147,52 +177,95 @@ class ReceiptMatchingEngine(
                 )
             }
         }
-        val purchaseRefs = datedTransactions
-            .filter { (transaction, _) -> transaction.receiptEligibility() == ReceiptEligibility.PURCHASE }
-            .mapTo(hashSetOf()) { (transaction, _) -> transaction.sourceRef.orEmpty() }
+        val matchableRefs = datedTransactions.mapTo(hashSetOf()) {
+            it.transaction.sourceRef.orEmpty()
+        }
         val wantedKeys = summariesByTransaction
-            .filterKeys { it in purchaseRefs }
+            .filterKeys { it in matchableRefs }
             .values.flatten().map { it.key }.toSet()
         val detailCache = linkedMapOf<String, ReceiptDetailCandidate>()
-        summaryCandidates.filter { it.key in wantedKeys }.forEach { summary ->
-            if (summary.key !in detailCache) {
-                val detail = try {
-                    val response = sourceCall(
-                        tool = RECEIPTS_DETAIL_TOOL,
-                        arguments = buildJsonObject { put("receipt_key", summary.key) },
-                        trace = trace,
-                        stage = "receipts-details",
-                    )
-                    parseDetail(response, summary)
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: ReceiptMatchingSourceException) {
-                    throw error
-                } catch (_: Throwable) {
-                    throw ReceiptMatchingSourceException(
-                        "Источник receipts/get-receipt вернул некорректные данные.",
-                    )
-                }
-                detailCache[summary.key] = detail
+        val detailFailures = mutableSetOf<String>()
+        for (summary in summaryCandidates) {
+            if (summary.key !in wantedKeys || summary.key in detailCache || summary.key in detailFailures) {
+                continue
+            }
+            try {
+                val response = sourceCall(
+                    tool = RECEIPTS_DETAIL_TOOL,
+                    arguments = buildJsonObject { put("receipt_key", summary.key) },
+                    trace = trace,
+                    stage = "receipts-details",
+                )
+                detailCache[summary.key] = parseDetail(response, summary)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                detailFailures += summary.key
             }
         }
-        val eligibleByTransaction = datedTransactions.associate { (transaction, operationDate) ->
-            transaction.sourceRef.orEmpty() to summariesByTransaction[transaction.sourceRef.orEmpty()]
-                .orEmpty()
-                .mapNotNull { detailCache[it.key] }
-                .filter { detail ->
-                    isEligible(
-                        operationDate = operationDate,
-                        operationAmount = transaction.amountMinor,
-                        operationCurrency = transaction.currency,
-                        receiptDate = detail.date,
-                        receiptAmount = detail.amountMinor,
-                        receiptCurrency = detail.currency,
-                    )
+        val eligibleByTransaction = linkedMapOf<String, List<ReceiptDetailCandidate>>()
+        val detailReviewsByTransaction = mutableMapOf<String, ReceiptReviewEvidence>()
+        val detailIssuesByTransaction = mutableMapOf<String, String>()
+        for (operation in datedTransactions) {
+            val transaction = operation.transaction
+            val id = transaction.sourceRef.orEmpty()
+            val rowSummaries = summariesByTransaction[id].orEmpty()
+            val details = rowSummaries.mapNotNull { detailCache[it.key] }
+            val dateAndAmountCompatible = details.filter { detail ->
+                isEligible(
+                    eligibility = operation.eligibility,
+                    operationDate = operation.date,
+                    operationAmount = transaction.amountMinor,
+                    operationCurrency = transaction.currency,
+                    receiptDate = detail.date,
+                    receiptAmount = detail.amountMinor,
+                    receiptCurrency = detail.currency,
+                )
+            }
+            val hasUnavailableDetail = rowSummaries.any {
+                it.key in detailFailures || it.key !in detailCache
+            }
+            val hasInconsistentDetail = details.size != dateAndAmountCompatible.size
+            val expectedType = if (operation.eligibility == ReceiptEligibility.REFUND) 2 else 1
+            val unknownTypeDetails = dateAndAmountCompatible.filter {
+                it.operationType != 1 && it.operationType != 2
+            }
+            val incompatibleTypeDetails = dateAndAmountCompatible.filter {
+                (it.operationType == 1 || it.operationType == 2) && it.operationType != expectedType
+            }
+            val compatible = dateAndAmountCompatible.filter { it.operationType == expectedType }
+            eligibleByTransaction[id] = compatible
+            val reason = when {
+                hasUnavailableDetail || hasInconsistentDetail ->
+                    ReceiptReviewReason.RECEIPT_DETAIL_UNAVAILABLE
+                unknownTypeDetails.isNotEmpty() ->
+                    ReceiptReviewReason.RECEIPT_OPERATION_TYPE_UNKNOWN
+                compatible.isEmpty() && incompatibleTypeDetails.isNotEmpty() ->
+                    ReceiptReviewReason.RECEIPT_OPERATION_TYPE_INCOMPATIBLE
+                else -> null
+            }
+            if (reason != null) {
+                val summariesForReview = rowSummaries
+                    .map { detailCache[it.key]?.safeSummary() ?: it.safeSummary() }
+                    .distinct()
+                    .take(MAX_REVIEW_CANDIDATES)
+                detailReviewsByTransaction[id] = ReceiptReviewEvidence(
+                    reason = reason,
+                    candidates = summariesForReview,
+                )
+                detailIssuesByTransaction[id] = when (reason) {
+                    ReceiptReviewReason.RECEIPT_DETAIL_UNAVAILABLE ->
+                        "receipt_detail_unavailable: детали чека не удалось безопасно проверить"
+                    ReceiptReviewReason.RECEIPT_OPERATION_TYPE_UNKNOWN ->
+                        "receipt_operation_type_unknown: тип операции в чеке отсутствует или неизвестен"
+                    ReceiptReviewReason.RECEIPT_OPERATION_TYPE_INCOMPATIBLE ->
+                        "receipt_operation_type_incompatible: тип чека не соответствует банковской операции"
+                    else -> error("Unexpected receipt detail review reason: $reason")
                 }
+            }
         }
         val ownershipCounts = eligibleByTransaction
-            .filterKeys { it in purchaseRefs }
+            .filterKeys { it in matchableRefs }
             .values.flatten()
             .groupingBy { it.summary.key }
             .eachCount()
@@ -211,8 +284,23 @@ class ReceiptMatchingEngine(
             when (transaction.receiptEligibility()) {
                 ReceiptEligibility.NOT_A_PURCHASE ->
                     MatchDecision(transaction, ReceiptAssociationStatus.UNMATCHED)
-                ReceiptEligibility.PURCHASE -> {
+                ReceiptEligibility.BANK_DIRECTION_UNKNOWN ->
+                    MatchDecision(
+                        transaction = transaction,
+                        status = ReceiptAssociationStatus.AMBIGUOUS,
+                        issue = "receipt_direction_unknown: направление операции нужно подтвердить",
+                        review = ReceiptReviewEvidence(ReceiptReviewReason.BANK_DIRECTION_UNKNOWN),
+                    )
+                ReceiptEligibility.PURCHASE, ReceiptEligibility.REFUND -> {
                     val id = transaction.sourceRef.orEmpty()
+                    detailReviewsByTransaction[id]?.let { review ->
+                        return@map MatchDecision(
+                            transaction = transaction,
+                            status = ReceiptAssociationStatus.AMBIGUOUS,
+                            issue = detailIssuesByTransaction[id],
+                            review = review,
+                        )
+                    }
                     val local = eligibleByTransaction[id].orEmpty()
                     if (local.isEmpty()) return@map MatchDecision(transaction, ReceiptAssociationStatus.UNMATCHED)
                     selectedCandidates[id]?.let { requested ->
@@ -561,6 +649,12 @@ class ReceiptMatchingEngine(
     private fun parseDetail(element: JsonElement, summary: ReceiptSummaryCandidate): ReceiptDetailCandidate {
         val root = element as? JsonObject
             ?: throw IllegalStateException("Источник чеков вернул некорректные детали.")
+
+        val operationType = (root["operation_type"] as? JsonPrimitive)
+            ?.takeUnless { it.isString }
+            ?.longOrNull
+            ?.takeIf { it in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }
+            ?.toInt()
         val currency = normalizeCurrencyCode(
             root["currency"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotBlank)
                 ?: summary.currency,
@@ -629,6 +723,7 @@ class ReceiptMatchingEngine(
             dateTime = normalizedDateTime,
             amountMinor = amount,
             currency = currency,
+            operationType = operationType,
             settlementPlace = settlementPlace,
             items = items,
         )
@@ -689,27 +784,67 @@ class ReceiptMatchingEngine(
         settlementPlace = settlementPlace,
     )
 
-    private fun ExternalTransactionCandidate.receiptEligibility(): ReceiptEligibility = when {
-        amountMinor >= 0 -> ReceiptEligibility.NOT_A_PURCHASE
-        categoryId?.startsWith("transfer.") == true ||
+    private fun ExternalTransactionCandidate.receiptEligibility(): ReceiptEligibility {
+        val transactionDirection = direction ?: return ReceiptEligibility.BANK_DIRECTION_UNKNOWN
+        if (issues.any { it.substringBefore(':').trim() == "direction" }) {
+            return ReceiptEligibility.BANK_DIRECTION_UNKNOWN
+        }
+        if (
+            (transactionDirection == TransactionDirection.EXPENSE && amountMinor >= 0) ||
+            (transactionDirection == TransactionDirection.REFUND && amountMinor <= 0) ||
+            (transactionDirection == TransactionDirection.INCOME && amountMinor <= 0)
+        ) {
+            return ReceiptEligibility.BANK_DIRECTION_UNKNOWN
+        }
+        if (transactionDirection == TransactionDirection.INCOME) return ReceiptEligibility.NOT_A_PURCHASE
+
+        val transferMerchant = categoryId?.startsWith("transfer.") == true ||
             merchant.equals("Перевод", ignoreCase = true) ||
-            merchant.equals("Между своими счетами", ignoreCase = true) ||
-            EXPLICIT_TRANSFER_MARKER.containsMatchIn(description) ->
-            ReceiptEligibility.NOT_A_PURCHASE
-        else -> ReceiptEligibility.PURCHASE
+            merchant.equals("Между своими счетами", ignoreCase = true)
+        return when (transactionDirection) {
+            TransactionDirection.EXPENSE ->
+                if (transferMerchant || EXPLICIT_TRANSFER_MARKER.containsMatchIn(description)) {
+                    ReceiptEligibility.NOT_A_PURCHASE
+                } else {
+                    ReceiptEligibility.PURCHASE
+                }
+
+            TransactionDirection.REFUND ->
+                if (transferMerchant || EXPLICIT_SELF_TRANSFER_MARKER.containsMatchIn(description)) {
+                    ReceiptEligibility.NOT_A_PURCHASE
+                } else {
+                    ReceiptEligibility.REFUND
+                }
+
+            TransactionDirection.INCOME -> ReceiptEligibility.NOT_A_PURCHASE
+        }
     }
 
     private fun isEligible(
+        eligibility: ReceiptEligibility,
         operationDate: LocalDate,
         operationAmount: Long,
         operationCurrency: String,
         receiptDate: LocalDate,
         receiptAmount: Long,
         receiptCurrency: String,
-    ): Boolean = operationAmount < 0 &&
-        receiptAmount == abs(operationAmount) &&
-        normalizeCurrencyCode(receiptCurrency) == normalizeCurrencyCode(operationCurrency) &&
-        abs(ChronoUnit.DAYS.between(operationDate, receiptDate)) <= 1
+    ): Boolean {
+        val dateEligible = when (eligibility) {
+            ReceiptEligibility.PURCHASE ->
+                !receiptDate.isBefore(operationDate.minusDays(1)) &&
+                    !receiptDate.isAfter(operationDate.plusDays(1))
+
+            ReceiptEligibility.REFUND ->
+                !receiptDate.isBefore(operationDate.minusDays(14)) &&
+                    !receiptDate.isAfter(operationDate)
+
+            ReceiptEligibility.BANK_DIRECTION_UNKNOWN,
+            ReceiptEligibility.NOT_A_PURCHASE -> false
+        }
+        return dateEligible &&
+            receiptAmount == abs(operationAmount) &&
+            normalizeCurrencyCode(receiptCurrency) == normalizeCurrencyCode(operationCurrency)
+    }
 
 
     private fun parseReceiptDateTime(value: String): Pair<LocalDate, String> {
@@ -738,6 +873,11 @@ class ReceiptMatchingEngine(
         val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
         val EXPLICIT_TRANSFER_MARKER = Regex(
             """(?:\bперевод\b|\bсбп\b|внутрибанк\w*|межбанк\w*|по\s+номер(?:у)?\s+телефон|между\s+своими\s+сч[её]т\w*|собственн\w*\s+сч[её]т\w*)""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        val EXPLICIT_SELF_TRANSFER_MARKER = Regex(
+            """(?:\bперевод\s+себе\b|\bна\s+свой\s+сч[её]т\w*|\bмежду\s+своими\s+сч[её]т\w*|\bсобственн\w*\s+сч[её]т\w*)""",
             RegexOption.IGNORE_CASE,
         )
     }

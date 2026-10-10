@@ -388,6 +388,9 @@ class NativeMcpAgent(
                 description = row.description,
                 sourceLabel = transaction.sourceLabel,
                 categoryId = transaction.categoryId,
+                categoryIssue = transaction.issues.firstOrNull {
+                    it.substringBefore(':').trim() == "category_id"
+                },
                 sourceRef = row.id,
             )
         }
@@ -420,7 +423,8 @@ class NativeMcpAgent(
         if (selectedSummary != null && !selectedStillUnique) {
             throw IllegalArgumentException("Чек больше не подходит однозначно; draft не изменён.")
         }
-        val association = result.receiptAssociation
+        val refined = agent.refineExternalCategoriesFromMatchedReceipts(sessionId, listOf(result)).single()
+        val association = refined.receiptAssociation
             ?: ReceiptAssociation(ReceiptAssociationStatus.UNMATCHED)
         return agent.recordReceiptAssociation(
             sessionId = sessionId,
@@ -439,9 +443,13 @@ class NativeMcpAgent(
             updates = mapOf(
                 rowId to ReceiptMatchUpdate(
                     status = association.status,
-                    items = result.items,
+                    items = refined.items,
                     summary = association.summary,
                     review = association.review,
+                    refinedCategoryId = refined.categoryId.takeIf {
+                        it != result.categoryId ||
+                            (result.categoryIssue != null && refined.categoryIssue == null)
+                    },
                 ),
             ),
             persistRule = false,
@@ -1444,6 +1452,9 @@ private suspend fun handleReceiptAssociation(
             description = row.description,
             sourceLabel = transaction.sourceLabel,
             categoryId = transaction.categoryId,
+            categoryIssue = transaction.issues.firstOrNull {
+                it.substringBefore(':').trim() == "category_id"
+            },
             sourceRef = row.id,
         )
     }
@@ -1478,14 +1489,26 @@ private suspend fun handleReceiptAssociation(
             NativeMcpMessageResponse(state = saved, assistantText = assistantText),
         )
     }
-    matching.transactions.withReceiptReuseGuard(state.receiptUsage()).forEach { candidate ->
+    val guardedCandidates = matching.transactions.withReceiptReuseGuard(state.receiptUsage())
+    val refinedCandidates = agent.refineExternalCategoriesFromMatchedReceipts(
+        state.session.id,
+        guardedCandidates,
+    )
+    refinedCandidates.forEach { candidate ->
+        val rowId = requireNotNull(candidate.sourceRef)
+        val original = candidates.singleOrNull { it.sourceRef == rowId }
+        val categoryChanged = original != null && (
+            original.categoryId != candidate.categoryId ||
+                (original.categoryIssue != null && candidate.categoryIssue == null)
+            )
         val association = candidate.receiptAssociation
             ?: ReceiptAssociation(ReceiptAssociationStatus.UNMATCHED)
-        updates[requireNotNull(candidate.sourceRef)] = ReceiptMatchUpdate(
+        updates[rowId] = ReceiptMatchUpdate(
             status = association.status,
             items = candidate.items,
             summary = association.summary,
             review = association.review,
+            refinedCategoryId = candidate.categoryId.takeIf { categoryChanged },
         )
     }
     val matchedCount = updates.values.count { it.status == ReceiptAssociationStatus.MATCHED }
@@ -1514,6 +1537,14 @@ private suspend fun handleReceiptAssociation(
                             "этот чек уже использован другой операцией"
                         ReceiptReviewReason.OPERATION_TYPE_UNKNOWN ->
                             "Категория не определена; направление расхода известно."
+                        ReceiptReviewReason.BANK_DIRECTION_UNKNOWN ->
+                            "сначала подтвердите направление операции"
+                        ReceiptReviewReason.RECEIPT_OPERATION_TYPE_UNKNOWN ->
+                            "в чеке не удалось определить тип операции"
+                        ReceiptReviewReason.RECEIPT_OPERATION_TYPE_INCOMPATIBLE ->
+                            "тип чека не совпадает с направлением банковской операции"
+                        ReceiptReviewReason.RECEIPT_DETAIL_UNAVAILABLE ->
+                            "детали чека недоступны, поэтому он не привязан автоматически"
                     }
                     val options = review.candidates.take(5).joinToString("; ") { summary ->
                         buildString {
@@ -1595,7 +1626,11 @@ private suspend fun matchBankCandidatesForPreview(
             .mapIndexed { index, candidate ->
                 candidate.copy(sourceRef = candidates[index].sourceRef)
             }
-        val statuses = candidatesWithRestoredRefs.mapNotNull { it.receiptAssociation?.status }
+        val refinedCandidates = agent.refineExternalCategoriesFromMatchedReceipts(
+            state.session.id,
+            candidatesWithRestoredRefs,
+        )
+        val statuses = refinedCandidates.mapNotNull { it.receiptAssociation?.status }
         val summary = McpReceiptMatchingSummary(
             status = ReceiptMatchingStageStatus.COMPLETED,
             matchedCount = statuses.count { it == ReceiptAssociationStatus.MATCHED },
@@ -1610,7 +1645,7 @@ private suspend fun matchBankCandidatesForPreview(
                     "неоднозначных ${summary.ambiguousCount}, без подходящего чека ${summary.unmatchedCount}."
             else -> "Сопоставление чеков завершено; подходящих чеков не найдено для операций preview."
         }
-        BankReceiptMatch(candidatesWithRestoredRefs, summary, statusText)
+        BankReceiptMatch(refinedCandidates, summary, statusText)
     } catch (_: ReceiptMatchingSourceException) {
         BankReceiptMatch(
             candidates = candidates.toList(),

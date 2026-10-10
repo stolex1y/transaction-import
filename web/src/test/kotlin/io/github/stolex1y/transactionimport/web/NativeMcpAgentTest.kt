@@ -1141,7 +1141,14 @@ class NativeMcpAgentTest {
     @Test
     fun mixedRequestMatchesReceiptsBeforePreviewAndConfirmsSameAssociationWithAlternateSource() = runBlocking {
         val database = Files.createTempFile("native-mixed-receipt-preview-", ".sqlite")
-        val classifier = FakeAgentGateway(ArrayDeque(listOf(FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON)))
+        val classifier = FakeAgentGateway(
+            ArrayDeque(
+                listOf(
+                    FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON,
+                    """{"items":[{"index":0,"category_id":"food.cafe"}]}""",
+                ),
+            ),
+        )
         val dependencies = fakeAgentDependencies(database.toString(), classifier)
         val receiptSource = ReceiptAssociationFixture(
             dateTime = "2026-09-10T12:00:00Z",
@@ -1184,8 +1191,10 @@ class NativeMcpAgentTest {
             assertEquals(0, selectorCalls)
             assertEquals(1, preview.receiptMatching?.matchedCount)
             assertEquals(1, preview.transactions.size)
-            assertEquals("food.groceries", preview.transactions.single().categoryId)
-            assertEquals(1, classifier.requests.size)
+            assertEquals("food.cafe", preview.transactions.single().categoryId)
+            assertEquals(2, classifier.requests.size)
+            assertFalse(classifier.requests.last().messages.last().content.contains("synthetic-transaction-001"))
+            assertFalse(classifier.requests.last().messages.last().content.contains("synthetic-private-receipt-key"))
             val previewAssociation = assertNotNull(preview.transactions.single().receiptAssociation)
             assertEquals(ReceiptAssociationStatus.MATCHED, previewAssociation.status)
             val previewReceipt = assertNotNull(previewAssociation.summary)
@@ -1221,7 +1230,7 @@ class NativeMcpAgentTest {
             )
             val imported = assertNotNull(confirmed.draft).transactions.single()
             assertEquals("ДЕМО МАРКЕТ", imported.transaction.merchant)
-            assertEquals("food.groceries", imported.transaction.categoryId)
+            assertEquals("food.cafe", imported.transaction.categoryId)
             assertEquals(34900L, imported.transaction.amountMinor)
             assertEquals("expense", imported.transaction.direction.name.lowercase())
             assertEquals(ReceiptAssociationStatus.MATCHED, imported.transaction.receiptAssociation?.status)
@@ -1773,7 +1782,9 @@ class NativeMcpAgentTest {
                 ArrayDeque(
                     listOf(
                         FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON,
+                        """{"items":[{"index":0,"category_id":"food.cafe"}]}""",
                         FakeAgentGateway.PURCHASE_CLASSIFICATION_JSON,
+                        """{"items":[{"index":0,"category_id":"food.cafe"}]}""",
                     ),
                 ),
             ),
@@ -2500,7 +2511,7 @@ private class ReceiptAssociationFixture(
                 )
                 TbankToolCallResponse(
                     tool = tool,
-                    text = """{"receipt_key":"$receiptKey","date_time":"$dateTime","total_minor":$amountMinor,"currency":"RUB","merchant":"$merchant","settlement_place":"Синтетическая торговая точка","fiscal_document_number":"synthetic-fiscal-id","qr_code":"synthetic-qr-payload","cashier":"Синтетический кассир","items":[{"name":"Синтетическая позиция","quantity":1,"price_minor":$amountMinor,"sum_minor":$amountMinor}]}""",
+                    text = """{"receipt_key":"$receiptKey","date_time":"$dateTime","total_minor":$amountMinor,"currency":"RUB","operation_type":1,"merchant":"$merchant","settlement_place":"Синтетическая торговая точка","fiscal_document_number":"synthetic-fiscal-id","qr_code":"synthetic-qr-payload","cashier":"Синтетический кассир","items":[{"name":"Синтетическая позиция","quantity":1,"price_minor":$amountMinor,"sum_minor":$amountMinor}]}""",
                 )
             }
             else -> TbankToolCallResponse(tool = tool, isError = true, text = "unexpected synthetic receipt tool")

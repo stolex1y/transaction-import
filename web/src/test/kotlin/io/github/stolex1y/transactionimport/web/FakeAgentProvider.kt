@@ -291,7 +291,7 @@ fun fakeAgentDependencies(
                         val itemName = if (second) "Second imported item" else "Imported item"
                         TbankToolCallResponse(
                             tool = tool,
-                            text = """{"receipt_key":"$receiptKey","date_time":"$receivedAt","total_minor":$amountMinor,"currency":"RUB","merchant":"$merchant","settlement_place":"Синтетическая торговая точка","items":[{"name":"$itemName","quantity":1,"price_minor":$amountMinor,"sum_minor":$amountMinor}]}""",
+                            text = """{"receipt_key":"$receiptKey","date_time":"$receivedAt","total_minor":$amountMinor,"currency":"RUB","operation_type":1,"merchant":"$merchant","settlement_place":"Синтетическая торговая точка","items":[{"name":"$itemName","quantity":1,"price_minor":$amountMinor,"sum_minor":$amountMinor}]}""",
                         )
                     }
                     else -> TbankToolCallResponse(tool = tool, isError = true, text = "unexpected fake source tool")

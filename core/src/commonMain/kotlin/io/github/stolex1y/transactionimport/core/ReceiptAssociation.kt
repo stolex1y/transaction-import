@@ -51,6 +51,18 @@ enum class ReceiptReviewReason {
     @SerialName("operation_type_unknown")
     OPERATION_TYPE_UNKNOWN,
 
+    @SerialName("bank_direction_unknown")
+    BANK_DIRECTION_UNKNOWN,
+
+    @SerialName("receipt_operation_type_unknown")
+    RECEIPT_OPERATION_TYPE_UNKNOWN,
+
+    @SerialName("receipt_operation_type_incompatible")
+    RECEIPT_OPERATION_TYPE_INCOMPATIBLE,
+
+    @SerialName("receipt_detail_unavailable")
+    RECEIPT_DETAIL_UNAVAILABLE,
+
 }
 
 /** Bounded, private-key-free evidence for explaining an unresolved match. */
@@ -73,5 +85,6 @@ data class ReceiptMatchUpdate(
     val items: List<TransactionItem> = emptyList(),
     val summary: ReceiptAssociationSummary? = null,
     val review: ReceiptReviewEvidence? = null,
+    val refinedCategoryId: String? = null,
 )
 

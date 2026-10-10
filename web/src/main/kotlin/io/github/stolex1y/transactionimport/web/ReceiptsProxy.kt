@@ -6,6 +6,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -90,6 +91,7 @@ data class ReceiptDetailResponse(
     val merchant: String,
     @SerialName("date_time") val dateTime: String,
     @SerialName("total_minor") val totalMinor: Long,
+    @SerialName("operation_type") val operationType: Int? = null,
     val currency: String,
     @SerialName("settlement_place") val settlementPlace: String? = null,
     val items: List<ReceiptItemResponse>,
@@ -149,6 +151,12 @@ class ReceiptsProxyService(
         val total = root["total_minor"]?.jsonPrimitive?.longOrNull
             ?.takeIf { it >= 0L } ?: throw unavailableReceipts()
         val currency = root.safeString("currency", 8) ?: entry.summary.currency
+
+        val operationType = (root["operation_type"] as? JsonPrimitive)
+            ?.takeUnless { it.isString }
+            ?.longOrNull
+            ?.takeIf { it in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }
+            ?.toInt()
         val sourceItems = root["items"] as? JsonArray ?: throw unavailableReceipts()
         if (sourceItems.size > MAX_DETAIL_ITEMS) throw unavailableReceipts()
         val items = sourceItems.map { value ->
@@ -176,6 +184,7 @@ class ReceiptsProxyService(
             merchant = entry.summary.merchant,
             dateTime = dateTime,
             totalMinor = total,
+            operationType = operationType,
             currency = currency,
             settlementPlace = root.safeString("settlement_place", MAX_LOCATION_LENGTH),
             items = items,

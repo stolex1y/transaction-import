@@ -1727,7 +1727,7 @@ class AgentBrowserTest {
                                           },
                                         }).length,
                                         status: document.querySelector("#tbank-session-status").textContent,
-                                        description: preview.querySelector("tbody td:nth-child(4)").textContent,
+                                        description: preview.querySelector("tbody td:nth-child(5)").textContent,
                                       });
                                     }
                                 """.trimIndent(),
@@ -2134,6 +2134,7 @@ class AgentBrowserTest {
                         )
                         assertEquals(49900, detailJson["total_minor"]!!.jsonPrimitive.content.toLong())
                         assertEquals("RUB", detailJson["currency"]!!.jsonPrimitive.content)
+                        assertEquals(1, detailJson["operation_type"]!!.jsonPrimitive.content.toInt())
                         assertEquals(
                             "Синтетический домен example.test",
                             detailJson["settlement_place"]!!.jsonPrimitive.content,
@@ -3099,7 +3100,7 @@ class AgentBrowserTest {
                             tool = tool,
                             text = """
                                 {"date_time":"2026-02-08T${time}Z","total_minor":$amount,
-                                 "currency":"RUB","merchant":"$merchant",
+                                 "currency":"RUB","operation_type":1,"merchant":"$merchant",
                                  "settlement_place":"Синтетическая торговая точка",
                                  "items":[{"name":"Synthetic receipt item","quantity":1,"price_minor":$amount,"sum_minor":$amount}]}
                             """.trimIndent(),
@@ -3621,8 +3622,12 @@ class AgentBrowserTest {
                     """{"items":[
                         {"index":0,"merchant":"Synthetic cafe purchase","description":"","category_id":"food.cafe"},
                         {"index":1,"merchant":"Перевод","description":"","category_id":null},
-                        {"index":2,"merchant":"Synthetic income","description":"","category_id":null},
+                        {"index":2,"merchant":"Synthetic income","description":"","direction":"income","category_id":null},
                         {"index":4,"merchant":"Synthetic cafe special","description":"","category_id":"food.cafe"}
+                    ]}""",
+                    """{"items":[
+                        {"index":0,"category_id":"food.cafe"},
+                        {"index":4,"category_id":"food.cafe"}
                     ]}""",
                 ),
             ),
@@ -3680,23 +3685,23 @@ class AgentBrowserTest {
                         preview.waitFor()
                         assertEquals(5, preview.locator("tbody tr").count())
                         val ruleRow = preview.locator("tbody tr").nth(0)
-                        assertTrue(ruleRow.locator("td").nth(2).textContent().contains("Synthetic cafe purchase"))
+                        assertTrue(ruleRow.locator("td").nth(3).textContent().contains("Synthetic cafe purchase"))
                         assertTrue(
-                            ruleRow.locator("td").nth(4).textContent().contains("Кафе и рестораны"),
+                            ruleRow.locator("td").nth(5).textContent().contains("Кафе и рестораны"),
                         )
                         val secondRuleRow = preview.locator("tbody tr").nth(4)
-                        assertTrue(secondRuleRow.locator("td").nth(2).textContent().contains("Synthetic cafe special"))
+                        assertTrue(secondRuleRow.locator("td").nth(3).textContent().contains("Synthetic cafe special"))
                         assertTrue(
-                            secondRuleRow.locator("td").nth(4).textContent().contains("Кафе и рестораны"),
+                            secondRuleRow.locator("td").nth(5).textContent().contains("Кафе и рестораны"),
                         )
                         val incompleteRow = preview.locator("tbody tr").nth(3)
-                        val incompleteCategory = incompleteRow.locator("td").nth(4).textContent()
+                        val incompleteCategory = incompleteRow.locator("td").nth(5).textContent()
                         assertTrue(incompleteCategory.contains("Ответ классификатора неполный"))
                         val receiptStatus = preview.locator(".receipt-matching-status").textContent().orEmpty()
                         assertTrue(receiptStatus.contains("Сопоставление чеков завершено"))
                         assertTrue(receiptStatus.contains("неоднозначных 1"))
                         assertTrue(
-                            incompleteRow.locator("td").nth(6).textContent()
+                            incompleteRow.locator("td").nth(7).textContent()
                                 .contains("Чек требует уточнения"),
                         )
                         assertFalse(page.locator("#message-list").textContent().contains("в очеред"))
@@ -3724,10 +3729,16 @@ class AgentBrowserTest {
                     """{"items":[
                         {"index":0,"category_id":"food.groceries"},
                         {"index":1,"category_id":"food.groceries"},
-                        {"index":2,"category_id":null},
+                        {"index":2,"direction":"income","category_id":null},
                         {"index":3,"category_id":null},
                         {"index":4,"category_id":null}
                     ],"merchant_canonical_candidates":[]}""",
+                    """{"items":[
+                        {"index":0,"category_id":"food.cafe"},
+                        {"index":4,"category_id":"food.cafe"}
+                    ]}""",
+                    """{"items":[{"index":0,"category_id":"food.cafe"}]}""",
+                    """{"items":[{"index":0,"category_id":"food.cafe"}]}""",
                 ),
             ),
         )
@@ -3813,10 +3824,8 @@ class AgentBrowserTest {
                                 .contains("Подошло несколько чеков."),
                         )
                         val uniqueUnknownRow = preview.locator("tbody tr").nth(4)
-                        assertTrue(
-                            uniqueUnknownRow.locator("td").nth(4).textContent()
-                                .startsWith("Не выбрана"),
-                        )
+                        val uniqueCategory = uniqueUnknownRow.locator("td").nth(5).textContent()
+                        assertTrue(uniqueCategory.contains("Кафе и рестораны"), uniqueCategory)
                         assertTrue(
                             uniqueUnknownRow.locator(".receipt-association-status.matched")
                                 .textContent().contains("Synthetic unique receipt"),
@@ -3833,7 +3842,7 @@ class AgentBrowserTest {
                         captureDeliveryUi(page, "a11-transfer-income-excluded-unknown-expense-eligible.png")
                         assertEquals(1, source.searchCalls)
                         assertEquals(4, source.detailCalls)
-                        assertEquals(1, classifier.requests.size)
+                        assertEquals(2, classifier.requests.size)
 
                         val confirmResponse = page.waitForResponse(
                             { response ->
@@ -3876,6 +3885,52 @@ class AgentBrowserTest {
                         assertTrue(ambiguousRow.locator(".receipt-association-status.ambiguous").textContent()
                             .contains("Категория не определена; направление операции известно."))
                         assertEquals(0, ambiguousRow.locator(".receipt-association-status.ambiguous li").count())
+
+                        val safeReviewControls = page.evaluate(
+                            """
+                                () => {
+                                  const candidate = {
+                                    merchant: "Synthetic review candidate",
+                                    date: "2026-09-10",
+                                    amount_minor: 1000,
+                                    currency: "RUB"
+                                  };
+                                  const typeReview = receiptAssociationIndicator({
+                                    status: "ambiguous",
+                                    review: {
+                                      reason: "receipt_operation_type_unknown",
+                                      candidates: [candidate]
+                                    }
+                                  }, "synthetic-type-row", true);
+                                  const unknownDirection = receiptAssociationIndicator({
+                                    status: "ambiguous",
+                                    review: {
+                                      reason: "bank_direction_unknown",
+                                      candidates: []
+                                    }
+                                  }, "synthetic-direction-row", false);
+                                  const savedDirection = receiptAssociationIndicator({
+                                    status: "ambiguous",
+                                    review: {
+                                      reason: "bank_direction_unknown",
+                                      candidates: []
+                                    }
+                                  }, "synthetic-saved-direction-row", true);
+                                  const typeButtons = [...typeReview.querySelectorAll("button")]
+                                    .map((button) => button.textContent);
+                                  const unknownButtons = unknownDirection.querySelectorAll("button").length;
+                                  const savedButtons = [...savedDirection.querySelectorAll("button")]
+                                    .map((button) => button.textContent);
+                                  return !typeButtons.includes("Утвердить чек") &&
+                                    typeButtons.includes("Отклонить чек") &&
+                                    typeButtons.includes("Повторить проверку чека") &&
+                                    unknownButtons === 0 &&
+                                    unknownDirection.textContent.includes("Сначала выберите направление") &&
+                                    savedButtons.includes("Проверить после сохранения");
+                                }
+                            """.trimIndent(),
+                        ) as Boolean
+                        assertTrue(safeReviewControls)
                         captureDeliveryUi(page, "a11-unknown-operation-type-remains-in-review.png")
                         source.returnNoReceipts = true
                         val noCandidateResponse = page.waitForResponse(
@@ -3902,7 +3957,6 @@ class AgentBrowserTest {
                         )
                         val originalDirection = ambiguousRow.locator("select[name='direction']").inputValue()
                         val originalMerchant = ambiguousRow.locator("input[name='merchant']").inputValue()
-                        val originalCategory = ambiguousRow.locator("select[name='category_id']").inputValue()
                         val originalAmount = ambiguousRow.locator("input[name='amount']").inputValue()
                         val actionCountBeforeDirtyEdit = actionBodies.size
                         ambiguousRow.locator("input[name='amount']").fill("999.99")
@@ -3989,7 +4043,7 @@ class AgentBrowserTest {
                         assertEquals(originalDirection, linkedRow.locator("select[name='direction']").inputValue())
                         assertEquals(originalAmount, linkedRow.locator("input[name='amount']").inputValue())
                         assertEquals(originalMerchant, linkedRow.locator("input[name='merchant']").inputValue())
-                        assertEquals(originalCategory, linkedRow.locator("select[name='category_id']").inputValue())
+                        assertEquals("food.cafe", linkedRow.locator("select[name='category_id']").inputValue())
                         captureDeliveryUi(page, "a12-ambiguous-expense-approved-with-bank-fields-unchanged.png")
 
                         val purchaseRow = page.locator("tr[data-transaction-id='1']")
@@ -4064,7 +4118,7 @@ class AgentBrowserTest {
                         assertEquals(originalDirection, linkedCard.locator("select[name='direction']").inputValue())
                         assertEquals(originalAmount, linkedCard.locator("input[name='amount']").inputValue())
                         assertEquals(originalMerchant, linkedCard.locator("input[name='merchant']").inputValue())
-                        assertEquals(originalCategory, linkedCard.locator("select[name='category_id']").inputValue())
+                        assertEquals("food.cafe", linkedCard.locator("select[name='category_id']").inputValue())
                         linkedCard.locator("button[data-action='receipt-unlink']").click()
                         linkedCard.locator(".receipt-association-status.unmatched").waitFor()
                         assertEquals(0, linkedCard.locator(".transaction-items").count())
@@ -4127,7 +4181,7 @@ class AgentBrowserTest {
                 detailCalls += 1
                 TbankToolCallResponse(
                     tool = tool,
-                    text = """{"receipt_key":"$RAW_KEY","date_time":"2026-09-10T10:00:00Z","fiscal_document_number":"synthetic-private-fiscal-id","fiscal_drive_number":"synthetic-private-drive-id","fiscal_sign":"synthetic-private-sign","kkt_reg_id":"synthetic-private-kkt","qr_code":"synthetic-private-qr","settlement_place":"Синтетический домен example.test","retailPlaceAddress":"synthetic-private-address","total_minor":49900,"currency":"RUB","items":[{"name":"Кофе","quantity":1,"price_minor":49900,"sum_minor":49900}]}""",
+                    text = """{"receipt_key":"$RAW_KEY","date_time":"2026-09-10T10:00:00Z","fiscal_document_number":"synthetic-private-fiscal-id","fiscal_drive_number":"synthetic-private-drive-id","fiscal_sign":"synthetic-private-sign","kkt_reg_id":"synthetic-private-kkt","qr_code":"synthetic-private-qr","settlement_place":"Синтетический домен example.test","retailPlaceAddress":"synthetic-private-address","total_minor":49900,"currency":"RUB","operation_type":1,"items":[{"name":"Кофе","quantity":1,"price_minor":49900,"sum_minor":49900}]}""",
                 )
             }
             else -> TbankToolCallResponse(tool = tool, isError = true, text = "unexpected receipt tool")
@@ -4698,19 +4752,19 @@ private class BrowserEligibilityMcpSource(
                 text = when (arguments["receipt_key"]?.jsonPrimitive?.content) {
                     "synthetic-browser-receipt-key" -> """
                         {"receipt_key":"synthetic-browser-receipt-key",
-                         "date_time":"2026-09-10T10:05:00Z","total_minor":1000,"currency":"RUB",
+                         "date_time":"2026-09-10T10:05:00Z","total_minor":1000,"currency":"RUB","operation_type":1,
                          "merchant":"Synthetic purchase","settlement_place":"Synthetic station",
                          "items":[{"name":"Synthetic item","quantity":1,"price_minor":1000,"sum_minor":1000}]}
                     """.trimIndent()
                     "synthetic-browser-receipt-key-a" -> """
                         {"receipt_key":"synthetic-browser-receipt-key-a",
-                         "date_time":"2026-09-10T13:01:00Z","total_minor":2200,"currency":"RUB",
+                         "date_time":"2026-09-10T13:01:00Z","total_minor":2200,"currency":"RUB","operation_type":1,
                          "merchant":"Synthetic receipt A","settlement_place":"Synthetic place A",
                          "items":[{"name":"Synthetic item A","quantity":1,"price_minor":2200,"sum_minor":2200}]}
                     """.trimIndent()
                     "synthetic-browser-receipt-key-b" -> """
                         {"receipt_key":"synthetic-browser-receipt-key-b",
-                         "date_time":"2026-09-10T13:02:00Z","total_minor":2200,"currency":"RUB",
+                         "date_time":"2026-09-10T13:02:00Z","total_minor":2200,"currency":"RUB","operation_type":1,
                          "merchant":"Synthetic receipt B","settlement_place":"Synthetic place B",
                          "fiscal_document_number":"synthetic-private-fiscal-marker",
                          "qr_code":"synthetic-private-qr-marker",
@@ -4719,7 +4773,7 @@ private class BrowserEligibilityMcpSource(
                     """.trimIndent()
                     "synthetic-browser-receipt-key-unique" -> """
                         {"receipt_key":"synthetic-browser-receipt-key-unique",
-                         "date_time":"2026-09-10T14:02:00Z","total_minor":3300,"currency":"RUB",
+                         "date_time":"2026-09-10T14:02:00Z","total_minor":3300,"currency":"RUB","operation_type":1,
                          "merchant":"Synthetic unique receipt","settlement_place":"Synthetic unique place",
                          "items":[{"name":"Synthetic unique item","quantity":1,"price_minor":3300,"sum_minor":3300}]}
                     """.trimIndent()
@@ -4865,7 +4919,7 @@ private class BrowserReceiptInfoSource(
                 detailCalls += 1
                 TbankToolCallResponse(
                     tool = tool,
-                    text = """{"receipt_key":"synthetic-private-receipt-key","date_time":"2026-02-08T12:20:00Z","total_minor":125050,"currency":"RUB","merchant":"Синтетический продавец","settlement_place":"Синтетическая торговая точка","fiscal_document_number":"synthetic-fiscal-id","qr_code":"synthetic-qr-payload","cashier":"Синтетический кассир","items":[{"name":"Синтетическая позиция","quantity":1,"price_minor":125050,"sum_minor":125050}]}""",
+                    text = """{"receipt_key":"synthetic-private-receipt-key","date_time":"2026-02-08T12:20:00Z","total_minor":125050,"currency":"RUB","operation_type":1,"merchant":"Синтетический продавец","settlement_place":"Синтетическая торговая точка","fiscal_document_number":"synthetic-fiscal-id","qr_code":"synthetic-qr-payload","cashier":"Синтетический кассир","items":[{"name":"Синтетическая позиция","quantity":1,"price_minor":125050,"sum_minor":125050}]}""",
                 )
             }
             else -> error("Unexpected synthetic receipt tool: $tool")

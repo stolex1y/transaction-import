@@ -1151,6 +1151,97 @@ class SmartExpenseAgentTest {
     }
 
     @Test
+    fun receiptAssociationAppliesValidatedCategoryAndPreservesBankFacts() = runBlocking {
+        val agent = testAgent(MemoryImportSessionRepository(), QueuedGateway(initialDraftJson))
+        val created = agent.createSession("Receipt category update", defaultConfig)
+        val imported = agent.sendMessage(created.session.id, created.session.revision, "Синтетическая выписка")
+        val row = imported.draft!!.transactions.first()
+        val original = row.transaction
+        val item = TransactionItem(
+            name = "Синтетическая позиция",
+            quantity = 1.0,
+            priceMinor = original.amountMinor,
+            sumMinor = original.amountMinor,
+        )
+        val summary = ReceiptAssociationSummary(
+            date = original.occurredAt.take(10),
+            merchant = "Синтетический магазин",
+            amountMinor = original.amountMinor,
+            currency = original.currency,
+            dateTime = original.occurredAt,
+            privacyVersion = ReceiptAssociationSummary.CURRENT_PRIVACY_VERSION,
+        )
+
+        val updated = agent.recordReceiptAssociation(
+            sessionId = created.session.id,
+            expectedRevision = imported.session.revision,
+            userText = "Привяжи синтетический чек и уточни категорию.",
+            assistantText = "Чек сопоставлен.",
+            updates = mapOf(
+                row.id to ReceiptMatchUpdate(
+                    status = ReceiptAssociationStatus.MATCHED,
+                    items = listOf(item),
+                    summary = summary,
+                    refinedCategoryId = "food.cafe",
+                ),
+            ),
+            persistRule = false,
+        )
+        val refined = updated.draft!!.transactions.single { it.id == row.id }
+
+        assertEquals("food.cafe", refined.transaction.categoryId)
+        assertEquals(original.direction, refined.transaction.direction)
+        assertEquals(original.amountMinor, refined.transaction.amountMinor)
+        assertEquals(original.occurredAt, refined.transaction.occurredAt)
+        assertEquals(original.merchant, refined.transaction.merchant)
+        assertEquals(original.currency, refined.transaction.currency)
+        assertEquals(original.sourceIndex, refined.transaction.sourceIndex)
+        assertEquals(row.description, refined.description)
+        assertEquals(listOf(item), refined.transaction.items)
+        assertEquals(ReceiptAssociationStatus.MATCHED, refined.transaction.receiptAssociation?.status)
+        assertTrue(refined.fieldErrors["category_id"].isNullOrEmpty())
+    }
+
+    @Test
+    fun receiptAssociationRejectsInvalidCategoryWithoutPartialDraftMutation() = runBlocking {
+        val agent = testAgent(MemoryImportSessionRepository(), QueuedGateway(initialDraftJson))
+        val created = agent.createSession("Invalid receipt category", defaultConfig)
+        val imported = agent.sendMessage(created.session.id, created.session.revision, "Синтетическая выписка")
+        val row = imported.draft!!.transactions.first()
+        val item = TransactionItem(
+            name = "Синтетическая позиция",
+            quantity = 1.0,
+            priceMinor = row.transaction.amountMinor,
+            sumMinor = row.transaction.amountMinor,
+        )
+        val update = ReceiptMatchUpdate(
+            status = ReceiptAssociationStatus.MATCHED,
+            items = listOf(item),
+            summary = ReceiptAssociationSummary(
+                date = row.transaction.occurredAt.take(10),
+                merchant = "Синтетический магазин",
+                amountMinor = row.transaction.amountMinor,
+                currency = row.transaction.currency,
+            ),
+            refinedCategoryId = "income.salary",
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            agent.recordReceiptAssociation(
+                sessionId = created.session.id,
+                expectedRevision = imported.session.revision,
+                userText = "Apply invalid synthetic category",
+                assistantText = "No update expected.",
+                updates = mapOf(row.id to update),
+                persistRule = false,
+            )
+        }
+        val after = agent.getSession(created.session.id)
+        assertEquals(imported.draft, after.draft)
+        assertEquals(imported.session.revision, after.session.revision)
+    }
+
+    @Test
     fun backgroundExternalClassificationOmitsPriorDraftAndConversation() = runBlocking {
         val gateway = QueuedGateway(
             """{"upserts":[{"key":"private","value":"SYNTHETIC_PRIVATE_STICKY_FACT"}],"delete_keys":[]}""",
@@ -2604,6 +2695,35 @@ class SmartExpenseAgentTest {
         assertNull(rows[2].transaction.categoryId)
         assertTrue(rows[2].transaction.needsReview)
     }
+
+    @Test
+    fun sbpChannelAloneDoesNotNormalizeAnExplicitRefundToTransfer() = runBlocking {
+        val gateway = QueuedGateway(
+            """{"items":[{"index":0,"direction":"refund","merchant":"СБП КофеБон","description":"Возврат покупки через СБП","category_id":"food.cafe"}]}""",
+        )
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val session = agent.createSession("SBP refund", defaultConfig)
+
+        val classified = agent.classifyExternalTransactions(
+            sessionId = session.session.id,
+            candidates = listOf(
+                ExternalTransactionCandidate(
+                    occurredAt = "2026-09-10T12:00:00Z",
+                    amountMinor = 2_500,
+                    direction = TransactionDirection.REFUND,
+                    currency = "RUB",
+                    merchant = "СБП КофеБон",
+                    description = "Возврат покупки через СБП",
+                    categoryId = "food.cafe",
+                ),
+            ),
+        ).single()
+
+        assertEquals(TransactionDirection.REFUND, classified.direction)
+        assertEquals("СБП КофеБон", classified.merchant)
+        assertEquals("food.cafe", classified.categoryId)
+        assertEquals(2_500, classified.amountMinor)
+    }
     @Test
     fun exportsIncomeExpenseAndRefundDirectionsThroughCoreJsonRoundTrip() = runBlocking {
         val repository = MemoryImportSessionRepository()
@@ -3155,6 +3275,143 @@ class SmartExpenseAgentTest {
     }
 
     @Test
+    fun matchedReceiptCategoryRefinementUsesOneRedactedBatchAndChangesOnlyCategory() = runBlocking {
+        val repository = MemoryImportSessionRepository()
+        val gateway = QueuedGateway(
+            """{"items":[
+                {"index":0,"category_id":"food.cafe","direction":"income","amount_minor":1,"merchant":"FORGED MERCHANT"},
+                {"index":1,"category_id":"food.cafe","direction":"expense","amount_minor":-1,"merchant":"FORGED MERCHANT"},
+                {"index":2,"category_id":null}
+            ]}""".trimIndent(),
+        )
+        val agent = testAgent(repository, gateway)
+        agent.updatePreferences("Global categorization marker.")
+        repository.saveLongTermMemory(
+            repository.readLongTermMemory().copy(
+                confirmedDecisions = listOf(
+                    ConfirmedDecision(
+                        id = "synthetic-confirmed-category",
+                        text = "Confirmed categorization marker.",
+                        createdAtEpochMs = 1,
+                    ),
+                ),
+            ),
+        )
+        val customCategory = agent.createCategory(
+            displayName = "Синтетическое кино",
+            type = CategoryType.EXPENSE,
+            parentId = null,
+            hint = "Synthetic category hint",
+        ).single { it.displayName == "Синтетическое кино" }
+        val session = agent.createSession("Receipt category refinement", defaultConfig)
+        val expense = matchedReceiptCandidate(
+            sourceRef = "PRIVATE_SOURCE_REF_EXPENSE",
+            categoryId = null,
+            categoryIssue = "category_id: prior classifier issue",
+        )
+        val refund = matchedReceiptCandidate(
+            sourceRef = "PRIVATE_SOURCE_REF_REFUND",
+            direction = TransactionDirection.REFUND,
+            categoryIssue = "category_id: prior refund issue",
+        )
+        val abstained = matchedReceiptCandidate(
+            sourceRef = "PRIVATE_SOURCE_REF_ABSTAIN",
+            categoryId = "food.groceries",
+        )
+        val income = matchedReceiptCandidate(
+            sourceRef = "INCOME_ONLY_SOURCE_REF",
+            direction = TransactionDirection.INCOME,
+            categoryId = "income.salary",
+        ).copy(description = "INCOME_ONLY_DESCRIPTION")
+        val unmatched = matchedReceiptCandidate(
+            sourceRef = "UNMATCHED_ONLY_SOURCE_REF",
+            status = ReceiptAssociationStatus.UNMATCHED,
+        ).copy(description = "UNMATCHED_ONLY_DESCRIPTION")
+        val candidates = listOf(expense, refund, abstained, income, unmatched)
+
+        val refined = agent.refineExternalCategoriesFromMatchedReceipts(session.session.id, candidates)
+
+        assertEquals(
+            listOf(
+                expense.copy(categoryId = "food.cafe", categoryIssue = null),
+                refund.copy(categoryId = "food.cafe", categoryIssue = null),
+                abstained,
+                income,
+                unmatched,
+            ),
+            refined,
+        )
+        assertEquals(1, gateway.requests.size)
+        val request = gateway.requests.single()
+        assertEquals(null, request.tools)
+        assertEquals(false, request.stream)
+        assertEquals("json_object", request.responseFormat?.type)
+        val systemPrompt = request.messages.first().content
+        assertTrue(systemPrompt.contains("Global categorization marker."))
+        assertTrue(systemPrompt.contains("Confirmed categorization marker."))
+        assertTrue(systemPrompt.contains(customCategory.id))
+        assertTrue(systemPrompt.contains("Synthetic category hint"))
+        val userMessage = request.messages.last().content
+        assertTrue(userMessage.contains("КофеБон"))
+        assertTrue(userMessage.contains("Синтетическая позиция"))
+        assertFalse(userMessage.contains("PRIVATE_SOURCE_REF"))
+        assertFalse(userMessage.contains("INCOME_ONLY"))
+        assertFalse(userMessage.contains("UNMATCHED_ONLY"))
+        assertFalse(userMessage.contains("PRIVATE_RECEIPT_SUMMARY"))
+        assertFalse(userMessage.contains("PRIVATE_SOURCE_LABEL"))
+        assertFalse(userMessage.contains("PRIVATE_SETTLEMENT_PLACE"))
+        assertFalse(userMessage.contains("FORGED MERCHANT"))
+    }
+
+    @Test
+    fun receiptCategoryRefinementDoesNotCallModelWithoutMatchedItems() = runBlocking {
+        val gateway = QueuedGateway()
+        val agent = testAgent(MemoryImportSessionRepository(), gateway)
+        val session = agent.createSession("No safe receipt items", defaultConfig)
+        val candidates = listOf(
+            matchedReceiptCandidate("matched-without-items", items = emptyList()),
+            matchedReceiptCandidate("unmatched-with-items", status = ReceiptAssociationStatus.UNMATCHED),
+            matchedReceiptCandidate("income-with-items", direction = TransactionDirection.INCOME),
+        )
+
+        val refined = agent.refineExternalCategoriesFromMatchedReceipts(session.session.id, candidates)
+
+        assertEquals(candidates, refined)
+        assertTrue(gateway.requests.isEmpty())
+    }
+
+    @Test
+    fun invalidOrPartialReceiptCategoryBatchLeavesEveryCandidateUnchanged() = runBlocking {
+        val responses = listOf(
+            """{"items":[{"index":0,"category_id":"food.cafe"}]}""",
+            """{"items":[{"index":0,"category_id":"food.cafe"},{"index":1,"category_id":"income.salary"}]}""",
+        )
+
+        for ((index, response) in responses.withIndex()) {
+            val gateway = QueuedGateway(response)
+            val agent = testAgent(MemoryImportSessionRepository(), gateway)
+            val session = agent.createSession("Invalid category batch $index", defaultConfig)
+            val candidates = listOf(
+                matchedReceiptCandidate(
+                    sourceRef = "PRIVATE_EXPENSE_$index",
+                    categoryId = null,
+                    categoryIssue = "category_id: prior classifier issue",
+                ),
+                matchedReceiptCandidate(
+                    sourceRef = "PRIVATE_REFUND_$index",
+                    direction = TransactionDirection.REFUND,
+                    categoryIssue = "category_id: prior refund issue",
+                ),
+            )
+
+            val refined = agent.refineExternalCategoriesFromMatchedReceipts(session.session.id, candidates)
+
+            assertEquals(candidates, refined)
+            assertEquals(1, gateway.requests.size)
+        }
+    }
+
+    @Test
     fun blocksOnlyIncludedInvalidRowsAndKeepsLocalDescription() = runBlocking {
         val gateway = QueuedGateway(initialDraftJson)
         val repository = MemoryImportSessionRepository()
@@ -3422,6 +3679,52 @@ class SmartExpenseAgentTest {
         assertEquals(6, forked.messages.size)
         assertTrue(forked.metrics.last().inherited.not())
     }
+
+    private fun matchedReceiptCandidate(
+        sourceRef: String,
+        direction: TransactionDirection = TransactionDirection.EXPENSE,
+        status: ReceiptAssociationStatus = ReceiptAssociationStatus.MATCHED,
+        categoryId: String? = "food.groceries",
+        categoryIssue: String? = null,
+        items: List<TransactionItem> = listOf(
+            TransactionItem(
+                name = "Синтетическая позиция",
+                quantity = 1.0,
+                priceMinor = 1_500,
+                sumMinor = 1_500,
+            ),
+        ),
+    ) = ExternalTransactionCandidate(
+        occurredAt = "2026-09-10T10:00:00Z",
+        postedAt = "2026-09-10T10:05:00Z",
+        amountMinor = if (direction == TransactionDirection.EXPENSE) -1_500 else 1_500,
+        direction = direction,
+        currency = "RUB",
+        merchant = "КофеБон",
+        description = "Кофе и выпечка",
+        sourceLabel = "PRIVATE_SOURCE_LABEL",
+        categoryId = categoryId,
+        categoryIssue = categoryIssue,
+        items = items,
+        receiptAssociation = if (status == ReceiptAssociationStatus.MATCHED) {
+            ReceiptAssociation(
+                status = status,
+                summary = ReceiptAssociationSummary(
+                    date = "2026-09-10",
+                    merchant = "PRIVATE_RECEIPT_SUMMARY",
+                    amountMinor = 1_500,
+                    currency = "RUB",
+                    dateTime = "2026-09-10T10:00:00Z",
+                    settlementPlace = "PRIVATE_SETTLEMENT_PLACE",
+                    privacyVersion = ReceiptAssociationSummary.CURRENT_PRIVACY_VERSION,
+                ),
+            )
+        } else {
+            ReceiptAssociation(status = status)
+        },
+        sourceRef = sourceRef,
+        issues = listOf("preserve-unrelated-issue"),
+    )
 
     private fun testAgent(
         repository: MemoryImportSessionRepository,

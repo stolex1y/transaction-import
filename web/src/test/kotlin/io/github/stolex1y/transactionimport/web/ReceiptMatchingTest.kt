@@ -5,7 +5,9 @@ import io.github.stolex1y.transactionimport.core.ExternalTransactionCandidate
 import io.github.stolex1y.transactionimport.core.ReceiptAssociationStatus
 import io.github.stolex1y.transactionimport.core.ReceiptReviewReason
 import io.github.stolex1y.transactionimport.core.SchedulerTraceEvent
+import io.github.stolex1y.transactionimport.core.TransactionDirection
 import io.github.stolex1y.transactionimport.core.TransactionItem
+import java.time.LocalDate
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.intOrNull
@@ -45,6 +47,291 @@ class ReceiptMatchingTest {
         assertEquals(ReceiptAssociationStatus.UNMATCHED, result.transactions[1].receiptAssociation?.status)
         assertEquals(ReceiptAssociationStatus.UNMATCHED, result.transactions[2].receiptAssociation?.status)
     }
+    @Test
+    fun purchasesAndRefundsRequireTheirMatchingReceiptOperationType() = runBlocking {
+        val cases = listOf(
+            candidate("purchase", "2026-09-10T10:00:00Z", -500, "RUB", "Кафе") to
+                detail("2026-09-10T10:00:00Z", 500, "RUB", "Кафе", operationType = 1),
+            candidate(
+                "refund",
+                "2026-09-10T10:00:00Z",
+                500,
+                "RUB",
+                "Кафе",
+                direction = TransactionDirection.REFUND,
+            ) to detail("2026-09-10T10:00:00Z", 500, "RUB", "Кафе", operationType = 2),
+        )
+
+        for ((transaction, receiptDetail) in cases) {
+            val source = singleReceiptSource(receiptDetail)
+            val result = ReceiptMatchingEngine(
+                source,
+                ReceiptMatchSelector { _, _, _, _, _ -> error("A unique safe receipt needs no selector.") },
+            ).match(listOf(transaction), testConfig)
+
+            assertEquals(ReceiptAssociationStatus.MATCHED, result.transactions.single().receiptAssociation?.status)
+            assertEquals(1, source.detailCalls.size)
+            assertTrue(result.transactions.single().items.isNotEmpty())
+        }
+    }
+
+    @Test
+    fun unknownOrIncompatibleReceiptTypesRequireReviewWithoutSelector() = runBlocking {
+        data class Case(
+            val transaction: ExternalTransactionCandidate,
+            val detail: String,
+            val reason: ReceiptReviewReason,
+        )
+        val expense = candidate("expense", "2026-09-10T10:00:00Z", -500, "RUB", "Кафе")
+        val refund = candidate(
+            "refund",
+            "2026-09-10T10:00:00Z",
+            500,
+            "RUB",
+            "Кафе",
+            direction = TransactionDirection.REFUND,
+        )
+        val cases = listOf(
+            Case(
+                expense,
+                detail("2026-09-10T10:00:00Z", 500, "RUB", "Кафе", operationType = 2),
+                ReceiptReviewReason.RECEIPT_OPERATION_TYPE_INCOMPATIBLE,
+            ),
+            Case(
+                refund,
+                detail("2026-09-10T10:00:00Z", 500, "RUB", "Кафе", operationType = 1),
+                ReceiptReviewReason.RECEIPT_OPERATION_TYPE_INCOMPATIBLE,
+            ),
+            Case(
+                expense,
+                detail("2026-09-10T10:00:00Z", 500, "RUB", "Кафе", operationType = null),
+                ReceiptReviewReason.RECEIPT_OPERATION_TYPE_UNKNOWN,
+            ),
+            Case(
+                expense,
+                detail("2026-09-10T10:00:00Z", 500, "RUB", "Кафе")
+                    .replace("\"operation_type\":1", "\"operation_type\":\"invalid\""),
+                ReceiptReviewReason.RECEIPT_OPERATION_TYPE_UNKNOWN,
+            ),
+            Case(
+                expense,
+                detail("2026-09-10T10:00:00Z", 500, "RUB", "Кафе", operationType = 7),
+                ReceiptReviewReason.RECEIPT_OPERATION_TYPE_UNKNOWN,
+            ),
+        )
+        var selectorCalls = 0
+
+        for ((index, case) in cases.withIndex()) {
+            val source = singleReceiptSource(case.detail, key = "synthetic-$index")
+            val result = ReceiptMatchingEngine(
+                source,
+                ReceiptMatchSelector { _, _, choices, _, _ ->
+                    selectorCalls += 1
+                    ReceiptSelectionResponseView(choices.single().alias, 1.0)
+                },
+            ).match(listOf(case.transaction), testConfig)
+            val matched = result.transactions.single()
+
+            assertEquals(ReceiptAssociationStatus.AMBIGUOUS, matched.receiptAssociation?.status)
+            assertEquals(case.reason, matched.receiptAssociation?.review?.reason)
+            assertTrue(matched.items.isEmpty())
+            assertEquals(1, matched.receiptAssociation?.review?.candidates?.size)
+            assertEquals(1, source.detailCalls.size)
+        }
+
+        assertEquals(0, selectorCalls)
+    }
+
+    @Test
+    fun abbreviatedFiscalIdentifiersAreRemovedFromReceiptItemNames() = runBlocking {
+        val rawName = "Булочка ФН: 1234567890123456, ФД=123456, ФП № 987654321"
+        val source = singleReceiptSource(
+            detail("2026-09-10T10:00:00Z", 500, "RUB", "Кафе")
+                .replace("Синтетическая позиция", rawName),
+        )
+        val result = ReceiptMatchingEngine(
+            source,
+            ReceiptMatchSelector { _, _, _, _, _ -> error("Unique receipt must not need a selector.") },
+        ).match(
+            listOf(candidate("fiscal-redaction", "2026-09-10T10:00:00Z", -500, "RUB", "Кафе")),
+            testConfig,
+        )
+        val itemName = result.transactions.single().items.single().name
+
+        assertEquals(ReceiptAssociationStatus.MATCHED, result.transactions.single().receiptAssociation?.status)
+        assertTrue(itemName.contains("Булочка"))
+        listOf("ФН", "ФД", "ФП", "1234567890123456", "123456", "987654321")
+            .forEach { assertFalse(itemName.contains(it)) }
+    }
+
+    @Test
+    fun unknownOrInconsistentBankDirectionDoesNotSearchOrSelectReceipts() = runBlocking {
+        val source = RecordingReceiptSource(
+            pages = mapOf(0 to """{"receipts":[],"has_more":false}"""),
+            details = emptyMap(),
+        )
+        var selectorCalls = 0
+        val result = ReceiptMatchingEngine(
+            source,
+            ReceiptMatchSelector { _, _, _, _, _ ->
+                selectorCalls += 1
+                null
+            },
+        ).match(
+            listOf(
+                candidate("unknown-direction", "2026-09-10", -500, "RUB", "Кафе")
+                    .copy(direction = null, issues = listOf("direction: неизвестно")),
+                candidate(
+                    "wrong-sign-refund",
+                    "2026-09-10",
+                    -500,
+                    "RUB",
+                    "Возврат",
+                    direction = TransactionDirection.REFUND,
+                ),
+            ),
+            testConfig,
+        )
+
+        assertTrue(source.searchCalls.isEmpty())
+        assertTrue(source.detailCalls.isEmpty())
+        assertEquals(0, selectorCalls)
+        for (transaction in result.transactions) {
+            assertEquals(ReceiptAssociationStatus.AMBIGUOUS, transaction.receiptAssociation?.status)
+            assertEquals(ReceiptReviewReason.BANK_DIRECTION_UNKNOWN, transaction.receiptAssociation?.review?.reason)
+            assertTrue(transaction.items.isEmpty())
+        }
+    }
+
+    @Test
+    fun sbpRefundCanMatchButOwnAccountTransferCannot() = runBlocking {
+        val source = singleReceiptSource(
+            detail("2026-09-10T10:00:00Z", 500, "RUB", "Кофе", operationType = 2),
+        )
+        val result = ReceiptMatchingEngine(
+            source,
+            ReceiptMatchSelector { _, _, _, _, _ -> error("Unique receipt must not need a selector.") },
+        ).match(
+            listOf(
+                candidate(
+                    "sbp-refund",
+                    "2026-09-10T10:00:00Z",
+                    500,
+                    "RUB",
+                    "СБП Кофе",
+                    direction = TransactionDirection.REFUND,
+                ),
+                candidate(
+                    "own-transfer",
+                    "2026-09-10T10:00:00Z",
+                    500,
+                    "RUB",
+                    "Перевод",
+                    description = "Между своими счетами",
+                    direction = TransactionDirection.REFUND,
+                ),
+            ),
+            testConfig,
+        )
+
+        assertEquals(1, source.searchCalls.size)
+        assertEquals(1, source.detailCalls.size)
+        assertEquals(ReceiptAssociationStatus.MATCHED, result.transactions[0].receiptAssociation?.status)
+        assertEquals(ReceiptAssociationStatus.UNMATCHED, result.transactions[1].receiptAssociation?.status)
+        assertTrue(result.transactions[1].items.isEmpty())
+    }
+
+    @Test
+    fun purchaseAndRefundUseDifferentInclusiveDateWindows() = runBlocking {
+        data class Case(
+            val name: String,
+            val direction: TransactionDirection,
+            val daysFromOperation: Long,
+            val expected: ReceiptAssociationStatus,
+        )
+        val cases = listOf(
+            Case("purchase previous day", TransactionDirection.EXPENSE, -1, ReceiptAssociationStatus.MATCHED),
+            Case("purchase next day", TransactionDirection.EXPENSE, 1, ReceiptAssociationStatus.MATCHED),
+            Case("purchase too early", TransactionDirection.EXPENSE, -2, ReceiptAssociationStatus.UNMATCHED),
+            Case("purchase too late", TransactionDirection.EXPENSE, 2, ReceiptAssociationStatus.UNMATCHED),
+            Case("refund same day", TransactionDirection.REFUND, 0, ReceiptAssociationStatus.MATCHED),
+            Case("refund day fourteen", TransactionDirection.REFUND, -14, ReceiptAssociationStatus.MATCHED),
+            Case("refund day fifteen", TransactionDirection.REFUND, -15, ReceiptAssociationStatus.UNMATCHED),
+            Case("refund in future", TransactionDirection.REFUND, 1, ReceiptAssociationStatus.UNMATCHED),
+        )
+        val operationDate = LocalDate.parse("2026-09-10")
+
+        for (case in cases) {
+            val receiptDateTime = "${operationDate.plusDays(case.daysFromOperation)}T10:00:00Z"
+            val isRefund = case.direction == TransactionDirection.REFUND
+            val amount = if (isRefund) 500L else -500L
+            val operationType = if (isRefund) 2 else 1
+            val source = singleReceiptSource(
+                detail(receiptDateTime, 500, "RUB", "Продавец", operationType),
+                receivedAt = receiptDateTime,
+            )
+            val result = ReceiptMatchingEngine(
+                source,
+                ReceiptMatchSelector { _, _, _, _, _ -> error("${case.name} has no selector candidates.") },
+            ).match(
+                listOf(
+                    candidate(
+                        "window-case",
+                        "${operationDate}T10:00:00Z",
+                        amount,
+                        "RUB",
+                        "Продавец",
+                        direction = case.direction,
+                    ),
+                ),
+                testConfig,
+            )
+
+            assertEquals(case.expected, result.transactions.single().receiptAssociation?.status, case.name)
+            assertEquals(
+                if (case.expected == ReceiptAssociationStatus.MATCHED) 1 else 0,
+                source.detailCalls.size,
+                case.name,
+            )
+        }
+    }
+
+    @Test
+    fun failedReceiptDetailIsReviewOnlyAndDoesNotBlockSiblingMatch() = runBlocking {
+        val source = RecordingReceiptSource(
+            pages = mapOf(
+                0 to """{"receipts":[
+                    {"receipt_key":"synthetic-failed-detail","merchant":"Продавец 1","received_at":"2026-09-10T10:00:00Z","amount_minor":500,"currency":"RUB"},
+                    {"receipt_key":"synthetic-valid-detail","merchant":"Продавец 2","received_at":"2026-09-10T10:00:00Z","amount_minor":800,"currency":"RUB"}
+                ],"has_more":false}""",
+            ),
+            details = mapOf(
+                "synthetic-valid-detail" to detail("2026-09-10T10:00:00Z", 800, "RUB", "Продавец 2"),
+            ),
+        )
+        val result = ReceiptMatchingEngine(
+            source,
+            ReceiptMatchSelector { _, _, _, _, _ -> error("Both rows have only one candidate.") },
+        ).match(
+            listOf(
+                candidate("failed-row", "2026-09-10T10:00:00Z", -500, "RUB", "Продавец 1"),
+                candidate("valid-row", "2026-09-10T10:00:00Z", -800, "RUB", "Продавец 2"),
+            ),
+            testConfig,
+        )
+
+        assertEquals(2, source.detailCalls.size)
+        assertEquals(1, result.receiptDetailCount)
+        assertEquals(ReceiptAssociationStatus.AMBIGUOUS, result.transactions[0].receiptAssociation?.status)
+        assertEquals(
+            ReceiptReviewReason.RECEIPT_DETAIL_UNAVAILABLE,
+            result.transactions[0].receiptAssociation?.review?.reason,
+        )
+        assertTrue(result.transactions[0].items.isEmpty())
+        assertEquals(ReceiptAssociationStatus.MATCHED, result.transactions[1].receiptAssociation?.status)
+        assertEquals(listOf("Синтетическая позиция"), result.transactions[1].items.map(TransactionItem::name))
+    }
+
 
     @Test
     fun unknownExpenseWithUniqueReceiptAutoLinksAndFetchesDetails() = runBlocking {
@@ -648,7 +935,7 @@ class ReceiptMatchingTest {
     fun echoedReceiptKeyIsRemovedFromAllowlistedTextFields() = runBlocking {
         val key = "a14f9876-35db-4d44-9aab-8bf1a8727e09"
         val detail = """
-            {"date_time":"2026-09-10T10:00:00Z","total_minor":500,"currency":"RUB",
+            {"date_time":"2026-09-10T10:00:00Z","total_minor":500,"currency":"RUB","operation_type":1,
              "merchant":"$key","settlement_place":"Кафе $key",
              "items":[{"name":"Товар $key","quantity":1,"price_minor":500,"sum_minor":500}]}
         """.trimIndent()
@@ -680,7 +967,7 @@ class ReceiptMatchingTest {
         val buyerName = "Synthetic Buyer Identity"
         val key = "synthetic-buyer-receipt"
         val detail = """
-            {"date_time":"2026-09-10T10:00:00Z","total_minor":500,"currency":"RUB",
+            {"date_time":"2026-09-10T10:00:00Z","total_minor":500,"currency":"RUB","operation_type":1,
              "merchant":"Продавец","settlement_place":"Покупатель: $buyerName",
              "items":[{"name":"Buyer: $buyerName","quantity":1,"price_minor":500,"sum_minor":500}]}
         """.trimIndent()
@@ -869,9 +1156,15 @@ class ReceiptMatchingTest {
             currency: String,
             merchant: String,
             description: String = "Синтетическое банковское описание",
+            direction: TransactionDirection? = when {
+                amountMinor < 0L -> TransactionDirection.EXPENSE
+                amountMinor > 0L -> TransactionDirection.INCOME
+                else -> null
+            },
         ) = ExternalTransactionCandidate(
             occurredAt = occurredAt,
             amountMinor = amountMinor,
+            direction = direction,
             currency = currency,
             merchant = merchant,
             description = description,
@@ -879,8 +1172,16 @@ class ReceiptMatchingTest {
             sourceRef = sourceRef,
         )
 
-        fun detail(dateTime: String, amount: Long, currency: String, merchant: String) = """
-            {"date_time":"$dateTime","total_minor":$amount,"currency":"$currency","merchant":"$merchant",
+        fun detail(
+            dateTime: String,
+            amount: Long,
+            currency: String,
+            merchant: String,
+            operationType: Int? = 1,
+        ) = """
+            {"date_time":"$dateTime","total_minor":$amount,"currency":"$currency",
+             ${operationType?.let { "\"operation_type\":$it," }.orEmpty()}
+             "merchant":"$merchant",
              "settlement_place":"Синтетическая торговая точка","fiscal_document_number":"synthetic-fiscal-id",
              "items":[{"name":"Синтетическая позиция","quantity":1,"price_minor":$amount,"sum_minor":$amount}]}
         """.trimIndent()
@@ -888,15 +1189,17 @@ class ReceiptMatchingTest {
         fun singleReceiptSource(
             detailText: String,
             key: String = "synthetic-key",
+            receivedAt: String = "2026-09-10T10:00:00Z",
+            amountMinor: Long = 500,
         ) = RecordingReceiptSource(
             pages = mapOf(
-                0 to """{"receipts":[{"receipt_key":"$key","merchant":"Продавец","received_at":"2026-09-10T10:00:00Z","amount_minor":500,"currency":"RUB"}],"has_more":false}""",
+                0 to """{"receipts":[{"receipt_key":"$key","merchant":"Продавец","received_at":"$receivedAt","amount_minor":$amountMinor,"currency":"RUB"}],"has_more":false}""",
             ),
             details = mapOf(key to detailText),
         )
 
         fun detailWithSettlementPlace(settlementPlaceJson: String) = """
-            {"date_time":"2026-09-10T10:00:00Z","total_minor":500,"currency":"RUB","merchant":"Продавец",
+            {"date_time":"2026-09-10T10:00:00Z","total_minor":500,"currency":"RUB","operation_type":1,"merchant":"Продавец",
              "settlement_place":$settlementPlaceJson,"items":[{"name":"Синтетическая позиция","quantity":1,"price_minor":500,"sum_minor":500}]}
         """.trimIndent()
     }

@@ -526,7 +526,7 @@ class SchedulerService(
                 candidates = transactions,
                 includeSessionContext = false,
             )
-            val enrichment = enrichTransactions(classifiedTransactions, sessionConfig, trace)
+            val enrichment = enrichTransactions(targetState.session.id, classifiedTransactions, sessionConfig, trace)
             val enriched = enrichment.transactions
             val existingRefs = targetState.draft?.transactions.orEmpty()
                 .mapNotNull { it.transaction.sourceRef }
@@ -680,6 +680,7 @@ class SchedulerService(
     }
 
     private suspend fun enrichTransactions(
+        sessionId: String,
         transactions: List<ExternalTransactionCandidate>,
         config: AgentConfig,
         trace: MutableList<SchedulerTraceEvent>,
@@ -693,8 +694,9 @@ class SchedulerService(
             confirmedReceiptRules = receiptRules,
             trace = trace,
         )
+        val refined = agent.refineExternalCategoriesFromMatchedReceipts(sessionId, matched.transactions)
         return EnrichmentResult(
-            transactions = matched.transactions,
+            transactions = refined,
             receiptCandidateCount = matched.receiptCandidateCount,
             receiptDetailCount = matched.receiptDetailCount,
         )
