@@ -103,6 +103,42 @@ class OmpAuthGatewayTest {
     }
 
     @Test
+    fun providerQualifiedCanonicalResponseModelIsAcceptedAndPreserved() = runBlocking {
+        val request = applicationRequest()
+        val canonicalModelId = "openai-codex/gpt-6-luna"
+        val gateway = OmpStdioChatCompletionGateway(
+            modelSelector = MODEL_SELECTOR,
+            reasoningEffort = REASONING_EFFORT,
+            connection = RecordingConnection(canonicalModelId),
+            approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
+            routingSummary = "synthetic route",
+        )
+        gateway.initialize()
+        gateway.authorizeBeforeCompletion(request)
+
+        gateway.complete(request)
+
+        assertEquals(listOf(canonicalModelId), gateway.metadata("overlay-hash").responseModels)
+    }
+
+    @Test
+    fun otherProviderQualifiedVariantRemainsRejected() = runBlocking {
+        val request = applicationRequest()
+        val gateway = OmpStdioChatCompletionGateway(
+            modelSelector = MODEL_SELECTOR,
+            reasoningEffort = REASONING_EFFORT,
+            connection = RecordingConnection("openai-codex/gpt-6-luna:medium"),
+            approveFirstRequest = CodexRequestApproval { _, _, _ -> true },
+            routingSummary = "synthetic route",
+        )
+        gateway.initialize()
+        gateway.authorizeBeforeCompletion(request)
+
+        assertFailsWith<OmpGatewayModelMismatchException> { gateway.complete(request) }
+        Unit
+    }
+
+    @Test
     fun nonSuccessResponseExposesStatusWithoutProviderBody() = runBlocking {
         val connection = RecordingConnection(
             responseStatus = 401,

@@ -973,13 +973,15 @@ DB/OMP overlay останавливают прогон без report и след
 Используется точный согласованный selector
 `openai-codex/gpt-6-luna:min` через `omp auth-gateway stdio`; поле
 `reasoning_effort=medium` остаётся отдельной настройкой утверждённой fixture.
-Gateway передаёт именно selector и принимает только catalog ID `gpt-6-luna`
-или точный alias `openai-codex/gpt-6-luna:min`; redacted report сохраняет
-фактический response ID. Любой другой ID остаётся mismatch и останавливает
-прогон. Локальный OMP catalog показывает base model, но не подтверждает `:min`;
-preflight не выполняет model request, поэтому точный selector проверяется только
-ответом выбранной модели. OMP AgentSession, его prompt, tools и session не
-запускаются. Child process заменяет унаследованный `PI_CONFIG_FILES` единственным
+Gateway передаёт exact selector; допустимые response ID — `gpt-6-luna`,
+`openai-codex/gpt-6-luna` (canonical base) и точный selector
+`openai-codex/gpt-6-luna:min`. Redacted report сохраняет фактический ID без
+переименования. До egress body SHA и OMP route проверяются, fallback отключён;
+любой иной response ID остаётся mismatch и останавливает прогон. Локальный OMP
+catalog показывает base model, но не подтверждает `:min`; response ID может не
+включать suffix, поэтому отчёт сохраняет literal значение и не выдаёт его за
+подтверждённый model variant. OMP AgentSession, его prompt, tools и session не
+запускаются. Child process заменяет унаследованный `PI_CONFIG_FILES`
 временным fallback-only overlay; OMP auth profile остаётся доступным, но
 настройки, существовавшие только в `PI_CONFIG_FILES` (включая возможный account
 routing), не применяются. Если выбор аккаунта зависит от таких настроек, egress

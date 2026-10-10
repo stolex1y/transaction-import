@@ -584,10 +584,13 @@ internal class ProcessOmpJsonLineConnection(
 
 private fun responseModelMatches(selector: String, responseModel: String): Boolean =
     selector == APPROVED_MODEL_SELECTOR &&
-        (responseModel == APPROVED_MODEL_ID || responseModel == APPROVED_MODEL_SELECTOR)
+        (responseModel == APPROVED_MODEL_ID ||
+            responseModel == APPROVED_PROVIDER_QUALIFIED_MODEL_ID ||
+            responseModel == APPROVED_MODEL_SELECTOR)
 
 private const val APPROVED_MODEL_SELECTOR = "openai-codex/gpt-6-luna:min"
 private const val APPROVED_MODEL_ID = "gpt-6-luna"
+private const val APPROVED_PROVIDER_QUALIFIED_MODEL_ID = "openai-codex/gpt-6-luna"
 private const val APPROVED_REASONING_EFFORT = "medium"
 private val SAFE_MODEL_ID_PATTERN = Regex(
     "(?:gpt-6-luna|openai-codex/gpt-6-luna)" +
