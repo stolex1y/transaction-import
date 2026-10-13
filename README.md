@@ -3,6 +3,37 @@
 Transaction Import — локальное web-приложение для извлечения финансовых операций
 из текстовых банковских выписок с помощью LLM.
 
+## Автоматическое AI-ревью pull request
+
+Workflow `.github/workflows/ai-review.yml` запускает read-only review для PR,
+открытого в этом же GitHub repository, а также при `reopened` и `synchronize`.
+Fork PR пропускаются. Результат публикуется как summary и inline threads;
+исходные файлы PR не запускаются и не изменяются.
+
+Для включения:
+
+1. Опубликуйте `developer-assistant` с reusable workflow и этот caller workflow;
+   caller закрепляет reusable workflow на неизменяемом commit SHA.
+2. В настройках GitHub repository откройте **Settings → Secrets and variables →
+   Actions** и добавьте secret `DEEPSEEK_API_KEY`. Не добавляйте его в файлы,
+   workflow inputs или команды.
+3. Создайте synthetic same-repository PR и проверьте GitHub Actions run, review
+   summary и inline threads. Реальный ключ и API не используются обычными тестами.
+
+Workflow даёт runner только `contents: read` и `pull-requests: write`.
+`GITHUB_TOKEN` создаётся GitHub автоматически. Лимит uncached input tokens по
+умолчанию — 30 000; его можно изменить в `with.max_uncached_input_tokens`.
+Модель embeddings запускается локально на CPU; Ollama, PyTorch и GPU не нужны.
+DeepSeek получает только допустимый diff PR, отобранные passages из
+документации/кода и краткие предыдущие findings, не весь проект.
+
+**Безопасность:** workflow предназначен только для участников, которым можно
+доверять repository secrets. `pull_request` может исполнять caller definition
+из PR merge commit; same-repository автор с правом менять
+`.github/workflows/**` может изменить workflow. Ревью-утилита не запускает PR
+code, но не защищает ключ от злонамеренного редактора workflow. Не выдавайте
+такой write access недоверенным участникам. Fork PR пропускаются.
+
 ## Возможности
 
 - локальные memory layers: short-term для диалога, working для текущего

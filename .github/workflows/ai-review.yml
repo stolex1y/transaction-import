@@ -1,0 +1,26 @@
+name: AI code review
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: stolex1y/developer-assistant/.github/workflows/review.yml@9362bf135a729e1757bb28bbcf2005e7f685b56f
+    with:
+      repository: ${{ github.repository }}
+      pr_number: ${{ github.event.pull_request.number }}
+      base_sha: ${{ github.event.pull_request.base.sha }}
+      head_sha: ${{ github.event.pull_request.head.sha }}
+      utility_ref: 9362bf135a729e1757bb28bbcf2005e7f685b56f
+      max_uncached_input_tokens: 30000
+    secrets:
+      deepseek_api_key: ${{ secrets.DEEPSEEK_API_KEY }}
