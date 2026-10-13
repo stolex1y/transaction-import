@@ -14,13 +14,13 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: stolex1y/developer-assistant/.github/workflows/review.yml@9362bf135a729e1757bb28bbcf2005e7f685b56f
+    uses: stolex1y/developer-assistant/.github/workflows/review.yml@633ea34c621aaea519cacbb6cbefa0110572952c
     with:
       repository: ${{ github.repository }}
       pr_number: ${{ github.event.pull_request.number }}
       base_sha: ${{ github.event.pull_request.base.sha }}
       head_sha: ${{ github.event.pull_request.head.sha }}
-      utility_ref: 9362bf135a729e1757bb28bbcf2005e7f685b56f
+      utility_ref: 633ea34c621aaea519cacbb6cbefa0110572952c
       max_uncached_input_tokens: 30000
     secrets:
       deepseek_api_key: ${{ secrets.DEEPSEEK_API_KEY }}
