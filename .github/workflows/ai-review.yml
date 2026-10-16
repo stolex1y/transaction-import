@@ -5,22 +5,22 @@ on:
     types: [opened, reopened, synchronize]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
   review:
     if: github.event.pull_request.head.repo.full_name == github.repository
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
-    uses: stolex1y/developer-assistant/.github/workflows/review.yml@53de8bb9f0d0a716b9194afa80fdfb925421be6d
+    uses: stolex1y/developer-assistant/.github/workflows/review.yml@716f9b8be1f222b5fef98d81b72bebd673e44089
     with:
       repository: ${{ github.repository }}
       pr_number: ${{ github.event.pull_request.number }}
       base_sha: ${{ github.event.pull_request.base.sha }}
       head_sha: ${{ github.event.pull_request.head.sha }}
-      utility_ref: 53de8bb9f0d0a716b9194afa80fdfb925421be6d
+      utility_ref: 716f9b8be1f222b5fef98d81b72bebd673e44089
       max_uncached_input_tokens: 30000
     secrets:
       deepseek_api_key: ${{ secrets.DEEPSEEK_API_KEY }}
