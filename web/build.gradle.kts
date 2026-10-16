@@ -41,6 +41,12 @@ distributions {
         }
     }
 }
+tasks.processResources {
+    from(rootProject.file("docs")) {
+        include("support-faq.md", "user-guide.md")
+        into("support-knowledge")
+    }
+}
 
 dependencies {
     implementation(project(":core"))

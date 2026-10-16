@@ -11,6 +11,15 @@
     "summary_batch_messages": 10,
     "summary_max_tokens": 20000
   },
+  "support_assistant": {
+    "provider_id": "deepseek",
+    "model_id": "deepseek-flash",
+    "reasoning_mode_id": "low",
+    "context_management": {
+      "strategy": "sliding_window",
+      "recent_messages": 10
+    }
+  },
   "mcp_servers": [
     {
       "id": "tbank-transactions",

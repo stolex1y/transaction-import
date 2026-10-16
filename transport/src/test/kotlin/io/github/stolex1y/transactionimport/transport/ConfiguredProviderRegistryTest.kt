@@ -419,7 +419,84 @@ class ConfiguredProviderRegistryTest {
             AgentConfig("deepseek", "deepseek-flash", "disabled"),
             runtime.defaultAgentConfig(),
         )
+        val support = runtime.effectiveSupportAssistant()
+        assertEquals(runtime.defaultAgentConfig(), support.agentConfig())
+        assertEquals(ContextStrategy.SLIDING_WINDOW, support.contextManagement.strategy)
+        assertEquals(10, support.contextManagement.recentMessages)
+
     }
+    @Test
+    fun supportProfileCanUseSeparateProviderAndLimitsWindowToTenMessages() {
+        val catalog = decodeProviderCatalog(
+            """
+            {
+              "providers": [
+                {
+                  "id": "import",
+                  "display_name": "Import",
+                  "base_url": "https://import.example/v1",
+                  "credential_env": "IMPORT_KEY",
+                  "models": [
+                    {
+                      "id": "import-model",
+                      "reasoning_modes": [{ "id": "disabled" }]
+                    }
+                  ]
+                },
+                {
+                  "id": "support",
+                  "display_name": "Support",
+                  "base_url": "https://support.example/v1",
+                  "credential_env": "SUPPORT_KEY",
+                  "models": [
+                    {
+                      "id": "support-model",
+                      "reasoning_modes": [{ "id": "careful" }]
+                    }
+                  ]
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+        val config = """
+            {
+              "default_provider_id": "import",
+              "default_model_id": "import-model",
+              "default_reasoning_mode_id": "disabled",
+              "support_assistant": {
+                "provider_id": "support",
+                "model_id": "support-model",
+                "reasoning_mode_id": "careful",
+                "context_management": {
+                  "strategy": "sliding_window",
+                  "recent_messages": 10
+                }
+              }
+            }
+        """.trimIndent()
+        val runtime = decodeAgentRuntimeConfig(config, catalog)
+
+        assertEquals(AgentConfig("import", "import-model", "disabled"), runtime.defaultAgentConfig())
+        assertEquals(
+            AgentConfig("support", "support-model", "careful"),
+            runtime.effectiveSupportAssistant().agentConfig(),
+        )
+        assertEquals(10, runtime.effectiveSupportAssistant().contextManagement.recentMessages)
+        assertFailsWith<IllegalArgumentException> {
+            decodeAgentRuntimeConfig(
+                config.replace("\"recent_messages\": 10", "\"recent_messages\": 11"),
+                catalog,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            decodeAgentRuntimeConfig(
+                config.replace("\"strategy\": \"sliding_window\"", "\"strategy\": \"summary\""),
+                catalog,
+            )
+        }
+    }
+
     @Test
     fun decodesTokenAwareSummaryParameters() {
         val catalog = decodeProviderCatalog(

@@ -34,6 +34,7 @@ web application resource; это основной пользовательски
 - `GET /api/agent/sessions/{id}` — состояние сессии;
 - `POST /api/agent/sessions/{id}/messages` — сообщение агента;
 - `GET /api/agent/sessions/{id}/batch` — сформированный import batch.
+- `GET /api/agent/support/messages` и `POST /api/agent/support/messages` — единая история support-чата без ticket metadata.
 
 Назначение и schema этих routes описаны в [data-api.md](data-api.md). В выбранных
 ответах web layer вызывает `withoutOpaqueSourceRefs()` перед сериализацией.
@@ -45,8 +46,25 @@ provider HTTP boundary. Приложение подключает локальн
 HTTP. Их endpoint URLs задаются в `config/agent.json`; приложение использует
 указанные URL и само не запускает MCP-процессы.
 
+Support orchestration живёт в `web`, полный transcript и состояние follow-up /
+routing хранятся в отдельной SQLite-схеме. `SupportKnowledgeBase` индексирует
+только `docs/support-faq.md` и `docs/user-guide.md`; пустой retrieval даёт
+детерминированный abstention без вызова модели. Для support используется отдельный
+provider/model/reasoning profile `support_assistant` и окно последних message
+records активного обращения.
+
+Локальный synthetic ticket store доступен через отдельный JSON-backed logical
+MCP catalog `support-tickets`. Его allowlist не пересекается с глобальным
+каталогом импортных, bank, receipts и scheduler tools. Модель не получает MCP
+tools: backend сам валидирует структурированный routing результат и выполняет
+только create/close/reopen transitions. Ticket activity выводится из времени
+последнего связанного transcript message; deadline — 30 минут.
+
 Банковские идентификаторы остаются внутри соответствующего adapter. Не отправляйте
 реальные финансовые данные внешнему LLM-провайдеру.
+
+В support-ответы передаются только найденные документационные passages и
+ограниченный transcript. Реальные финансовые данные и внешний CRM не используются.
 
 ## Источники
 
@@ -57,3 +75,6 @@ HTTP. Их endpoint URLs задаются в `config/agent.json`; приложе
 - `web/src/main/kotlin/io/github/stolex1y/transactionimport/web/AgentWeb.kt`.
 - `transport/src/main/kotlin/io/github/stolex1y/transactionimport/transport/ConfiguredProviderRegistry.kt`.
 - `persistence/src/main/kotlin/io/github/stolex1y/transactionimport/persistence/SqliteImportSessionRepository.kt`.
+- `web/src/main/kotlin/io/github/stolex1y/transactionimport/web/SupportChatService.kt`.
+- `web/src/main/kotlin/io/github/stolex1y/transactionimport/web/SupportKnowledgeBase.kt`.
+- `web/src/main/kotlin/io/github/stolex1y/transactionimport/web/JsonSupportTicketMcpServer.kt`.

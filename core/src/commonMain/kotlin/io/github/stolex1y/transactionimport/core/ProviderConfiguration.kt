@@ -295,6 +295,31 @@ data class McpToolLoopConfig(
 
 
 @Serializable
+data class SupportAssistantConfig(
+    @SerialName("provider_id") val providerId: String,
+    @SerialName("model_id") val modelId: String,
+    @SerialName("reasoning_mode_id") val reasoningModeId: String,
+    @SerialName("context_management")
+    val contextManagement: ContextManagementConfig = ContextManagementConfig(
+        strategy = ContextStrategy.SLIDING_WINDOW,
+        recentMessages = 10,
+    ),
+) {
+    fun agentConfig(): AgentConfig = AgentConfig(providerId, modelId, reasoningModeId)
+
+    internal fun validate(catalog: ProviderCatalog) {
+        contextManagement.validate()
+        require(contextManagement.strategy == ContextStrategy.SLIDING_WINDOW) {
+            "support_assistant.context_management.strategy должен быть sliding_window."
+        }
+        require(contextManagement.recentMessages in 1..10) {
+            "support_assistant.context_management.recent_messages должен быть в диапазоне 1..10."
+        }
+        catalog.resolve(agentConfig())
+    }
+}
+
+@Serializable
 data class AgentRuntimeConfig(
     @SerialName("default_provider_id") val defaultProviderId: String = "deepseek",
     @SerialName("default_model_id") val defaultModelId: String = "deepseek-flash",
@@ -308,12 +333,21 @@ data class AgentRuntimeConfig(
     val contextManagement: ContextManagementConfig? = null,
     @SerialName("mcp_servers") val mcpServers: List<McpServerConfig> = emptyList(),
     @SerialName("mcp_tool_loop") val mcpToolLoop: McpToolLoopConfig = McpToolLoopConfig(),
+    @SerialName("support_assistant") val supportAssistant: SupportAssistantConfig? = null,
 ) {
     fun defaultAgentConfig(): AgentConfig = AgentConfig(
         providerId = defaultProviderId,
         modelId = defaultModelId,
         reasoningModeId = defaultReasoningModeId,
     )
+
+
+    fun effectiveSupportAssistant(): SupportAssistantConfig =
+        supportAssistant ?: SupportAssistantConfig(
+            providerId = defaultProviderId,
+            modelId = defaultModelId,
+            reasoningModeId = defaultReasoningModeId,
+        )
 
     fun sessionContextManagement(): ContextManagementConfig? =
         contextManagement ?: contextCompression
@@ -352,6 +386,7 @@ data class AgentRuntimeConfig(
             }
         }
         catalog.resolve(defaultAgentConfig())
+        supportAssistant?.validate(catalog)
         return this
     }
 }

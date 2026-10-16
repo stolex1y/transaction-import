@@ -77,6 +77,11 @@ private fun ApplicationCall.hasTrustedLoopbackOrigin(): Boolean {
 
 private fun effectiveOriginPort(uri: URI): Int = if (uri.port == -1) 80 else uri.port
 
+interface SupportChatApi {
+    suspend fun loadHistory(): SupportChatView
+    suspend fun sendMessage(text: String): SupportChatView
+}
+
 class AgentWebDependencies(
     val agent: SmartExpenseAgent,
     val catalog: ProviderCatalog,
@@ -90,6 +95,7 @@ class AgentWebDependencies(
     val nativeMcpAgent: NativeMcpAgent? = null,
     val scheduler: SchedulerService? = null,
     val receiptsProxy: ReceiptsProxyService? = null,
+    val supportChat: SupportChatApi? = null,
 )
 
 @Serializable
@@ -264,6 +270,22 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
 
     get("/api/agent/mcp") {
         call.respond(dependencies.requireAgentRuntime().mcpCatalog.catalog())
+    }
+
+    get("/api/agent/support/messages") {
+        val supportChat = dependencies?.supportChat
+            ?: throw ProviderUnavailableException("Поддержка не настроена.")
+        call.respond(supportChat.loadHistory())
+    }
+    post("/api/agent/support/messages") {
+        if (!call.hasTrustedLoopbackOrigin()) {
+            call.respond(HttpStatusCode.Forbidden)
+            return@post
+        }
+        val supportChat = dependencies?.supportChat
+            ?: throw ProviderUnavailableException("Поддержка не настроена.")
+        val request = call.receive<SupportChatMessageRequest>()
+        call.respond(supportChat.sendMessage(request.message))
     }
 
     post("/api/agent/receipts/browser-login") {

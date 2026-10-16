@@ -1,8 +1,10 @@
 package io.github.stolex1y.transactionimport.web
 
 import io.github.stolex1y.transactionimport.core.SmartExpenseAgent
+import io.github.stolex1y.transactionimport.core.McpServerConfig
 import io.github.stolex1y.transactionimport.persistence.SqliteImportSessionRepository
 import io.github.stolex1y.transactionimport.persistence.SqliteSchedulerRepository
+import io.github.stolex1y.transactionimport.persistence.SqliteSupportChatRepository
 import io.github.stolex1y.transactionimport.transport.ConfiguredProviderRegistry
 import io.github.stolex1y.transactionimport.transport.loadProviderCatalog
 import io.github.stolex1y.transactionimport.transport.loadAgentRuntimeConfig
@@ -22,9 +24,11 @@ import java.util.UUID
 private const val PROVIDER_CONFIG_ENV = "PROVIDER_CONFIG_PATH"
 private const val AGENT_CONFIG_ENV = "AGENT_CONFIG_PATH"
 private const val DATABASE_PATH_ENV = "TRANSACTION_IMPORT_DB"
+private const val SUPPORT_TICKETS_PATH_ENV = "TRANSACTION_IMPORT_SUPPORT_TICKETS"
 private const val DEFAULT_PROVIDER_CONFIG_PATH = "config/providers.json"
 private const val DEFAULT_AGENT_CONFIG_PATH = "config/agent.json"
 private const val DEFAULT_DATABASE_PATH = ".data/agent.sqlite"
+private const val DEFAULT_SUPPORT_TICKETS_PATH = ".data/support-tickets.json"
 private const val DEFAULT_PORT = 8080
 
 fun main() {
@@ -39,6 +43,10 @@ fun main() {
     val databasePath = Path.of(
         System.getenv(DATABASE_PATH_ENV)?.takeIf(String::isNotBlank)
             ?: DEFAULT_DATABASE_PATH,
+    ).toAbsolutePath().normalize()
+    val supportTicketsPath = Path.of(
+        System.getenv(SUPPORT_TICKETS_PATH_ENV)?.takeIf(String::isNotBlank)
+            ?: DEFAULT_SUPPORT_TICKETS_PATH,
     ).toAbsolutePath().normalize()
     databasePath.parent?.let(Files::createDirectories)
     val catalog = loadProviderCatalog(providerConfigPath)
@@ -96,6 +104,8 @@ fun main() {
         runtimeConfig = runtimeConfig,
     )
     var mcpCatalog: McpCatalogService? = null
+    var supportMcpCatalog: McpCatalogService? = null
+    var supportChatService: SupportChatService? = null
     try {
         val connectedCatalog = runBlocking {
             McpCatalogService.connect(
@@ -107,6 +117,32 @@ fun main() {
         mcpCatalog = connectedCatalog
         sourceTools = connectedCatalog
         scheduler.start()
+        val connectedSupportMcp = runBlocking {
+            val supportServer = JsonSupportTicketMcpServer(supportTicketsPath)
+            McpCatalogService.connect(
+                configs = listOf(
+                    McpServerConfig(
+                        id = "support-tickets",
+                        displayName = "Локальные обращения поддержки",
+                        endpoint = "http://localhost/support-tickets",
+                        enabled = true,
+                        allowedTools = supportServer.tools().map { it.name },
+                    ),
+                ),
+                httpClient = httpClient,
+                logicalServers = mapOf("support-tickets" to supportServer),
+            )
+        }
+        supportMcpCatalog = connectedSupportMcp
+        val supportService = SupportChatService(
+            repository = SqliteSupportChatRepository(databasePath.toString()),
+            tickets = McpSupportTicketGateway(connectedSupportMcp),
+            knowledgeBase = SupportKnowledgeBase.load(),
+            gatewayResolver = providerRegistry,
+            runtimeConfig = runtimeConfig,
+        )
+        supportChatService = supportService
+        supportService.start()
         val nativeMcpAgent = NativeMcpAgent(
             agent = agent,
             gatewayResolver = providerRegistry,
@@ -123,12 +159,15 @@ fun main() {
             nativeMcpAgent = nativeMcpAgent,
             scheduler = scheduler,
             receiptsProxy = ReceiptsProxyService(connectedCatalog),
+            supportChat = supportService,
         )
         embeddedServer(Netty, host = "127.0.0.1", port = port) {
             module(agentDependencies = agentDependencies)
         }.start(wait = true)
     } finally {
         scheduler.close()
+        supportChatService?.close()
+        supportMcpCatalog?.close()
         mcpCatalog?.close()
         httpClient.close()
     }
