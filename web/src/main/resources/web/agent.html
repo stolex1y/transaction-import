@@ -23,6 +23,8 @@
                     data-app-panel="mcp" aria-pressed="false">MCP</button>
             <button id="show-settings-panel" class="panel-tab" type="button"
                     data-app-panel="settings" aria-pressed="false">Настройки</button>
+            <button id="show-support-panel" class="panel-tab" type="button"
+                    data-app-panel="support" aria-pressed="false">Поддержка</button>
         </nav>
         <div class="toolbar-actions">
             <button id="theme-toggle" class="secondary-button compact-button" type="button">Светлая тема</button>
@@ -361,6 +363,27 @@
                 <div id="draft-editor" class="operation-editor"></div>
             </section>
         </div>
+    </main>
+    <main class="agent-main support-main" data-app-content="support" hidden>
+        <section class="panel support-chat-panel" aria-labelledby="support-title">
+            <div class="section-heading">
+                <div>
+                    <p class="eyebrow">Transaction Import</p>
+                    <h1 id="support-title">Поддержка</h1>
+                </div>
+            </div>
+            <p class="control-note">Задайте вопрос о работе приложения. История чата сохраняется в этом приложении.</p>
+            <div id="support-message-list" class="support-message-list" role="log"
+                 aria-label="История чата поддержки" aria-live="polite" aria-relevant="additions text"></div>
+            <div id="support-quick-replies" class="support-quick-replies" aria-label="Быстрые ответы"></div>
+            <p id="support-status" class="control-note" role="status" aria-live="polite"></p>
+            <form id="support-form" class="support-composer">
+                <label for="support-input">Ваш вопрос</label>
+                <textarea id="support-input" rows="3" maxlength="4000"
+                          placeholder="Например: как начать новый импорт?" required></textarea>
+                <button id="support-send" type="submit" disabled>Отправить</button>
+            </form>
+        </section>
     </main>
 
     <p id="agent-status" class="status agent-toast" role="status" aria-live="polite"></p>

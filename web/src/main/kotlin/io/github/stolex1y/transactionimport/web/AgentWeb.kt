@@ -273,6 +273,10 @@ internal fun Route.agentRoutes(dependencies: AgentWebDependencies?) {
     }
 
     get("/api/agent/support/messages") {
+        if (!call.hasTrustedLoopbackOrigin()) {
+            call.respond(HttpStatusCode.Forbidden)
+            return@get
+        }
         val supportChat = dependencies?.supportChat
             ?: throw ProviderUnavailableException("Поддержка не настроена.")
         call.respond(supportChat.loadHistory())

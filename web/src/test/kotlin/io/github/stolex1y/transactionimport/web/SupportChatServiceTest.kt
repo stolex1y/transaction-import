@@ -121,6 +121,28 @@ class SupportChatServiceTest {
                 assertFalse(response.contains("ticketId"))
                 assertFalse(response.contains("\"status\""))
                 assertEquals(2, fixture.repository.snapshot().messages.size)
+
+                val rejectedRebindingHistory = client.get("/api/agent/support/messages") {
+                    header("Host", "attacker.example")
+                    header("Origin", "http://attacker.example")
+                    header("Sec-Fetch-Site", "same-origin")
+                }
+                assertEquals(HttpStatusCode.Forbidden, rejectedRebindingHistory.status)
+                val rejectedBody = rejectedRebindingHistory.bodyAsText()
+                assertFalse(rejectedBody.contains("Как начать"))
+                assertFalse(rejectedBody.contains("Нажмите"))
+
+                val acceptedHistory = client.get("/api/agent/support/messages") {
+                    header("Host", "localhost")
+                    header("Origin", "http://localhost")
+                }
+                assertEquals(HttpStatusCode.OK, acceptedHistory.status)
+                val historyBody = acceptedHistory.bodyAsText()
+                assertTrue(historyBody.contains("Как начать"))
+                assertTrue(historyBody.contains("Нажмите"))
+                assertFalse(historyBody.contains("ticket_id"))
+                assertFalse(historyBody.contains("ticketId"))
+                assertFalse(historyBody.contains("\"status\""))
             }
         } finally {
             base.scheduler?.close()

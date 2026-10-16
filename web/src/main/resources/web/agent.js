@@ -104,6 +104,12 @@ const elements = {
     messageForm: document.querySelector("#message-form"),
     message: document.querySelector("#agent-message"),
     sendMessage: document.querySelector("#send-message"),
+    supportMessages: document.querySelector("#support-message-list"),
+    supportForm: document.querySelector("#support-form"),
+    supportInput: document.querySelector("#support-input"),
+    supportSend: document.querySelector("#support-send"),
+    supportQuickReplies: document.querySelector("#support-quick-replies"),
+    supportStatus: document.querySelector("#support-status"),
     metricsPanel: document.querySelector("#metrics-panel"),
     metricsSummary: document.querySelector("#metrics-summary"),
     metricsTableBody: document.querySelector("#metrics-table-body"),
@@ -132,6 +138,9 @@ let receiptsAuthState = null;
 let receiptsStatusPollTimer = null;
 let categoryCatalog = [];
 let sessions = [];
+let supportView = { messages: [], interaction: { awaiting_follow_up: false, awaiting_clarification: false } };
+let supportSending = false;
+let supportHistoryLoadVersion = 0;
 let activeState = null;
 let sessionNavigationVersion = 0;
 let memoryProjection = null;
@@ -213,6 +222,11 @@ elements.reasoning.addEventListener("change", saveSessionConfig);
 elements.deleteSession.addEventListener("click", deleteSession);
 elements.forkSession.addEventListener("click", forkActiveSession);
 elements.messageForm.addEventListener("submit", sendMessage);
+elements.supportForm?.addEventListener("submit", sendSupportMessage);
+elements.supportInput?.addEventListener("input", () => {
+    if (!supportSending) elements.supportSend.disabled = !elements.supportInput.value.trim();
+});
+elements.supportQuickReplies?.addEventListener("click", handleSupportQuickReply);
 elements.selectAll.addEventListener("change", setAllIncluded);
 elements.buildBatch.addEventListener("click", exportBatch);
 elements.tableView.addEventListener("click", () => selectOperationView("table"));
@@ -231,7 +245,7 @@ async function initialize() {
     const requestedSessionId = sessionIdFromLocation();
     const initialPanel = requestedSessionId
         ? "sessions"
-        : ["sessions", "scheduler", "mcp", "settings"].includes(localStorage.getItem(ACTIVE_PANEL_KEY))
+        : ["sessions", "scheduler", "mcp", "settings", "support"].includes(localStorage.getItem(ACTIVE_PANEL_KEY))
             ? localStorage.getItem(ACTIVE_PANEL_KEY)
             : "sessions";
     selectAppPanel(initialPanel, false);
@@ -279,6 +293,7 @@ async function initialize() {
         } else {
             renderEmptyState();
         }
+        if (initialPanel === "support") await loadSupportHistory();
     } catch (error) {
         showError(error.message);
         renderEmptyState();
@@ -311,7 +326,11 @@ function handleAppPanelNavigation(event) {
 }
 
 function selectAppPanel(panel, persist = true) {
-    if (!["sessions", "scheduler", "mcp", "settings"].includes(panel)) return;
+    if (!["sessions", "scheduler", "mcp", "settings", "support"].includes(panel)) return;
+    if (persist && panel === "support" && sessionIdFromLocation() !== null) {
+        window.history.pushState({ panel }, "", "/agent");
+        sessionNavigationVersion += 1;
+    }
     elements.app.dataset.activePanel = panel;
     for (const button of elements.panelNavigation.querySelectorAll("[data-app-panel]")) {
         const selected = button.dataset.appPanel === panel;
@@ -329,11 +348,20 @@ function selectAppPanel(panel, persist = true) {
         void refreshReceiptsSession();
         if (tbankSession.authenticated) void loadTbankAccounts();
     }
+    if (persist && panel === "sessions" && activeState) navigateToSession(activeState.session.id);
+    if (persist && panel === "support") void loadSupportHistory();
 }
 
-async function handlePopState() {
+async function handlePopState(event) {
     const navigationVersion = ++sessionNavigationVersion;
     const sessionId = sessionIdFromLocation();
+    if (sessionId === null && event.state?.panel === "support") {
+        selectAppPanel("support", false);
+        localStorage.setItem(ACTIVE_PANEL_KEY, "support");
+        void loadSupportHistory();
+        setNavigationLoading(false);
+        return;
+    }
     selectAppPanel("sessions", false);
     if (sessionId === null) {
         renderEmptyState();
@@ -611,6 +639,141 @@ function jsonOptions(method, body) {
         body: JSON.stringify(body),
     };
 }
+async function loadSupportHistory() {
+    if (supportSending) return;
+    const loadVersion = ++supportHistoryLoadVersion;
+    try {
+        const loadedView = await api("/api/agent/support/messages");
+        if (supportSending || loadVersion !== supportHistoryLoadVersion) return;
+        supportView = loadedView;
+        renderSupportHistory();
+    } catch (error) {
+        if (supportSending || loadVersion !== supportHistoryLoadVersion) return;
+        elements.supportStatus.className = "control-note error";
+        elements.supportStatus.textContent = error.message;
+    }
+}
+
+function renderSupportHistory() {
+    const messages = Array.isArray(supportView.messages) ? supportView.messages : [];
+    elements.supportMessages.replaceChildren();
+    if (messages.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "История пока пуста. Задайте вопрос об использовании Transaction Import.";
+        elements.supportMessages.append(empty);
+    }
+    for (const message of messages) {
+        const item = document.createElement("article");
+        item.className = `support-message ${message.role === "user" ? "user" : "assistant"}`;
+        const role = document.createElement("strong");
+        role.textContent = message.role === "user" ? "Вы" : "Ассистент";
+        const text = document.createElement("p");
+        text.textContent = message.text;
+        item.append(role, text);
+
+        const citations = Array.isArray(message.citations) ? message.citations : [];
+        if (citations.length > 0) {
+            const sourceList = document.createElement("ul");
+            sourceList.className = "support-citations";
+            sourceList.setAttribute("aria-label", "Источники ответа");
+            for (const citation of citations) {
+                const source = document.createElement("li");
+                source.textContent = `${citation.title} — ${citation.section}`;
+                sourceList.append(source);
+            }
+            item.append(sourceList);
+        }
+        elements.supportMessages.append(item);
+    }
+    const warning = supportView.warning;
+    elements.supportStatus.className = warning ? "control-note error" : "control-note";
+    elements.supportStatus.textContent = warning || "";
+    elements.supportMessages.scrollTop = elements.supportMessages.scrollHeight;
+    renderSupportQuickReplies();
+}
+
+function renderSupportQuickReplies() {
+    elements.supportQuickReplies.replaceChildren();
+    const interaction = supportView.interaction || {};
+    const awaitingFollowUp = interaction.awaiting_follow_up ?? interaction.awaitingFollowUp;
+    const awaitingClarification = interaction.awaiting_clarification ?? interaction.awaitingClarification;
+    const replies = awaitingFollowUp
+        ? [
+            ["Да, есть ещё вопрос", "Да"],
+            ["Нет, закрыть обращение", "Нет"],
+        ]
+        : awaitingClarification
+            ? [
+                ["Продолжить прежний вопрос", "Это продолжение прежнего вопроса."],
+                ["Задать новый вопрос", "Это новый вопрос."],
+            ]
+            : [];
+    for (const [label, reply] of replies) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "secondary-button compact-button";
+        button.dataset.reply = reply;
+        button.textContent = label;
+        button.disabled = supportSending;
+        elements.supportQuickReplies.append(button);
+    }
+}
+
+function handleSupportQuickReply(event) {
+    const button = event.target.closest("button[data-reply]");
+    if (button) void submitSupportMessage(button.dataset.reply);
+}
+
+function sendSupportMessage(event) {
+    event.preventDefault();
+    void submitSupportMessage(elements.supportInput.value);
+}
+
+async function submitSupportMessage(value) {
+    const message = value.trim();
+    if (!message || supportSending) return;
+    supportSending = true;
+    supportHistoryLoadVersion += 1;
+    elements.supportInput.disabled = true;
+    elements.supportStatus.className = "control-note";
+    elements.supportStatus.textContent = "Отправляем вопрос…";
+    elements.supportForm.setAttribute("aria-busy", "true");
+    try {
+        supportView = await api(
+            "/api/agent/support/messages",
+            jsonOptions("POST", { message }),
+        );
+        if (elements.supportInput.value.trim() === message) elements.supportInput.value = "";
+        renderSupportHistory();
+    } catch (error) {
+        try {
+            supportView = await api("/api/agent/support/messages");
+            renderSupportHistory();
+            if (supportView.messages.at(-1)?.role === "user" && supportView.messages.at(-1)?.text === message) {
+                elements.supportInput.value = "";
+            }
+        } catch (_) {
+            // Keep the original request error visible; history can be loaded when the user returns to this panel.
+        }
+        elements.supportStatus.className = "control-note error";
+        elements.supportStatus.textContent = error.message;
+    } finally {
+        supportSending = false;
+        elements.supportInput.disabled = false;
+        elements.supportSend.disabled = !elements.supportInput.value.trim();
+        elements.supportForm.setAttribute("aria-busy", "false");
+        renderSupportQuickReplies();
+    }
+}
+
+elements.supportInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        elements.supportForm.requestSubmit();
+    }
+});
+
 
 async function loadSchedulerPanel() {
     if (!elements.schedulerTaskList) return;
@@ -3980,6 +4143,7 @@ function applyBusyState() {
     busy = value;
     elements.app.setAttribute("aria-busy", String(value));
     for (const control of elements.app.querySelectorAll("button, select, input, textarea")) {
+        if (control.closest("[data-app-content='support']")) continue;
         const rowId = control.closest("[data-transaction-id]")?.dataset.transactionId;
         const dirtyReceiptAction =
             control.matches("button[data-action^='receipt-']") && dirtyFields.has(rowId);
