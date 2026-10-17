@@ -65,7 +65,6 @@ data class SupportChatMessageView(
     val role: String,
     val text: String,
     @SerialName("created_at_epoch_ms") val createdAtEpochMs: Long,
-    val citations: List<SupportCitation> = emptyList(),
 )
 
 @Serializable
@@ -179,7 +178,7 @@ internal class SupportChatService(
                 tickets.close(openTicket.id)
                 repository.saveInteractionState(SupportChatInteractionState())
                 appendAssistant(
-                    text = "Обращение завершено. Если появится новый вопрос, напишите его здесь.",
+                    text = "Хорошо! Если появятся вопросы, напишите их здесь.",
                     ticketId = openTicket.id,
                 )
                 return
@@ -293,8 +292,8 @@ internal class SupportChatService(
         val passages = retrievePassages(question, contextMessages)
         if (passages.isEmpty()) {
             appendAssistant(
-                text = "В FAQ и руководстве интерфейса нет подтверждённой информации по этому вопросу. " +
-                    "Не хочу придумывать ответ. Попробуйте уточнить вопрос о работе Transaction Import.\n\n" +
+                text = "Не могу подтвердить это по информации о пользовательских функциях Transaction Import. " +
+                    "Уточните вопрос или спросите о другой функции.\n\n" +
                     FOLLOW_UP_QUESTION,
                 ticketId = ticketId,
                 citations = emptyList(),
@@ -322,7 +321,7 @@ internal class SupportChatService(
                 append(passage.text)
                 append("\n\n")
             }
-            append("Не добавляй sources или citations в ответ: UI покажет только реальные источники отдельно.")
+            append("Источники нужны только для обоснования ответа; не называй документы или разделы и не составляй список источников.")
         }
         val response = complete(
             messages = listOf(RequestMessage("system", systemPrompt)) + contextMessages.map {
@@ -448,7 +447,6 @@ internal class SupportChatService(
                 role = message.role.name.lowercase(Locale.ROOT),
                 text = message.text,
                 createdAtEpochMs = message.createdAtEpochMs,
-                citations = message.citations,
             )
         },
         interaction = SupportChatInteractionView(
@@ -473,9 +471,15 @@ internal class SupportChatService(
         """.trimIndent()
         val ANSWER_SYSTEM_PROMPT = """
             Ты ассистент поддержки приложения Transaction Import. Отвечай по-русски, кратко и только по переданным
-            фрагментам FAQ и руководства. Если материалы не подтверждают факт, прямо скажи об этом и не угадывай.
-            Не называй внутренние тикеты, их ID или статусы. Не выполняй действия с банковскими данными, импортами,
-            счетами или транзакциями. Не добавляй вопрос о продолжении диалога: backend добавит его сам.
+            фрагментам подтверждённых пользовательских материалов. Если они не подтверждают факт, прямо скажи об этом
+            и не угадывай. Не называй источники, файлы, разделы и не составляй список citations.
+            Не раскрывай внутренние ticket IDs/status, сохранение истории support-чата, маршрутизацию или timeout
+            закрытия обращения как посторонние сведения о продукте. Если пользователь прямо спрашивает о механике
+            поддержки, отвечай только подтверждённой пользовательской информацией; иначе скажи, что документация этого
+            не описывает, без внутренних ticket details.
+            Не придумывай адрес приложения: не генерируй localhost, IP, port или URL. Адрес допустим только если точный
+            стабильный домен явно передан в подтверждённых материалах. Не выполняй действия с банковскими данными,
+            импортами, счетами или транзакциями. Не добавляй вопрос о продолжении диалога: backend добавит его сам.
         """.trimIndent()
     }
 }

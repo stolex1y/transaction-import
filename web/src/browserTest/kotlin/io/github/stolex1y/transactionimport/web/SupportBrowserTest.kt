@@ -11,7 +11,7 @@ import kotlin.test.assertTrue
 
 class SupportBrowserTest {
     @Test
-    fun a01SupportAnswerShowsRealCitationAndRestoresChronologicalHistory() = withSupportApp(
+    fun a01SupportAnswerKeepsRagEvidenceHiddenAndRestoresChronologicalHistory() = withSupportApp(
         listOf(ANSWER, ANSWER),
     ) { fixture, page ->
         openSupport(page, fixture.baseUrl)
@@ -20,10 +20,10 @@ class SupportBrowserTest {
         val firstAnswer = page.locator("#support-message-list .support-message.assistant").last()
         assertTrue(firstAnswer.textContent().contains("Новый импорт"))
         assertTrue(firstAnswer.textContent().contains("Есть ли ещё вопросы?"))
-        assertTrue(firstAnswer.locator(".support-citations").textContent().contains("Руководство по интерфейсу"))
+        assertEquals(0, page.locator(".support-citations").count())
         assertNoTicketMetadata(page)
 
-        clickAndWaitForSupportPost(page, "Продолжить с ответом «Да, есть ещё вопрос»") {
+        clickAndWaitForSupportPost(page, "Продолжить с ответом «Да»") {
             page.locator("#support-quick-replies button").first().click()
         }
         sendQuestion(page, QUESTION)
@@ -37,6 +37,7 @@ class SupportBrowserTest {
             "() => document.querySelectorAll('#support-message-list .support-message').length === 6",
         )
         assertEquals(transcriptBeforeReload, page.locator("#support-message-list").innerText())
+        assertEquals(0, page.locator(".support-citations").count())
         assertNoTicketMetadata(page)
     }
 
@@ -46,17 +47,17 @@ class SupportBrowserTest {
     ) { fixture, page ->
         openSupport(page, fixture.baseUrl)
         sendQuestion(page, QUESTION)
-        clickAndWaitForSupportPost(page, "Продолжить обращение") {
+        clickAndWaitForSupportPost(page, "Выбрать ответ «Да»") {
             page.locator("#support-quick-replies button").first().click()
         }
         assertEquals(listOf("open"), fixture.ticketStatuses())
         sendQuestion(page, QUESTION)
-        clickAndWaitForSupportPost(page, "Закрыть обращение") {
+        clickAndWaitForSupportPost(page, "Выбрать ответ «Нет»") {
             page.locator("#support-quick-replies button").last().click()
         }
 
         assertEquals(
-            "Обращение завершено. Если появится новый вопрос, напишите его здесь.",
+            "Хорошо! Если появятся вопросы, напишите их здесь.",
             page.locator("#support-message-list .support-message.assistant").last().locator("p").textContent(),
         )
         assertEquals(listOf("closed"), fixture.ticketStatuses())

@@ -1435,13 +1435,6 @@ html[data-theme="light"] .agent-body select {
     white-space: pre-wrap;
 }
 
-.support-citations {
-    margin: 12px 0 0;
-    padding-left: 20px;
-    color: var(--agent-muted);
-    font-size: 0.9rem;
-}
-
 .support-quick-replies {
     display: flex;
     flex-wrap: wrap;

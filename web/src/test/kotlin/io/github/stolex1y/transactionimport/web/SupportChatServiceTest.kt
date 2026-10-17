@@ -48,7 +48,7 @@ import kotlin.test.assertFailsWith
 
 class SupportChatServiceTest {
     @Test
-    fun supportAnswersWithRetrievedSourcesAndPersistsTicketFreeTranscript() = runBlocking {
+    fun supportAnswersWithRagEvidenceWithoutExposingCitationsAndPersistsTicketFreeTranscript() = runBlocking {
         val fixture = fixture(listOf(ANSWER))
         try {
             val view = fixture.service.sendMessage("Как начать новый импорт банковской выписки?")
@@ -57,12 +57,6 @@ class SupportChatServiceTest {
             assertEquals(2, view.messages.size)
             assertEquals("assistant", assistant.role)
             assertTrue(assistant.text.contains("Есть ли ещё вопросы?"))
-            assertTrue(assistant.citations.any { it.sourceId == "support-faq.md" })
-            assertTrue(
-                assistant.citations.all {
-                    it.sourceId in setOf("support-faq.md", "user-guide.md") && it.section.isNotBlank()
-                },
-            )
             assertEquals(
                 AgentConfig("support-provider", "support-model", "support-reasoning"),
                 fixture.resolvedConfigs.single(),
@@ -72,6 +66,7 @@ class SupportChatServiceTest {
             assertTrue(fixture.provider.requests.single().messages.first().content.contains("Новый импорт"))
 
             val serialized = Json.encodeToString(view)
+            assertFalse(serialized.contains("\"citations\""))
             assertFalse(serialized.contains("ticketId"))
             assertFalse(serialized.contains("ticket_id"))
             assertFalse(serialized.contains("ticketStatus"))
@@ -84,7 +79,7 @@ class SupportChatServiceTest {
     }
 
     @Test
-    fun supportHttpApiUsesTrustedOriginAndNeverReturnsTicketMetadata() = runBlocking {
+    fun supportHttpApiUsesTrustedOriginAndNeverReturnsTicketOrCitationMetadata() = runBlocking {
         val fixture = fixture(listOf(ANSWER))
         val base = fakeAgentDependencies(fixture.databasePath.toString())
         val dependencies = AgentWebDependencies(
@@ -116,7 +111,9 @@ class SupportChatServiceTest {
                 }
                 assertEquals(HttpStatusCode.OK, accepted.status)
                 val response = accepted.bodyAsText()
-                assertTrue(response.contains("support-faq.md"))
+                assertTrue(response.contains("Новый импорт"))
+                assertFalse(response.contains("\"citations\""))
+                assertFalse(response.contains("support-faq.md"))
                 assertFalse(response.contains("ticket_id"))
                 assertFalse(response.contains("ticketId"))
                 assertFalse(response.contains("\"status\""))
@@ -140,6 +137,8 @@ class SupportChatServiceTest {
                 val historyBody = acceptedHistory.bodyAsText()
                 assertTrue(historyBody.contains("Как начать"))
                 assertTrue(historyBody.contains("Нажмите"))
+                assertFalse(historyBody.contains("\"citations\""))
+                assertFalse(historyBody.contains("support-faq.md"))
                 assertFalse(historyBody.contains("ticket_id"))
                 assertFalse(historyBody.contains("ticketId"))
                 assertFalse(historyBody.contains("\"status\""))
@@ -151,14 +150,13 @@ class SupportChatServiceTest {
     }
 
     @Test
-    fun emptyRetrievalAbstainsWithoutCallingTheProviderOrCreatingCitations() = runBlocking {
+    fun emptyRetrievalAbstainsWithoutCallingTheProviderOrExposingCitations() = runBlocking {
         val fixture = fixture(emptyList())
         try {
             val view = fixture.service.sendMessage("Почему не работает авторизация?")
             val assistant = view.messages.last()
 
-            assertTrue(assistant.text.contains("нет подтверждённой информации"))
-            assertTrue(assistant.citations.isEmpty())
+            assertTrue(assistant.text.contains("Не могу подтвердить это"))
             assertTrue(fixture.provider.requests.isEmpty())
             assertEquals("open", assertNotNull(fixture.ticketGateway.openTicket()).status)
         } finally {
@@ -173,7 +171,7 @@ class SupportChatServiceTest {
             fixture.service.sendMessage("Как начать новый импорт банковской выписки?")
             val response = fixture.service.sendMessage("А где это?")
 
-            assertTrue(response.messages.last().citations.isNotEmpty())
+            assertTrue(response.messages.last().text.contains("Есть ли ещё вопросы?"))
             val conversation = fixture.provider.requests.last().messages
                 .filter { it.role != "system" }
                 .joinToString("\n") { it.content }
@@ -194,7 +192,6 @@ class SupportChatServiceTest {
             val history = fixture.service.loadHistory()
 
             assertEquals(2, history.messages.size)
-            assertTrue(history.messages.last().citations.isNotEmpty())
             assertTrue(history.warning.orEmpty().contains("временно недоступен"))
             assertFalse(history.warning.orEmpty().contains("{broken"))
         } finally {
@@ -250,7 +247,7 @@ class SupportChatServiceTest {
 
             assertEquals(original.id, current.id)
             assertNotNull(current.reopenedAtEpochMs)
-            assertTrue(view.messages.last().citations.isNotEmpty())
+            assertTrue(view.messages.last().text.contains("Есть ли ещё вопросы?"))
             assertEquals("json_object", reopenFixture.provider.requests[1].responseFormat?.type)
         } finally {
             reopenFixture.close()
@@ -315,7 +312,7 @@ class SupportChatServiceTest {
 
             val response = fixture.service.sendMessage("Продолжаю тот же вопрос о новом импорте банковской выписки.")
             assertEquals(previousTicket.id, assertNotNull(fixture.ticketGateway.openTicket()).id)
-            assertTrue(response.messages.last().citations.isNotEmpty())
+            assertTrue(response.messages.last().text.contains("Есть ли ещё вопросы?"))
             val routingInput = fixture.provider.requests[2].messages
                 .filter { it.role != "system" }
                 .joinToString("\n") { it.content }

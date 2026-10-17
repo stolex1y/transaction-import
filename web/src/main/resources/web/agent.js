@@ -672,18 +672,6 @@ function renderSupportHistory() {
         text.textContent = message.text;
         item.append(role, text);
 
-        const citations = Array.isArray(message.citations) ? message.citations : [];
-        if (citations.length > 0) {
-            const sourceList = document.createElement("ul");
-            sourceList.className = "support-citations";
-            sourceList.setAttribute("aria-label", "Источники ответа");
-            for (const citation of citations) {
-                const source = document.createElement("li");
-                source.textContent = `${citation.title} — ${citation.section}`;
-                sourceList.append(source);
-            }
-            item.append(sourceList);
-        }
         elements.supportMessages.append(item);
     }
     const warning = supportView.warning;
@@ -700,8 +688,8 @@ function renderSupportQuickReplies() {
     const awaitingClarification = interaction.awaiting_clarification ?? interaction.awaitingClarification;
     const replies = awaitingFollowUp
         ? [
-            ["Да, есть ещё вопрос", "Да"],
-            ["Нет, закрыть обращение", "Нет"],
+            ["Да", "Да"],
+            ["Нет", "Нет"],
         ]
         : awaitingClarification
             ? [

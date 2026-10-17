@@ -58,11 +58,11 @@ Routes, возвращающие данные сессии или batch, в `Age
 | `GET /api/agent/support/messages` | Получить полную историю support-чата и текущие UI-флаги |
 | `POST /api/agent/support/messages` | Принять `{ "message": "..." }` и вернуть обновлённую историю; требует trusted loopback origin |
 
-Support response содержит message `id`, `role`, `text`, время создания, citations
-и флаги `awaiting_follow_up` / `awaiting_clarification`. DTO намеренно не содержит
-ticket ID, статус, пользовательские записи или MCP details. История читается и
-записывается отдельно от import sessions; внутреннее окно модели не ограничивает
-UI transcript.
+Support response содержит message `id`, `role`, `text`, время создания и флаги
+`awaiting_follow_up` / `awaiting_clarification`. Citation metadata и ticket
+fields не входят в HTTP DTO. Источники остаются внутренним evidence; transcript
+читается и записывается отдельно от import sessions, а внутреннее окно модели не
+ограничивает UI transcript.
 
 `WebApplication.kt` устанавливает JSON content negotiation и монтирует routes из
 `AgentWeb.agentRoutes`. DTO этих handlers объявлены в web-модуле. Для точного

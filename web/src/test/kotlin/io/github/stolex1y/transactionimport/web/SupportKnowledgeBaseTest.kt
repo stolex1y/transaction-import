@@ -30,4 +30,28 @@ class SupportKnowledgeBaseTest {
         assertEquals(2, passages.size)
         assertFalse(passages.any { it.text.isBlank() })
     }
+
+    @Test
+    fun retrievesRelevantEvidenceAcrossDocumentedUserFacingAreas() {
+        val knowledgeBase = SupportKnowledgeBase.load()
+        val cases = listOf(
+            "Как начать новый импорт выписки?" to "Как начать новый импорт выписки?",
+            "Как исправить операцию или её описание?" to "Как исправить операцию или её описание?",
+            "Как скачать только нужные операции?" to "Как скачать только нужные операции?",
+            "Где изменить provider, model, reasoning mode, категории и merchant rules?" to "Настройки",
+            "Как поставить периодическое задание на паузу, возобновить и посмотреть историю запусков?" to
+                "Фоновые задачи",
+            "Что показывает панель MCP и как обновить список интеграций?" to "MCP",
+            "Можно ли отправлять реальные финансовые данные внешнему LLM provider?" to
+                "Можно ли отправлять реальные финансовые данные внешнему LLM provider?",
+        )
+
+        for ((query, expectedSection) in cases) {
+            assertTrue(
+                knowledgeBase.retrieve(query).any { it.citation.section == expectedSection },
+                "No relevant support passage found for: $query",
+            )
+        }
+    }
+
 }
