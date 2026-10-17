@@ -20,7 +20,10 @@ Fork PR пропускаются. Результат публикуется ка
 3. Создайте synthetic same-repository PR и проверьте GitHub Actions run, review
    summary и inline threads. Реальный ключ и API не используются обычными тестами.
 
-Workflow даёт runner только `contents: read` и `pull-requests: write`.
+Workflow даёт runner `contents: write` и `pull-requests: write` для публикации
+review и разрешения исправленных threads. Это осознанный security tradeoff:
+токен технически позволяет менять repository contents, push и merge, хотя
+review utility таких операций не выполняет и исходные файлы PR не запускает.
 `GITHUB_TOKEN` создаётся GitHub автоматически. Лимит uncached input tokens по
 умолчанию — 30 000; его можно изменить в `with.max_uncached_input_tokens`.
 Модель embeddings запускается локально на CPU; Ollama, PyTorch и GPU не нужны.
