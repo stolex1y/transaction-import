@@ -20,9 +20,11 @@ Fork PR пропускаются. Результат публикуется ка
 3. Создайте synthetic same-repository PR и проверьте GitHub Actions run, review
    summary и inline threads. Реальный ключ и API не используются обычными тестами.
 
-Workflow даёт runner только `contents: read` и `pull-requests: write`.
-`GITHUB_TOKEN` создаётся GitHub автоматически. Лимит uncached input tokens по
-умолчанию — 30 000; его можно изменить в `with.max_uncached_input_tokens`.
+Workflow даёт runner `contents: write` и `pull-requests: write`.
+`contents: write` технически позволяет менять repository contents, хотя review
+utility не делает write/commit/push/merge operations; `GITHUB_TOKEN` создаёт GitHub.
+Лимит uncached input tokens по умолчанию — 30 000; его можно изменить в
+`with.max_uncached_input_tokens`.
 Модель embeddings запускается локально на CPU; Ollama, PyTorch и GPU не нужны.
 DeepSeek получает только допустимый diff PR, отобранные passages из
 документации/кода и краткие предыдущие findings, не весь проект.
