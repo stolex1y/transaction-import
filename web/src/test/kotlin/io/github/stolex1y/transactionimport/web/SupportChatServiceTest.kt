@@ -153,7 +153,7 @@ class SupportChatServiceTest {
     fun emptyRetrievalAbstainsWithoutCallingTheProviderOrExposingCitations() = runBlocking {
         val fixture = fixture(emptyList())
         try {
-            val view = fixture.service.sendMessage("Почему не работает авторизация?")
+            val view = fixture.service.sendMessage("Как испечь хлеб на закваске?")
             val assistant = view.messages.last()
 
             assertTrue(assistant.text.contains("Не могу подтвердить это"))
