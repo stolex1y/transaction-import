@@ -1,7 +1,7 @@
 package d32.review.fixture
 
 fun averageCentsPerOrder(totalCents: Long, orderCount: Int): Long? =
-    totalCents / orderCount
+    if (orderCount == 0) null else totalCents / orderCount
 
 fun firstItemOrNull(items: List<String>): String? =
     items[0]
