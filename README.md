@@ -132,7 +132,7 @@ code, но не защищает ключ от злонамеренного ре
 Приложение не записывает операции в финансовый ledger. Подготовленный JSON —
 конечный результат текущего сценария.
 
-## Реализованный Stateful workflow
+## Stateful workflow
 
 Приложение работает как сохраняемый агент вокруг текущего `ImportDraft`, а не
 как набор независимых LLM-вызовов:
@@ -167,7 +167,7 @@ code, но не защищает ключ от злонамеренного ре
   добавлять и снова экспортировать.
 
 Эти функции доступны через единственную пользовательскую web-точку
-`/agent`; удалённые экспериментальные страницы и API не публикуются.
+`/agent`.
 
 
 ## Web-интерфейс
@@ -250,55 +250,62 @@ raw bank `account_id` и transaction ID остаются внутри адапт
 серверов находятся в `config/agent.json` в поле `mcp_servers`: приложение
 использует только endpoint URL и не запускает MCP-процессы.
 
-Для demo откройте три терминала. В первом запускается fake target
-`bank-transactions-mcp-server`; приложение в третьем терминале использует тот же
-endpoint, что и для real target.
+### Локальный тестовый режим без банка
 
-Терминал 1 — fake T‑Банк MCP target:
+Для изолированной проверки банковской интеграции запустите fake target
+`bank-transactions-mcp-server`. Он не обращается к банку и использует ту же
+форму входа, что и реальный сервер.
+
+MCP-серверы — самостоятельные проекты:
+[банковский сервер](https://github.com/stolex1y/bank-transactions-mcp-server)
+и [сервер чеков](https://github.com/stolex1y/receipts-mcp-server).
+Примеры предполагают три соседние рабочие копии: `transaction-import`,
+`bank-transactions-mcp-server` и `receipts-mcp-server`. Каждый блок выполняется
+из их общего родительского каталога в отдельном терминале; при другом
+расположении замените путь в `cd` своим. Порты соответствуют endpoints в
+`config/agent.json`; при изменении конфигурации скорректируйте `MCP_PORT`.
+
+Банковский MCP-сервер с синтетическими данными:
 
 ```bash
-cd solutions/bank-transactions-mcp-server
-MCP_PORT=3001 ./gradlew runFakeServer
+cd bank-transactions-mcp-server
+MCP_PORT=3010 ./gradlew runFakeServer
 ```
 
-Терминал 2 — MCP-сервер чеков:
+MCP-сервер чеков в тестовом режиме:
 
 ```bash
-cd solutions/receipts-mcp-server
-./gradlew installDist
-MCP_PORT=3002 ./build/install/receipts-mcp-server/bin/receipts-mcp-server
+cd receipts-mcp-server
+MCP_PORT=3011 ./gradlew runFakeServer
 ```
 
-Терминал 3 — приложение:
+Приложение:
 
 ```bash
-cd solutions/transaction-import
+cd transaction-import
 ./gradlew :web:installDist
 ./web/build/install/transaction-import-web/bin/transaction-import-web
 ```
 
-1. проверьте каталог `MCP-серверы`, статус серверов и разрешённые tools;
-2. в единой форме T-Банка введите phone `+79990000000`, запросите SMS-код,
-   затем введите OTP `000000` и password `demo`;
-3. для ручной проверки выберите счёт и период с 1 по 30 сентября через
-   нативный date picker, затем нажмите `Вызвать get-account-transactions`;
-4. проверьте JSON результата: opaque `account_ref`, `amount_minor`, дату,
-   merchant и список нормализованных операций.
+Для тестового входа в панели `MCP` используйте телефон `+79990000000`,
+SMS-код `000000` и пароль `demo`. Это только синтетические значения,
+не банковские credentials.
 
-Fake target детерминирован, не обращается к банку и использует synthetic
-значения только внутри server demo. Он проходит тот же phone → OTP → password
+Fake target детерминирован и проходит тот же phone → OTP → password
 flow, что и real target; web UI не показывает выбор backend и не меняет форму.
 Ошибки остаются на текущем шаге и очищают введённые OTP/password.
 
-Для real сценария остановите fake target и запустите вместо него real target:
+### Подключение реальных источников
+
+Для работы с банком остановите fake target и запустите вместо него real target:
 
 ```bash
-cd solutions/bank-transactions-mcp-server
+cd bank-transactions-mcp-server
 ./gradlew installDist
-MCP_PORT=3001 ./build/install/bank-transactions-mcp-server/bin/bank-transactions-mcp-server
+MCP_PORT=3010 ./build/install/bank-transactions-mcp-server/bin/bank-transactions-mcp-server
 ```
 
-Приложение, его конфигурация и пользовательский flow при этом не меняются.
+Конфигурация приложения и форма входа при этом не меняются.
 Real login предназначен только для собственного read-only аккаунта: private API
 не является официальным публичным контрактом, credentials передаются только на
 loopback во время login. После успешного login session envelope сохраняется
@@ -476,7 +483,7 @@ allowlisted upstream text, fiscal/QR identifiers, данные покупате�
 `privacy_version`) скрывает seller/place/date-time, review text и привязанные
 позиции; MATCHED-связь остаётся fail-closed и не может вызвать подстановку
 другого чека. Чтение не меняет и автоматически не удаляет старые SQLite bytes:
-purge существующих пользовательских данных не входит в этот delivery.
+автоматическая очистка существующих пользовательских данных не выполняется.
 
 State-aware LLM planner — единственный semantic interpreter сообщений для
 чата, draft, bank/receipts и receipt rules. Фиксированные языковые списки,
@@ -502,20 +509,18 @@ correction не вызывает bank/receipt sources. Если новый bank 
 с разрешёнными tool definitions и получает нормализованные результаты, без
 ветвления по имени банка в маршрутизаторе. Текущий адаптер поддерживает только
 T‑Банк и legacy server ID; synthetic alternative adapter проверяет общую
-границу. Другой банк и plugin SDK этим изменением не реализуются.
+границу. Другие банки и plugin SDK не поддерживаются.
 
-Existing confirmed receipt rules remain scoped to `RECEIPT_MATCHING` and are
-available to the selector and scheduler. When such a rule is present, the
-selector may run even for a single locally eligible receipt; without scoped
-rules or an explicit interactive association instruction, one globally unique
-candidate is selected deterministically. Scheduler selector calls remain
-bounded to at most one sequential call per operation that needs a choice. The
-configured timeout is 15 seconds and there is no separate per-run selector cap.
+Подтверждённые receipt rules ограничены областью `RECEIPT_MATCHING` и доступны
+selector и scheduler. При наличии такого правила selector может вызываться
+даже для единственного локально подходящего чека. Без scoped rules и явной
+интерактивной инструкции по сопоставлению один глобально уникальный кандидат
+выбирается детерминированно.
 
-Selector — прямой LLM completion, не MCP tool call. Текущий контракт делает
-не более одного последовательного selector-вызова на операцию, которой нужен
-выбор; timeout — 15 секунд. По решению пользователя дополнительного per-run
-лимита нет. Теоретически 10 000 операций, каждая из которых требует выбора и
+Selector — прямой LLM completion, не MCP tool call. Он выполняет
+не более одного последовательного вызова на операцию, которой нужен
+выбор; timeout — 15 секунд. Дополнительного per-run лимита нет.
+Теоретически 10 000 операций, каждая из которых требует выбора и
 дожидается timeout, дают 41 ч 40 мин только selector-ожидания; это верхняя
 оценка, не обычная длительность. Отдельный intent-classifier чата scheduler
 не вызывает.
@@ -527,7 +532,7 @@ Cursor и история записываются только после усп
 ошибке cursor не продвигается, а повторный запуск получает окно с последней
 успешной даты. В агрегате запуска показывается число операций `Без чека`.
 
-Для D19 порядок handoff виден в trace: bank transactions → receipt
+Порядок обработки виден в trace: bank transactions → receipt
 candidates → receipt details → match proposal → session persistence →
 aggregate result. Поиск выполняется за общий период, `match-proposal` остаётся
 итогом по каждой операции.
@@ -562,14 +567,22 @@ port должны совпасть с `Host`. Запросы с untrusted `Sec-F
 до вызова provider. Same-origin UI и backend-запросы без `Origin` работают
 только с доверенным loopback `Host`.
 
-Локальный fake receipts target запускается так:
+Для изолированной проверки чеков без ФНС используйте fake target:
 
 ```bash
-cd solutions/receipts-mcp-server
-MCP_PORT=3002 ./gradlew runFakeServer
+cd receipts-mcp-server
+MCP_PORT=3011 ./gradlew runFakeServer
 ```
 
-Synthetic login использует `+79990000000`, OTP `000000` и password `demo`.
+Тестовый вход использует `+79990000000`, OTP `000000` и password `demo`.
+Для работы с ФНС остановите fake target и запустите реальный сервер:
+
+```bash
+cd receipts-mcp-server
+./gradlew installDist
+MCP_PORT=3011 ./build/install/receipts-mcp-server/bin/receipts-mcp-server
+```
+
 Real LKDR login не является частью обычных тестов: ввод выполняется только
 пользователем на loopback, разрешены только явные HTTPS endpoints, CAPTCHA,
 MFA и anti-bot обход не выполняются. Access/refresh envelope хранится в OS
@@ -931,7 +944,7 @@ provider при ошибке runtime.
 
 ### Изолированный benchmark импорта на Codex
 
-Benchmark использует только одобренный scrubbed fixture за сентябрь 2026 года.
+Benchmark использует только обезличенную fixture за сентябрь 2026 года.
 Обычные `./gradlew test` и CI остаются offline. Режимы запускаются отдельной
 Gradle-командой:
 
@@ -953,8 +966,8 @@ OMP process и сеть не запускаются. Profile и account identity
 messages/tools; вывод предназначен только для локальной проверки и не должен
 копироваться в публичные логи.
 Категории и receipt associations в `evaluation_only` — только локальный эталон
-scorer: они не включаются в provider-facing model input. Поэтому изменение
-утверждённых меток не изменило первый request body SHA.
+scorer: они не включаются в provider-facing model input и не влияют на SHA
+первого request body.
 
 `preflight` через `omp config get` проверяет отключённый fallback, показывает
 эффективную OMP route policy и запускает stdio gateway только до readiness.
@@ -967,9 +980,9 @@ identity остаётся неподтверждённой.
 `offline` выполняет три изолированных fake-повтора через production pipeline.
 Каждый preview автоматически подтверждается только в одноразовой SQLite DB,
 чтобы production `confirm()` вычислил inclusion; DB удаляется после scoring.
-Receipt fixture replay разрешает поиск от 14 дней до начала approved периода
-операций и до одного дня после его конца. Поиск всё равно фильтруется по
-утверждённой fixture; более широкий real-source доступ не включается.
+Receipt fixture replay разрешает поиск за 14 дней до начала периода операций
+из fixture и до одного дня после его конца. Поиск всё равно фильтруется по
+заданной fixture; более широкий real-source доступ не включается.
 Это проверяет путь, но не качество Codex. Агрегированный отчёт содержит только
 метрики, fingerprints и metadata, без prompt, ответов модели, merchant values и
 IDs. `--report=PATH` задаёт только путь этого redacted-отчёта; существующий файл
@@ -1004,19 +1017,19 @@ report остаётся redacted.
 В локальном transaction replay пустой optional `cursor` означает первую страницу;
 непустой нечисловой cursor остаётся ошибкой.
 
-Для утверждённой fixture пользователь разрешил benchmark egress и будущие запуски
-без повторного chat-разрешения. Полный Codex benchmark не ждёт ввода `SEND` или
+Режим `codex` передаёт данные внешнему провайдеру и требует явного запуска с
+двумя CLI flags, указанными ниже. Он не ждёт ввода `SEND` или
 `CONFIRM`: первый provider request каждого повтора автоматически пропускается
-только при точном совпадении approved body SHA и OMP route. Последующие model
-rounds в той же сессии входят в согласованный benchmark и могут содержать
-результаты replay из approved fixture. Production `confirm()` вызывается
+только при точном совпадении закреплённого body SHA и OMP route. Последующие model
+rounds в той же сессии могут содержать результаты replay из той же fixture.
+Production `confirm()` вызывается
 автоматически только после проверок: source error отсутствует, preview содержит
 50 строк и точный набор внутренних source refs из fixture, draft не изменён.
 Confirm работает только в одноразовой SQLite DB. Repeat-local failure записывается
 фиксированным safe code, база удаляется и следующие повторы продолжаются. После
 трёх исходов создаётся redacted report v3 с метриками успешных repeats и
 failure counts с разбивкой по фиксированным кодам. В report включены category
-accuracy/coverage и receipt accuracy по всем утверждённым меткам; variation
+accuracy/coverage и receipt accuracy по всем эталонным меткам; variation
 вычисляется только по успешным повторам. Отсутствующий/некорректный model ID,
 несовпадение SHA/route, preflight/readiness failure или ошибка удаления временной
 DB/OMP overlay останавливают прогон без report и следующих completions.
@@ -1025,7 +1038,7 @@ DB/OMP overlay останавливают прогон без report и след
 
 Перед egress учитывайте: первый body содержит application prompt и tools;
 последующие model rounds могут включать scrubbed результаты replay — операции
-и чеки из approved fixture. Локальный proxy не контролирует retention prompts
+и чеки из той же fixture. Локальный proxy не контролирует retention prompts
 и responses выбранным ChatGPT/OpenAI аккаунтом; OMP account identity остаётся
 неподтверждённой. Запускайте benchmark только если принимаете эту передачу и
 риск хранения данных на стороне провайдера.
@@ -1034,12 +1047,14 @@ DB/OMP overlay останавливают прогон без report и след
 ./gradlew :web:benchmarkImport --args='--mode=codex --allow-codex-egress --chat-egress-consent'
 ```
 
-`--chat-egress-consent` включает обязательный CLI gate; оно отражает уже полученное
-согласие в чате и не проверяет переписку самостоятельно.
+`--chat-egress-consent` — имя обязательного CLI gate.
+Флаг не проверяет переписку или полномочия оператора и не заменяет разрешение
+владельца данных на их передачу. Перед запуском проверьте fixture, payload
+через `inspect` и условия хранения данных выбранного провайдера.
 
-Используется точный согласованный selector
+Используется точный selector
 `openai-codex/gpt-6-luna:min` через `omp auth-gateway stdio`; поле
-`reasoning_effort=medium` остаётся отдельной настройкой утверждённой fixture.
+`reasoning_effort=medium` остаётся отдельной настройкой fixture.
 Gateway передаёт exact selector; допустимые response ID — `gpt-6-luna`,
 `openai-codex/gpt-6-luna` (canonical base) и точный selector
 `openai-codex/gpt-6-luna:min`. Redacted report сохраняет фактический ID без
@@ -1051,18 +1066,18 @@ catalog показывает base model, но не подтверждает `:mi
 запускаются. Child process заменяет унаследованный `PI_CONFIG_FILES`
 временным fallback-only overlay; OMP auth profile остаётся доступным, но
 настройки, существовавшие только в `PI_CONFIG_FILES` (включая возможный account
-routing), не применяются. Если выбор аккаунта зависит от таких настроек, egress
-не разрешайте, пока не согласован безопасный способ выбора.
+routing), не применяются. Если выбор аккаунта зависит от таких настроек, не
+разрешайте egress, пока не настроен и не проверен безопасный способ выбора.
 
-Одноразовый режим запускается только явной командой:
+Диагностический режим с одним запросом запускается явной командой:
 
 ```bash
 ./gradlew :web:benchmarkImport --args='--mode=diagnostic --allow-codex-egress --chat-egress-consent'
 ```
 
-Он требует exact одобренный body SHA и route, отправляет не более одной
-completion и прекращается до обработки tool calls, preview, scoring и report.
-Этот режим не является benchmark и не разрешает полные повторы.
+Он требует точного совпадения закреплённых body SHA и route, отправляет не более
+одной completion и прекращается до обработки tool calls, preview, scoring и report.
+Этот режим не является полным benchmark.
 
 Полный прогон запускается отдельной командой:
 
@@ -1071,8 +1086,8 @@ completion и прекращается до обработки tool calls, previ
 ```
 
 Каждый repeat автоматически проверяет SHA первого provider request и effective
-route по exact approved values; при несовпадении request не отправляется.
-Последующие rounds того же повтора ограничены согласованной fixture. До confirm
+route по закреплённым значениям; при несовпадении request не отправляется.
+Последующие rounds того же повтора ограничены той же fixture. До confirm
 runner проверяет 50 строк, точный набор внутренних source refs против fixture,
 `draft == null` и отсутствие receipt-source error. Три isolated DB/session/OMP
 gateway дают по одному outcome: scored metrics либо fixed safe failure code;
@@ -1094,7 +1109,7 @@ benchmark DB. Receipt accuracy проверяет все 50 меток: 42 бе�
 import/failure, сравнения DeepSeek и Ollama в отдельных сессиях через два
 loopback fake и отдельный opt-in smoke реальной модели. Fake acceptance задаёт
 `LOCAL_PROVIDER_ACCEPTANCE_BASE_URL` и `LOCAL_PROVIDER_ACCEPTANCE_REQUIRED=true`;
-fixture-only `D27_FAKE_DEEPSEEK_TOKEN` уходит только в loopback fake, cloud API
+тестовый токен уходит только в loopback fake, cloud API
 keys пусты и реальные cloud calls не выполняются. Для отдельного real smoke запустите локальный Ollama
 runtime и Transaction Import, затем выполните:
 

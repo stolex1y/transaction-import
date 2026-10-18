@@ -74,4 +74,4 @@ request/response shape сверяйтесь с `AgentWeb.kt`; эта кратк�
 - `core/src/commonMain/kotlin/io/github/stolex1y/transactionimport/core/StructuredImport.kt`.
 - `web/src/main/kotlin/io/github/stolex1y/transactionimport/web/WebApplication.kt`.
 - `web/src/main/kotlin/io/github/stolex1y/transactionimport/web/AgentWeb.kt`.
-- `README.md`, раздел «Реализованный Stateful workflow».
+- `README.md`, раздел «Stateful workflow».

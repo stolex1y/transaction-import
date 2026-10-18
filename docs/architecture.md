@@ -68,8 +68,7 @@ tools: backend сам валидирует структурированный ro
 
 ## Источники
 
-- `README.md`, разделы «Реализованный Stateful workflow» и «Локальный MCP и
-  T-Банк flow».
+- `README.md`, разделы «Stateful workflow» и «Локальный MCP и T-Банк flow».
 - `settings.gradle.kts` и `*/build.gradle.kts`.
 - `web/src/main/kotlin/io/github/stolex1y/transactionimport/web/WebApplication.kt`.
 - `web/src/main/kotlin/io/github/stolex1y/transactionimport/web/AgentWeb.kt`.
